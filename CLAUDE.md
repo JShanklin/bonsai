@@ -244,13 +244,13 @@ LAN); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
 named after the rpi boards in the cascade. `install.sh` also adds the qemu `C`
 binfmt flag (sudo inside), builds with `--network host`, and writes the ssh
 config + known_hosts entry. Boards boot systemd (`CMD /sbin/init`): the
-Containerfile builds mavlink-router v4 from source in a builder stage, copies
-`containers/rootfs/` over `/` and enables every unit in
-`rootfs/etc/systemd/system/` (plus ssh and mavlink-router), so user services
-are unit files dropped there. Drop-ins there clear `ImportCredential=` on
-systemd's tmpfiles/sysusers units, whose credential mounts fail under qemu-user;
-mavlink-router installs under `/usr` only (a real `/lib` would replace Debian's
-`/lib → usr/lib` link). See `containers/README.md`.
+Containerfile copies `containers/rootfs/` over `/` and enables every regular
+unit file in `rootfs/etc/systemd/system/` (links are skipped: Debian's
+`sshd.service` alias), plus ssh, so user services are unit files dropped there;
+`example.service` + `/etc/example.conf` show the pattern. Drop-ins there clear
+`ImportCredential=` on systemd's tmpfiles/sysusers units, whose credential
+mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
+(Debian links those into `/usr`). See `containers/README.md`.
 
 ## Docs
 

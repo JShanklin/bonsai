@@ -70,16 +70,13 @@ up:
 
 | service | does |
 |---------|------|
-| `mavlink-router` | passes MAVLink between the vehicle, ground stations and your tree. Its config is `rootfs/etc/mavlink-router/main.conf` |
+| `example` | an example to copy: logs a line from its config, `rootfs/etc/example.conf`, at each boot |
 | `bonsai-multicast` | sends multicast (`239.x` groups) out on the LAN, not the host link |
 
-The mavlink-router config it ships with:
-
-| from | to | how |
-|------|----|-----|
-| the vehicle, or a simulator on your computer | the board | UDP to its host link, port `14550` |
-| a ground station | the board | TCP to its address, port `5760` |
-| mavlink-router | your tree | UDP to `127.0.0.1:14560`: a root listening on `udpin:0.0.0.0:14560` |
+```sh
+ssh virtual-pi5 systemctl status example
+ssh virtual-pi5 journalctl -u example
+```
 
 **Adding your own service:** put its unit file in
 `rootfs/etc/systemd/system/`, and anything it needs (a config file, say)
@@ -93,7 +90,7 @@ to run a tree you've copied to `/home/pi`:
 ```ini
 [Unit]
 Description=greenhouse
-After=network-online.target mavlink-router.service
+After=network-online.target
 
 [Service]
 ExecStart=/home/pi/greenhouse
@@ -104,7 +101,8 @@ User=pi
 WantedBy=multi-user.target
 ```
 
-The same unit file works on the real Pi (see the deploy guide).
+The same unit file works on the real Pi (see the deploy guide). Delete
+`example.service` and `example.conf` once you have your own.
 
 The `systemd-*.service.d/` folders in `rootfs/etc/systemd/system/` keep
 systemd's own setup units working under CPU emulation; leave them in place.
@@ -115,7 +113,7 @@ systemd's own setup units working under CPU emulation; leave them in place.
 |------|----|
 | `install.sh` | sets a board up (or removes it); rerun it after any change here |
 | `boards/*.conf` | each board's CPU, memory, cores and addresses |
-| `Containerfile` | the system inside: Debian with systemd, ssh, sudo, network tools and mavlink-router. Add packages your Pi needs to its `apt-get` line |
+| `Containerfile` | the system inside: Debian with systemd, ssh, sudo and network tools. Add packages your Pi needs to its `apt-get` line |
 | `rootfs/` | files copied onto the board as they are laid out here: service units and their configs |
 | `board.container` | the Quadlet unit systemd runs each board from |
 | `bonsai-host.network`, `bonsai-lan.network` | the two networks every board shares |

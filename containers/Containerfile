@@ -28,7 +28,10 @@ COPY --chown=pi:pi authorized_keys /home/pi/.ssh/authorized_keys
 # Your services and their configs, from rootfs/. Every unit there is enabled,
 # so it starts each time the board boots.
 COPY rootfs/ /
-RUN for unit in /etc/systemd/system/*.service; do systemctl enable "$(basename "$unit")"; done \
+# Links there are aliases packages already enabled (Debian's sshd.service).
+RUN for unit in /etc/systemd/system/*.service; do \
+        [ -L "$unit" ] || systemctl enable "$(basename "$unit")"; \
+    done \
     && systemctl enable ssh mavlink-router
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]

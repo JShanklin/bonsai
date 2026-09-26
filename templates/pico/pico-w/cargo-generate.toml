@@ -1,0 +1,17 @@
+[template]
+cargo_generate_version = ">=0.18.0"
+description = "Pico device firmware — Embassy trunk + branches"
+# Linker files are copied verbatim, never run through the templating engine.
+exclude = ["memory.x", "build.rs"]
+
+# The wizard supplies chip/board via -d, so these normally don't prompt.
+[placeholders.chip]
+type = "string"
+prompt = "Which chip?"
+choices = ["rp2040", "rp2350"]
+default = "rp2040"
+
+[hooks]
+# Derives `target` and `probe_chip` from `chip` before any file is rendered.
+# Kept at the template root so cargo-generate removes it from the output cleanly.
+pre = ["pre.rhai"]

@@ -1,0 +1,25 @@
+# Quadlet unit for one virtual board: systemd runs it and starts it at boot.
+# install.sh fills in the @…@ values from boards/<board>.conf and copies it to
+# /etc/containers/systemd/virtual-<board>.container.
+[Unit]
+Description=Virtual @BOARD@ (bonsai)
+
+[Container]
+ContainerName=virtual-@BOARD@
+Image=localhost/virtual-@BOARD@
+HostName=raspberrypi
+# NET_ADMIN: the startup route for multicast. NET_RAW: ping and tcpdump.
+AddCapability=NET_ADMIN NET_RAW
+# The host link (ssh, cargo run, SITL) and the LAN address (phone, GCS).
+Network=bonsai-host.network:ip=@HOST_IP@,interface_name=host0
+Network=bonsai-lan.network:ip=@LAN_IP@,interface_name=lan0
+# /home/pi survives restarts; the rest resets to the image each start.
+Volume=virtual-@BOARD@-home:/home/pi
+# The real board's memory and cores, so a tree that fits here fits there.
+PodmanArgs=--memory=@MEMORY@ --cpus=@CPUS@
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

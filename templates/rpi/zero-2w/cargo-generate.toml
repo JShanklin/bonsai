@@ -1,0 +1,9 @@
+[template]
+cargo_generate_version = ">=0.18.0"
+description = "Raspberry Pi Zero 2 W Linux app — Embassy trunk + branches"
+
+[placeholders.chip]
+type = "string"
+prompt = "Which chip?"
+choices = ["bcm2710a1"]
+default = "bcm2710a1"

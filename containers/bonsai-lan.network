@@ -1,0 +1,7 @@
+# Quadlet network: each virtual board's own address on your LAN (macvlan).
+# Shared by every board; install.sh fills in your interface, network and router.
+[Network]
+Driver=macvlan
+Options=parent=@PARENT@
+Subnet=@SUBNET@
+Gateway=@GATEWAY@

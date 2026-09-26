@@ -1,0 +1,23 @@
+# bonsai tree config — read by the `bonsai` CLI, not by cargo. It decides how
+# each nutrient flows; `src/sap.rs` is generated from it plus the wiring. After
+# editing by hand, run `bonsai sync`. (`bonsai path` edits it for you.)
+
+[sap]
+# "paths" — one channel per nutrient: a branch wakes only for what it taps, and
+#           one flood can't starve other traffic. Capacities are per path.
+# "trunk" — one shared broadcast bus for every nutrient (the largest cap below).
+#           Least RAM; fine for small trees. Shapes are ignored.
+layout = "paths"
+
+# One table per nutrient (`bonsai feed` / `bonsai path` / `bonsai starve` keep
+# these in step with the Nutrient enum; a nutrient without one is broadcast, 4):
+#   shape = "broadcast"  PubSubChannel, one → many. Never waits; a tapper that
+#                        falls behind loses the oldest (counted). Events.
+#           "directed"   Channel, many → one. Releasing waits while full, so
+#                        nothing drops. Commands, TX queues.
+#           "state"      Watch, latest value; a late tapper still gets it. Link
+#                        status, armed state, position. (No cap.)
+#   cap   = how many nutrients the path queues.
+[nutrients.Beat]
+shape = "broadcast"
+cap = 2

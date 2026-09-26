@@ -1,0 +1,23 @@
+[template]
+cargo_generate_version = ">=0.18.0"
+description = "ESP32-S3 device firmware — Embassy trunk + branches"
+
+[placeholders.chip]
+type = "string"
+prompt = "Which chip?"
+choices = ["s3"]
+default = "s3"
+
+[placeholders.wifi]
+type = "bool"
+prompt = "WiFi?"
+default = false
+
+# Without WiFi, the tree has no wifi module.
+[conditional.'!wifi']
+ignore = ["src/wifi.rs"]
+
+[hooks]
+# Derives the Xtensa `target` triple from `chip`. Kept at the template root so
+# cargo-generate can remove it from the output cleanly.
+pre = ["pre.rhai"]

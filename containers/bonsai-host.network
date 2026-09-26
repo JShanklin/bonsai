@@ -1,0 +1,4 @@
+# Quadlet network: the link between your computer (10.89.0.1) and the
+# virtual boards (10.89.0.2 and up). Shared by every board.
+[Network]
+Subnet=10.89.0.0/24

@@ -1,0 +1,14 @@
+# target + runner derived from the chosen chip (see pre.rhai).
+[build]
+target = "{{target}}"
+
+[target.{{target}}]
+# Flash + run over a debug probe. `cargo install probe-rs-tools` first.
+runner = "probe-rs run --chip {{probe_chip}}"
+
+[env]
+DEFMT_LOG = "info"
+# RTT log buffer in RAM (defmt-rtt's default is 1024). 256 B holds plenty of
+# info-level logging; raise it if `probe-rs` reports dropped frames under heavy
+# debug logging.
+DEFMT_RTT_BUFFER_SIZE = "256"

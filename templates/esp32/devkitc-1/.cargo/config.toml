@@ -1,0 +1,24 @@
+[build]
+target = "{{target}}"
+
+[target.{{target}}]
+# Flash + monitor over USB; espflash decodes the defmt log stream.
+runner = "espflash flash --monitor"
+rustflags = [
+    "-C", "link-arg=-Wl,-Tlinkall.x",   # esp-hal's linker script (must be present)
+    "-C", "link-arg=-Tdefmt.x",         # defmt
+    "-C", "link-arg=-nostartfiles",
+]
+
+[env]
+DEFMT_LOG = "info"
+{% if wifi %}# The network src/wifi.rs joins (leave the password empty for an open one).
+# To keep the password out of git, delete it here and export WIFI_PASSWORD
+# instead: a variable set in your shell wins over this file.
+WIFI_SSID = ""
+WIFI_PASSWORD = ""
+{% endif %}
+[unstable]
+# Xtensa has no prebuilt standard library, so cargo builds the parts the tree
+# uses.{% if wifi %} WiFi allocates, so it needs `alloc` too.{% endif %}
+build-std = [{% if wifi %}"alloc", {% endif %}"core"]

@@ -31,6 +31,7 @@ cargo run -- sync           # regenerate src/sap.rs from the wiring
 cargo run -- tap <branch> <Nutrient>     # branch consumes it (untap to reverse)
 cargo run -- release <branch> <Nutrient> # branch produces it (unrelease to reverse)
 cargo run -- list           # summarize the tree (device, flow graph, branches)
+cargo run -- retarget <board>  # move the tree to another board of its family
 cargo test                  # run the unit tests (src/main.rs + src/flow.rs)
 cargo test marker_matches_whole_line_not_substring   # run a single test by name
 cargo install --path .      # put `bonsai` on PATH (embeds templates/ into the binary)
@@ -161,6 +162,17 @@ dispatched in `main()`:
   and only wipes on success (a failed regen leaves the tree intact); preserves
   `.git/`. The pure helpers (`parse_board`, `parse_package_name`,
   `device_from_board`) are unit-tested; the fs orchestration is not.
+- **`retarget <board>`** (`retarget`): moves a tree to another board of the
+  same MCU family (refuses across families). Renders the new board's template
+  to a temp dir, then takes only its board-owned parts: `retargeted_manifest`
+  (the stamp line, template dependencies via `updated_manifest`, `[profile]`),
+  `retargeted_config` (the whole `.cargo/config.toml`, keeping the tree's
+  `[env]` values), `BOARD_FILES` (`build.rs`, `memory.x`,
+  `rust-toolchain.toml`) and `retargeted_main` (main.rs's first doc line, only
+  while it's still the generated one). Lists the changed files and asks y/N,
+  then reapplies the tree's build tools. Branches and the rest of `src/` are
+  untouched. The pure helpers are unit-tested (round trips between the Pi
+  templates); the fs orchestration is not.
 - **`ide`** (`ide` → `setup_ide`): generates a project-local Zed rust-analyzer
   setup for **esp/Xtensa** trees only. Xtensa isn't in mainline Rust and Zed's
   rust-analyzer sends `cargo metadata --lockfile-path`, which the esp cargo fork

@@ -127,6 +127,7 @@ bonsai list                                     flow graph, branches, warnings
 bonsai sync                                     regenerate the sap after hand edits
 bonsai update                                   refresh template crates and Cargo.lock
 bonsai regrow                                   reset the tree to a fresh template
+bonsai retarget <board>                         move the tree to another board of its family
 bonsai ide                                      Zed rust-analyzer setup (ESP32)
 bonsai tools [<tool> …]                         build tools: sccache, mold, zigbuild, bacon
 ```

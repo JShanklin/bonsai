@@ -2,36 +2,20 @@
 # board's CPU, booting systemd and reached over ssh like the real one.
 # Add packages your Pi needs to the apt-get line, and files (services, their
 # configs) under rootfs/, then rerun install.sh <board>.
-
-# mavlink-router isn't packaged for Debian, so it's built from source once;
-# the result is cached until this stage changes.
-FROM docker.io/library/debian:bookworm AS mavlink-router
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates meson ninja-build g++ pkg-config \
-    && git clone --depth 1 --branch v4 --recurse-submodules --shallow-submodules \
-        https://github.com/mavlink-router/mavlink-router /src \
-    && meson setup /src/build /src --buildtype=release --prefix=/usr \
-        -Dsystemdsystemunitdir=/usr/lib/systemd/system \
-    && ninja -C /src/build \
-    && DESTDIR=/out ninja -C /src/build install
-
 FROM docker.io/library/debian:bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
         systemd systemd-sysv dbus openssh-server sudo iproute2 iputils-ping tcpdump socat \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -s /bin/bash -G sudo,adm,systemd-journal pi \
     && echo 'pi ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pi
-# Only /usr: on Debian /lib is a link into /usr, and copying a real /lib over
-# it would break every program.
-COPY --from=mavlink-router /out/usr/ /usr/
 COPY --chown=pi:pi authorized_keys /home/pi/.ssh/authorized_keys
 # Your services and their configs, from rootfs/. Every unit there is enabled,
-# so it starts each time the board boots.
+# so it starts each time the board boots. Links there are aliases packages
+# already enabled (Debian's sshd.service).
 COPY rootfs/ /
-# Links there are aliases packages already enabled (Debian's sshd.service).
 RUN for unit in /etc/systemd/system/*.service; do \
         [ -L "$unit" ] || systemctl enable "$(basename "$unit")"; \
     done \
-    && systemctl enable ssh mavlink-router
+    && systemctl enable ssh
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]

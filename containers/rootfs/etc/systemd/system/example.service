@@ -1,0 +1,14 @@
+# An example service: logs a line from its config at each boot. Copy it for
+# your own (a program in /home/pi, say), or delete it and example.conf.
+[Unit]
+Description=Example service (bonsai virtual board)
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/example.conf
+ExecStart=/bin/sh -c 'echo "$MESSAGE"'
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -39,6 +39,30 @@ real ARMv6 code for the Zero W. See [Build tools](build-tools.md).
 **No Pi at hand?** A [virtual Pi](virtual-pi.md) runs the same ARM build on
 your computer, with its own address on your network.
 
+**Moving to another Pi** (a Zero W tree onto a Pi 5, say):
+
+```sh
+bonsai retarget pi5
+```
+
+```
+…
+retarget `orb` from zero-w to pi5. Your code stays; these change:
+  ~ Cargo.toml
+  ~ .cargo/config.toml
+  ~ src/main.rs
+  (.cargo/config.toml keeps its [env] values and build tools; other hand edits
+   there, and in the files above, are replaced by the pi5 template's)
+continue? [y/N] y
+build tools: sccache, zigbuild (in .cargo/config.toml)
+`orb` now builds for pi5. Pins and devices (serial ports, GPIO) may
+differ between boards: check the ones your branches open.
+```
+
+It swaps the build target, linker, runner and release profile for the new
+board's. Branches, nutrients and `BONSAI_PI` stay. It moves between boards of
+one family only: Pi to Pi, Pico to Pico, ESP32 to ESP32.
+
 **On the Pi itself,** `cargo build --release` and `cargo run --release` work as
 they are, and `cargo run` runs the program in place instead of copying it.
 

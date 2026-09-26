@@ -110,10 +110,9 @@ otherwise (see [Deploy](deploy.md)). Then `BONSAI_PI=virtual-zero-w cargo run
 
 | from | to | use |
 |------|----|-----|
-| your computer (SITL, QGroundControl, mavlink-router) | the virtual Pi | its host link, `10.89.0.2` |
+| your computer (ssh, a simulator, a ground station) | the virtual Pi | its host link, `10.89.0.2` |
 | the virtual Pi | your computer | `10.89.0.1` |
 | a phone or another computer | the virtual Pi | its LAN address, `192.168.1.250` |
-| a simulator on your computer, through mavlink-router | the tree | send to `10.89.0.2:14550`; the tree listens on `udpin:0.0.0.0:14560` |
 | the virtual Pi, to a multicast group (`239.x.x.x`) | the LAN | goes out on `lan0` |
 
 For example, a simulator on your computer sends MAVLink to `10.89.0.2:14550`,
@@ -145,17 +144,18 @@ run the install again.
 
 ## Services
 
-The board boots systemd, like Raspberry Pi OS, with mavlink-router already
-running. A simulator on your computer sends MAVLink to `10.89.0.2:14550`, a
-ground station connects with TCP to port `5760`, and a root in your tree
-listening on `udpin:0.0.0.0:14560` gets the traffic. To change those, or to
-start your tree at boot with its own unit file, see
-[`containers/README.md`](../../containers/README.md#services).
+The board boots systemd, like Raspberry Pi OS, so a service runs the same way
+it will on the real Pi. It comes with one example, which logs a line at each
+boot:
 
 ```sh
-ssh virtual-pi5 systemctl status mavlink-router
-ssh virtual-pi5 journalctl -u mavlink-router -f
+ssh virtual-pi5 systemctl status example
+ssh virtual-pi5 journalctl -u example
 ```
+
+To start your own program at boot (your tree, say), add a unit file under
+`containers/rootfs/`; see
+[`containers/README.md`](../../containers/README.md#services).
 
 ## How it differs from a real Pi
 
@@ -174,4 +174,5 @@ ssh virtual-pi5 journalctl -u mavlink-router -f
 | `sudo: effective uid is not 0` inside | rerun `install.sh`: it turns on the emulation setting `sudo` needs |
 | `Unable to locate package` while building | a network hiccup; the build already uses host networking, so run it again |
 | `the board didn't answer on 10.89.0.2` | `journalctl -u virtual-pi5` shows why it didn't start |
+| `tcpdump: can't get TPACKET_V3 header len` inside | tcpdump can't capture under emulation; run your computer's in the board's network: `sudo nsenter -t "$(sudo podman inspect -f '{{.State.Pid}}' virtual-pi5)" -n tcpdump -ni any udp port 14550` |
 | the phone can't see it | Wi-Fi (see step 2), or a firewall on your computer blocking the LAN address |

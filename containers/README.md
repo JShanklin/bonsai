@@ -116,7 +116,7 @@ systemd's own setup units working under CPU emulation; leave them in place.
 | `Containerfile` | the system inside: Debian with systemd, ssh, sudo and network tools. Add packages your Pi needs to its `apt-get` line |
 | `rootfs/` | files copied onto the board as they are laid out here: service units and their configs |
 | `board.container` | the Quadlet unit systemd runs each board from |
-| `bonsai-host.network`, `bonsai-lan.network` | the two networks every board shares |
+| `bonsai-host.network`, `bonsai-lan.network` | the two networks every board shares. The LAN one is macvlan on a wire and ipvlan on Wi-Fi (access points only pass your computer's MAC); `install.sh` picks, and rebuilds it when you move between them |
 
 `install.sh` does the one-time work: it checks the CPU emulation (and turns
 on the setting `sudo` needs inside), builds the image with your ssh key,

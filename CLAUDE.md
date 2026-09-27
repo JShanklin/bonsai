@@ -255,7 +255,12 @@ rootful container (`sudo containers/install.sh <board> [remove]`). One shared
 macvlan on a wire, ipvlan on Wi-Fi, since access points drop frames from other
 MACs; `install.sh` fills in `@DRIVER@`, falls back to macvlan when netavark is
 older than 1.5, and recreates the network, restarting its boards, when its
-driver/parent/subnet changed); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
+driver/parent/subnet changed). On Wi-Fi, incoming multicast often never
+reaches an ipvlan board (the driver drops it), so `VIRTUAL_PI_RELAY="group:port
+…"` makes one `bonsai-relay@<board>-<n>` host service each (socat joins the
+group on the Wi-Fi interface and sends every datagram to the board's host
+link; settings in `/etc/bonsai/relay-*.env`, kept across installs when the
+variable is unset, removed by an empty value, a wired install or `remove`); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
 named after the rpi boards in the cascade. `install.sh` also adds the qemu `C`
 binfmt flag (sudo inside), builds with `--network host`, and writes the ssh
 config + known_hosts entry. Boards boot systemd (`CMD /sbin/init`): the

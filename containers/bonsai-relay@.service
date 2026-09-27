@@ -1,0 +1,18 @@
+# A relay for one multicast group, from Wi-Fi to a virtual board (install.sh
+# writes one per VIRTUAL_PI_RELAY entry, with its settings in
+# /etc/bonsai/relay-<instance>.env). On Wi-Fi the driver often drops multicast
+# on its way into the board's ipvlan link, so this computer joins the group
+# itself and forwards each packet, unchanged, to the board's host link.
+[Unit]
+Description=bonsai relay %i: Wi-Fi multicast to a virtual board
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/bonsai/relay-%i.env
+ExecStart=/usr/bin/socat -u -b 65535 UDP4-RECV:${PORT},ip-add-membership=${GROUP}:${DEV},reuseaddr UDP4-SENDTO:${TARGET}:${PORT}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -251,8 +251,11 @@ works from inside a generated tree where `templates/` isn't present.
 Not part of the CLI: shell + Podman Quadlet files that run a virtual Pi as a
 rootful container (`sudo containers/install.sh <board> [remove]`). One shared
 `Containerfile`, `board.container` template, and two shared networks
-(`bonsai-host` bridge 10.89.0.0/24 for the host, `bonsai-lan` macvlan for the
-LAN); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
+(`bonsai-host` bridge 10.89.0.0/24 for the host, `bonsai-lan` for the LAN:
+macvlan on a wire, ipvlan on Wi-Fi, since access points drop frames from other
+MACs; `install.sh` fills in `@DRIVER@`, falls back to macvlan when netavark is
+older than 1.5, and recreates the network, restarting its boards, when its
+driver/parent/subnet changed); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
 named after the rpi boards in the cascade. `install.sh` also adds the qemu `C`
 binfmt flag (sudo inside), builds with `--network host`, and writes the ssh
 config + known_hosts entry. Boards boot systemd (`CMD /sbin/init`): the
@@ -270,7 +273,7 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
   `foundations/` (read in order; builds the running **greenhouse** project on
   the rpi zero-2w template, so it runs on a PC) and `guides/` (short
   self-contained recipes: roots over UDP/TCP/serial/MAVLink, wire format, GPIO,
-  testing, deploy, a virtual Pi (arm64 Podman container, qemu, macvlan), CI,
+  testing, deploy, a virtual Pi (arm64 Podman container, qemu, macvlan/ipvlan), CI,
   troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold

@@ -75,12 +75,23 @@ key, and hands the board to systemd. From then on it starts at boot, with
 nothing to run. It also adds a `virtual-pi5` host to `~/.ssh/config` and
 trusts its key, so ssh doesn't ask.
 
-**Use a wired connection.** The script warns when the default route is Wi-Fi:
-most access points drop the LAN address's traffic. To use another interface,
-or another LAN address:
+**On Wi-Fi** the LAN link works differently. Access points drop traffic from
+any device address (MAC) but your computer's, so on Wi-Fi the board shares your
+computer's MAC (ipvlan) instead of having its own (macvlan, used on a wire).
+The script picks by itself and says so:
+
+```
+virtual-pi5: wlan0 is Wi-Fi: the LAN link uses ipvlan
+```
+
+Moving between Wi-Fi and a wire? Run the install again; it rebuilds the LAN
+link for the new connection and restarts the boards on it. Guest networks and
+phone hotspots may still keep devices from reaching each other. To use another
+interface, LAN address or driver:
 
 ```sh
 sudo VIRTUAL_PI_LAN_DEV=enp4s0 VIRTUAL_PI_LAN_IP=192.168.1.40 containers/install.sh pi5
+sudo VIRTUAL_PI_LAN_DRIVER=macvlan containers/install.sh pi5
 ```
 
 ## 3. Deploy
@@ -176,4 +187,5 @@ To start your own program at boot (your tree, say), add a unit file under
 | `unable to find network with name or ID systemd-bonsai-host` (in `journalctl -u virtual-<board>`) | the shared network was deleted while its unit still counted as done: `sudo systemctl restart bonsai-host-network.service bonsai-lan-network.service`, then `sudo systemctl reset-failed virtual-<board>` and `sudo systemctl restart virtual-<board>`. `install.sh` does this itself now |
 | `the board didn't answer on 10.89.0.2` | `journalctl -u virtual-pi5` shows why it didn't start |
 | `tcpdump: can't get TPACKET_V3 header len` inside | tcpdump can't capture under emulation; run your computer's in the board's network: `sudo nsenter -t "$(sudo podman inspect -f '{{.State.Pid}}' virtual-pi5)" -n tcpdump -ni any udp port 14550` |
-| the phone can't see it | Wi-Fi (see step 2), or a firewall on your computer blocking the LAN address |
+| the phone can't see it | a guest network or hotspot keeping devices apart (see step 2), you changed between Wi-Fi and a wire without installing again, or a firewall on your computer blocking the LAN address |
+| `netavark … has no ipvlan` while installing | Podman's network helper is older than 1.5: update podman and netavark, or use a wire |

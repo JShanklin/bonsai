@@ -30,8 +30,10 @@ command -v systemctl >/dev/null || die "needs systemd, which runs the virtual bo
 if [ "${2:-}" = remove ]; then
     systemctl stop "$name.service" 2>/dev/null || true
     rm -f "$units/$name.container"
-    # The shared networks go with the last board.
+    # The shared networks go with the last board. Stop their units too, or
+    # systemd keeps them "active" and won't recreate the networks next install.
     if ! ls "$units"/virtual-*.container >/dev/null 2>&1; then
+        systemctl stop bonsai-host-network.service bonsai-lan-network.service 2>/dev/null || true
         rm -f "$units/bonsai-host.network" "$units/bonsai-lan.network"
     fi
     systemctl daemon-reload
@@ -98,6 +100,13 @@ sed -e "s|@BOARD@|$board|g" -e "s|@HOST_IP@|$HOST_IP|" -e "s|@LAN_IP@|$lan_ip|" 
     -e "s|@MEMORY@|$MEMORY|" -e "s|@CPUS@|$CPUS|" \
     "$here/board.container" > "$units/$name.container"
 systemctl daemon-reload
+# A network unit runs once and stays "active", so if its network was deleted
+# since (a remove, or by hand) systemd won't make it again: rerun it. Only when
+# missing: restarting it would also restart every board that uses it.
+for net in host lan; do
+    podman network exists "systemd-bonsai-$net" || systemctl restart "bonsai-$net-network.service"
+done
+systemctl reset-failed "$name.service" 2>/dev/null || true
 systemctl restart "$name.service"
 
 # 5. ssh: a `virtual-<board>` host, and its key trusted so nothing asks.

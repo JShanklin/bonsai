@@ -173,6 +173,7 @@ To start your own program at boot (your tree, say), add a unit file under
 | `no emulation for linux/arm64 yet` | step 1: install qemu (on Arch, both packages) |
 | `sudo: effective uid is not 0` inside | rerun `install.sh`: it turns on the emulation setting `sudo` needs |
 | `Unable to locate package` while building | a network hiccup; the build already uses host networking, so run it again |
+| `unable to find network with name or ID systemd-bonsai-host` (in `journalctl -u virtual-<board>`) | the shared network was deleted while its unit still counted as done: `sudo systemctl restart bonsai-host-network.service bonsai-lan-network.service`, then `sudo systemctl reset-failed virtual-<board>` and `sudo systemctl restart virtual-<board>`. `install.sh` does this itself now |
 | `the board didn't answer on 10.89.0.2` | `journalctl -u virtual-pi5` shows why it didn't start |
 | `tcpdump: can't get TPACKET_V3 header len` inside | tcpdump can't capture under emulation; run your computer's in the board's network: `sudo nsenter -t "$(sudo podman inspect -f '{{.State.Pid}}' virtual-pi5)" -n tcpdump -ni any udp port 14550` |
 | the phone can't see it | Wi-Fi (see step 2), or a firewall on your computer blocking the LAN address |

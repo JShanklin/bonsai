@@ -23,8 +23,8 @@
 | `` `Tick` is a name the generated code uses; pick another`` | a message named like part of the wiring (`Tick`, `Packet`, `Edge`…) | another name |
 | ``[edge.net] a udp edge needs `bind` `` or `[edge.net] baud: a udp edge takes bind, to, join, iface, reply` | an edge's settings don't fit its kind | the [edge guides](../README.md#guides-pick-what-you-need) list each kind's keys |
 | `a branch can't send to itself; keep that state in the branch` | `bonsai wire x M x` | keep it in the branch's struct instead |
-| `this tree was grown by an older bonsai (Embassy, src/sap.rs)` | a bonsai 1 tree | plant a new tree and move each branch's logic into a `process` |
-| `` `bonsai tap` is from bonsai 1; now it's …`` | a bonsai 1 command | the message names its replacement |
+| `this tree was grown by an older bonsai (Embassy, src/sap.rs)` | a tree from the old (Embassy) bonsai | plant a new tree and move each branch's logic into a `process` |
+| `` `bonsai tap` is from the old (Embassy) bonsai; now it's …`` | a command of the old bonsai | the message names its replacement |
 | ``note: no `// bonsai:input-arm` line in src/branches/x.rs`` | the marker was deleted | put `// bonsai:input-arm` back as the last line inside `match input`, and add the arm it names |
 
 A marker moved to the end of an arm by `cargo fmt` (`} // bonsai:input-arm`)

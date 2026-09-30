@@ -664,7 +664,7 @@ impl App {
     }
 }
 
-/// Who wrote a log line: `14:05:03.123Z  INFO pulse: beat` → `pulse`.
+/// Who wrote a log line: `14:05:03.123Z  INFO sensor: 26.5 °C` → `sensor`.
 pub fn source(line: &str) -> Option<&str> {
     let rest = line.get(14..)?.trim_start();
     let rest = rest.split_once(' ')?.1;
@@ -730,9 +730,9 @@ mod tests {
     use super::*;
 
     const REPORT: &str = "bonsai-top 1\t1500\t3\t40\t0\n\
-         branch\tpulse\t3\t0\t0\t12\t5\n\
+         branch\tsensor\t3\t0\t0\t12\t5\n\
          edge\tnet\tretrying\t1\t2\t0\t1\tbind x\n\
-         log\t14:05:03.123Z  INFO pulse: beat\n\
+         log\t14:05:03.123Z  INFO sensor: 26.5 °C\n\
          end\n\
          bonsai-top 1\t2000\t4\t40\t0\n\
          end\n";
@@ -748,7 +748,7 @@ mod tests {
         assert_eq!(
             s.branches,
             [Branch {
-                name: "pulse".into(),
+                name: "sensor".into(),
                 inputs: 3,
                 sent: 0,
                 panics: 0,
@@ -758,7 +758,7 @@ mod tests {
         );
         assert_eq!(s.edges[0].state, "retrying");
         assert_eq!(s.edges[0].error, "bind x");
-        assert_eq!(s.logs, ["14:05:03.123Z  INFO pulse: beat"]);
+        assert_eq!(s.logs, ["14:05:03.123Z  INFO sensor: 26.5 °C"]);
         let s = read_snapshot(&mut r).unwrap().unwrap();
         assert_eq!(s.uptime_ms, 2000);
         assert!(s.branches.is_empty());
@@ -809,7 +809,10 @@ mod tests {
 
     #[test]
     fn log_lines_name_their_source() {
-        assert_eq!(source("14:05:03.123Z  INFO pulse: beat"), Some("pulse"));
+        assert_eq!(
+            source("14:05:03.123Z  INFO sensor: 26.5 °C"),
+            Some("sensor")
+        );
         assert_eq!(source("14:05:03.123Z ERROR gps: x: y"), Some("gps"));
         assert_eq!(source("short"), None);
     }

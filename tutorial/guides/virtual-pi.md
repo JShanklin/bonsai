@@ -128,9 +128,7 @@ BONSAI_PI=virtual-pi5 cargo run --release
 ```
      Running `sh -c '[ "$(uname -m)" = aarch64 ] && exec "$@"
 …
-10:40:50.159Z  INFO bonsai: running
-10:40:50.161Z  INFO pulse: beat
-10:40:50.661Z  INFO pulse: beat
+11:47:26.319Z  INFO bonsai: running
 ```
 
 The tree's runner copies the binary with `scp` and runs it over `ssh`, so the

@@ -699,7 +699,7 @@ fn edge_types(e: &EdgeCfg) -> (String, String) {
     }
 }
 
-/// A wire's variant in `Msg`: `PulseBeat` for pulse sending Beat,
+/// A wire's variant in `Msg`: `SensorReading` for sensor sending Reading,
 /// `AtakToTak` for atak sending to the tak edge (one per edge it feeds).
 fn msg_variant(from: &str, message: &str) -> String {
     format!("{}{}", camel(from), message)

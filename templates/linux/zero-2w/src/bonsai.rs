@@ -228,7 +228,7 @@ async fn shutdown() {
 
 /// The logger behind `error!`, `warn!`, `info!` and `debug!`. Lines go to
 /// stderr (journald keeps them for a service) as
-/// `14:05:03.123Z  INFO pulse: beat`: UTC time, level, who wrote it.
+/// `14:05:03.123Z  INFO sensor: 26.5 °C`: UTC time, level, who wrote it.
 pub mod log {
     use std::cell::Cell;
     use std::collections::VecDeque;
@@ -429,7 +429,7 @@ pub mod log {
         }
     }
 
-    /// Everything after the time: `  INFO pulse: beat`.
+    /// Everything after the time: `  INFO sensor: 26.5 °C`.
     fn line(level: Level, source: &str, message: fmt::Arguments) -> String {
         format!(" {} {source}: {message}", level.label())
     }
@@ -476,13 +476,13 @@ pub mod log {
         fn filter_takes_a_default_and_per_source_levels() {
             let (f, bad) = Filter::parse("warn, gps=debug,tak=off");
             assert!(bad.is_empty());
-            assert!(f.allows(Level::Error, "pulse"));
-            assert!(!f.allows(Level::Info, "pulse"));
+            assert!(f.allows(Level::Error, "sensor"));
+            assert!(!f.allows(Level::Info, "sensor"));
             assert!(f.allows(Level::Debug, "gps"));
             assert!(!f.allows(Level::Error, "tak"));
             let (f, bad) = Filter::parse("");
             assert!(bad.is_empty());
-            assert!(f.allows(Level::Info, "pulse") && !f.allows(Level::Debug, "pulse"));
+            assert!(f.allows(Level::Info, "sensor") && !f.allows(Level::Debug, "sensor"));
             let (f, bad) = Filter::parse("loud,gps=chatty");
             assert_eq!(bad, ["loud", "gps=chatty"]);
             assert!(f.allows(Level::Info, "gps"));
@@ -493,8 +493,8 @@ pub mod log {
             let t = UNIX_EPOCH + std::time::Duration::from_millis(86_400_000 * 3 + 50_703_123);
             assert_eq!(time(t), "14:05:03.123Z");
             assert_eq!(
-                line(Level::Info, "pulse", format_args!("beat")),
-                "  INFO pulse: beat"
+                line(Level::Info, "sensor", format_args!("26.5 °C")),
+                "  INFO sensor: 26.5 °C"
             );
             assert_eq!(
                 line(Level::Error, "gps", format_args!("x")),
@@ -505,8 +505,8 @@ pub mod log {
         #[test]
         fn a_branch_being_processed_tags_its_lines() {
             assert_eq!(source(), "bonsai");
-            let outer = enter("pulse");
-            assert_eq!(source(), "pulse");
+            let outer = enter("sensor");
+            assert_eq!(source(), "sensor");
             enter(outer);
             assert_eq!(source(), "bonsai");
         }
@@ -729,13 +729,13 @@ pub mod stats {
                 events: 3,
                 max_event_us: 40,
                 inbox: 0,
-                branches: vec![("pulse".into(), [3, 0, 0, 12, 5])],
+                branches: vec![("sensor".into(), [3, 0, 0, 12, 5])],
                 edges: vec![("net".into(), "retrying", [1, 2, 0, 1], "bind\tx".into())],
             };
             assert_eq!(
                 render(&s, &["a line".into()]),
                 "bonsai-top 1\t1500\t3\t40\t0\n\
-                 branch\tpulse\t3\t0\t0\t12\t5\n\
+                 branch\tsensor\t3\t0\t0\t12\t5\n\
                  edge\tnet\tretrying\t1\t2\t0\t1\tbind x\n\
                  log\ta line\n\
                  end\n"

@@ -932,7 +932,6 @@ mod tests {
             "src/settings.rs",
             "src/wiring.rs",
             "src/branches/mod.rs",
-            "src/branches/pulse.rs",
             "src/edges/mod.rs",
         ];
         for &board in &board_names() {
@@ -1037,7 +1036,7 @@ mod tests {
                     && tree::with_macro_use(main).is_none(),
                 "linux/{board}/src/main.rs needs `#[macro_use]` right above `mod bonsai;`"
             );
-            for f in ["bonsai.toml", "src/messages.rs", "src/branches/pulse.rs"] {
+            for f in ["bonsai.toml", "src/messages.rs"] {
                 assert_eq!(
                     file(f),
                     template_file("host", f),
@@ -1050,9 +1049,8 @@ mod tests {
                     .any(|l| l == tree::MESSAGE_MARKER)
             );
             assert!(
-                file("src/branches/pulse.rs")
-                    .lines()
-                    .any(|l| l.trim() == tree::INPUT_ARM)
+                cfg.branches.is_empty(),
+                "a new tree starts with no branches"
             );
         }
     }
@@ -1249,7 +1247,6 @@ mod tests {
             "src/settings.rs",
             "src/bonsai.rs",
             "src/branches/mod.rs",
-            "src/branches/pulse.rs",
             "src/edges/mod.rs",
             "Cargo.toml",
         ];
@@ -1262,29 +1259,33 @@ mod tests {
         let read = |f: &str| std::fs::read_to_string(f).unwrap();
 
         tree::branch_add("sensor").unwrap();
+        // The file's comments stay above the first table.
+        assert!(read("bonsai.toml").starts_with("# The tree's graph"));
+        assert!(read("bonsai.toml").ends_with("\n\n[branch.sensor]\n"));
         tree::branch_add("display").unwrap();
+        tree::branch_add("logger").unwrap();
         tree::message_add("Reading", &["temp_c:f32".to_string()]).unwrap();
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        tree::wire("sensor", &args(&["Reading", "display", "pulse"])).unwrap();
+        tree::wire("sensor", &args(&["Reading", "display", "logger"])).unwrap();
         tree::rate("sensor", "10").unwrap();
         tree::sync().unwrap();
 
         let toml = read("bonsai.toml");
         assert!(toml.contains("[branch.sensor]\nrate = 10\n"), "{toml}");
         assert!(
-            toml.contains("[[wire]]\nfrom = \"sensor\"\nmessage = \"Reading\"\nto = [\"display\", \"pulse\"]\n"),
+            toml.contains("[[wire]]\nfrom = \"sensor\"\nmessage = \"Reading\"\nto = [\"display\", \"logger\"]\n"),
             "{toml}"
         );
         assert!(read("src/branches/display.rs").contains(
             "            Input::Reading(_reading) => {}\n            // bonsai:input-arm\n"
         ));
-        assert!(read("src/branches/pulse.rs").contains("Input::Reading(_reading) => {}"));
+        assert!(read("src/branches/logger.rs").contains("Input::Reading(_reading) => {}"));
         assert!(read("src/branches/sensor.rs").contains("            Input::Tick => {}\n"));
         let wiring = read("src/wiring.rs");
         assert!(wiring.contains("impl Sends<Reading> for Out"), "{wiring}");
         assert!(
             read("src/branches/mod.rs")
-                .contains("pub mod display;\npub mod pulse;\npub mod sensor;\n")
+                .contains("pub mod display;\npub mod logger;\npub mod sensor;\n")
         );
 
         // A filled-in arm spanning lines is removed whole by unwire.
@@ -1347,13 +1348,14 @@ mod tests {
         assert!(!read("src/branches/display.rs").contains("Input::Link"));
         tree::edge_remove("link").unwrap();
 
-        tree::unwire("sensor", &args(&["Reading", "pulse"])).unwrap();
-        assert!(!read("src/branches/pulse.rs").contains("Input::Reading"));
+        tree::unwire("sensor", &args(&["Reading", "logger"])).unwrap();
+        assert!(!read("src/branches/logger.rs").contains("Input::Reading"));
         tree::unwire("sensor", &args(&["Reading"])).unwrap();
         assert!(!read("src/branches/display.rs").contains("Input::Reading"));
         tree::rate("sensor", "off").unwrap();
         assert!(!read("src/branches/sensor.rs").contains("Input::Tick"));
         tree::message_remove("Reading").unwrap();
+        tree::branch_remove("logger").unwrap();
         tree::branch_remove("display").unwrap();
         tree::branch_remove("sensor").unwrap();
 
@@ -2377,7 +2379,7 @@ fn main() -> io::Result<()> {
         }
         [old, ..] if renamed(old).is_some() => {
             eprintln!(
-                "`bonsai {old}` is from bonsai 1; now it's {}",
+                "`bonsai {old}` is from the old (Embassy) bonsai; now it's {}",
                 renamed(old).unwrap_or_default()
             );
             std::process::exit(2);
@@ -2390,7 +2392,7 @@ fn main() -> io::Result<()> {
     }
 }
 
-/// What a bonsai 1 command became.
+/// What a command of the old (Embassy) bonsai became.
 fn renamed(cmd: &str) -> Option<&'static str> {
     Some(match cmd {
         "snip" => "`bonsai branch remove <name>`",

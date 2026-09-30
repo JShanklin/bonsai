@@ -40,8 +40,7 @@ templates/
         wiring.rs          # GENERATED: each branch's Input/Out, and the core
         settings.rs        # GENERATED: [branch.<name>] values as constants
         branches/
-          mod.rs           # GENERATED: one `pub mod` per branch
-          pulse.rs         # the built-in heartbeat, `rate = 2`
+          mod.rs           # GENERATED: one `pub mod` per branch (none in a new tree)
         edges/
           mod.rs           # GENERATED: custom edges (+ serial when used)
 ```
@@ -119,8 +118,8 @@ Passed by the wizard via `-d`: `chip` and `board` (`template_defines` in
 1. Add it to `BOARDS` in `src/main.rs`.
 2. Create `templates/linux/<board>/`: copy an existing board and adjust the
    target bits (`Cargo.toml`'s stamp and profile, `.cargo/config.toml`, the
-   first doc line of `src/main.rs`). `bonsai.toml`, `src/messages.rs` and
-   `src/branches/pulse.rs` are the same on every board (tested).
+   first doc line of `src/main.rs`). `bonsai.toml` and `src/messages.rs`
+   are the same on every board (tested), and a new tree has no branches.
 
 ## Rendering
 

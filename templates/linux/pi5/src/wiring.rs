@@ -24,55 +24,14 @@ pub enum EdgeIn {
 pub enum Msg {
 }
 
-pub mod pulse {
-    use super::*;
-
-    /// What pulse receives.
-    #[derive(Debug)]
-    pub enum Input {
-        /// Its `rate` ticked.
-        Tick,
-    }
-
-    /// Where pulse sends: `out.send(message)`, `out.to_<edge>(..)`.
-    #[derive(Debug, Default)]
-    pub struct Out {
-        pub(super) sent: Vec<Msg>,
-    }
-
-    impl Out {
-        /// Send `message` down its wire. Only what pulse is wired to send
-        /// compiles.
-        pub fn send<M>(&mut self, message: M)
-        where
-            Self: Sends<M>,
-        {
-            Sends::send(self, message);
-        }
-
-        /// Everything sent so far, oldest first: for tests.
-        pub fn sent(&self) -> &[Msg] {
-            &self.sent
-        }
-    }
-
-    impl crate::bonsai::Outbox for Out {
-        fn count(&self) -> usize {
-            self.sent.len()
-        }
-    }
-}
-
 /// Every branch and edge, set up and waiting for events.
 pub struct Core {
-    pulse: Slot<branches::pulse::Pulse>,
     queue: VecDeque<Msg>,
 }
 
 impl Core {
     pub fn new() -> Self {
         Core {
-            pulse: Slot::new("pulse"),
             queue: VecDeque::new(),
         }
     }
@@ -95,7 +54,7 @@ impl Tree for Core {
     type EdgeIn = EdgeIn;
 
     fn rates(&self) -> Vec<(usize, f64)> {
-        vec![(0, 2.0)]
+        vec![]
     }
 
     fn start_edges(&mut self, events: &mpsc::Sender<Event<EdgeIn>>) {
@@ -105,7 +64,6 @@ impl Tree for Core {
     fn handle(&mut self, event: Event<EdgeIn>) {
         let mut queue = std::mem::take(&mut self.queue);
         match event {
-            Event::Tick(0) => queue.extend(self.pulse.process(pulse::Input::Tick).sent),
             Event::Tick(_) => {}
         }
         drain(&mut queue, |message, queue| self.deliver(message, queue));

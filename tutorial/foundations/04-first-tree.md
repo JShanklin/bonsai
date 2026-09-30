@@ -60,19 +60,16 @@ Until then, `cargo local` it is.
 The first build takes a minute. Then:
 
 ```
-10:40:50.159Z  INFO bonsai: running
-10:40:50.161Z  INFO pulse: beat
-10:40:50.661Z  INFO pulse: beat
-10:40:51.161Z  INFO pulse: beat
+11:47:26.319Z  INFO bonsai: running
 ```
 
-twice a second. Each line is a **log line**: the time (UTC), how serious it
-is, who wrote it, and what they said. `pulse: beat` is the **pulse**, a
-built-in branch whose clock ticks twice a second, proof that the core is
-running. Stop it with Ctrl-C:
+That's a **log line**: the time (UTC), how serious it is, who wrote it, and
+what they said. The core is running, and waiting: a new tree has no
+branches, so nothing happens until you add some (next chapter). Stop it with
+Ctrl-C:
 
 ```
-10:41:03.455Z  INFO bonsai: stopping
+11:47:37.156Z  INFO bonsai: stopping
 ```
 
 ## What's inside
@@ -87,8 +84,7 @@ greenhouse/
     ├── main.rs       # the trunk: starts the core
     ├── messages.rs   # the messages branches send each other
     ├── branches/
-    │   ├── mod.rs    # GENERATED: the list of branches
-    │   └── pulse.rs  # the heartbeat
+    │   └── mod.rs    # GENERATED: the list of branches (none yet)
     ├── edges/
     │   └── mod.rs    # GENERATED: your own edges, if any
     ├── bonsai.rs     # GENERATED: the runtime (the core, edges, logs)
@@ -100,29 +96,13 @@ greenhouse/
 `src/messages.rs` every time the graph changes. Never edit them: your changes
 would be overwritten. Everything else is yours.
 
-`bonsai.toml` starts with one branch:
+`bonsai.toml` starts with comments only: what goes in it, with an example
+of each part. The bonsai commands add to it as you grow the tree, and keep
+the comments.
 
-```toml
-[branch.pulse]
-rate = 2
-```
-
-`rate = 2` gives the pulse an `Input::Tick` twice a second. Its whole
-`process`, in `src/branches/pulse.rs`, is:
-
-```rust
-fn process(&mut self, input: Input, out: &mut Out) {
-    let _ = out;
-    match input {
-        Input::Tick => info!("beat"),
-        // bonsai:input-arm
-    }
-}
-```
-
-The comment `// bonsai:input-arm` marks where bonsai adds an arm when you
-wire something new to a branch, and `// bonsai:message` in
-`src/messages.rs` marks where it adds messages. **Keep every `// bonsai:…`
+`src/messages.rs` has no messages yet, just the line `// bonsai:message`,
+which marks where `bonsai message add` puts new ones. Each branch you add
+gets a `// bonsai:input-arm` line the same way. **Keep every `// bonsai:…`
 comment:** they're where bonsai edits your files.
 
 ## Look at the tree
@@ -133,8 +113,7 @@ bonsai list
 
 ```
 tree: greenhouse  (zero-2w (bcm2710a1))
-branches, in the order the core runs them:
-  pulse  (ticks 2/s)
+branches: none yet (`bonsai branch add <name>`)
 wires: none yet (`bonsai wire <from> <Message> <to>`)
 ```
 

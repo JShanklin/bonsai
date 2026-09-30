@@ -108,7 +108,6 @@ bonsai list
 ```
 tree: greenhouse  (zero-2w (bcm2710a1))
 branches, in the order the core runs them:
-  pulse  (ticks 2/s)
   sensor  (ticks 1/s)
   watchdog
   display
@@ -293,59 +292,20 @@ cargo local
 ```
 
 ```
-10:41:46.537Z  INFO bonsai: running
-10:41:46.538Z  INFO pulse: beat
-10:41:46.538Z  INFO display: 26.5 °C, 55% humidity
-10:41:47.038Z  INFO pulse: beat
-10:41:47.538Z  INFO display: 28.0 °C, 55% humidity
-10:41:47.538Z  INFO pulse: beat
-10:41:48.038Z  INFO pulse: beat
-10:41:48.538Z  INFO display: 29.5 °C, 55% humidity
-10:41:48.538Z  INFO pulse: beat
-10:41:49.038Z  INFO pulse: beat
-10:41:49.538Z  INFO display: 31.0 °C, 55% humidity
-10:41:49.538Z  WARN display: too hot: 31.0 °C
-10:41:49.538Z  INFO pulse: beat
+11:48:05.717Z  INFO bonsai: running
+11:48:05.718Z  INFO display: 26.5 °C, 55% humidity
+11:48:06.719Z  INFO display: 28.0 °C, 55% humidity
+11:48:07.719Z  INFO display: 29.5 °C, 55% humidity
+11:48:08.718Z  INFO display: 31.0 °C, 55% humidity
+11:48:08.718Z  WARN display: too hot: 31.0 °C
+11:48:09.718Z  INFO display: 32.5 °C, 55% humidity
+11:48:09.718Z  WARN display: too hot: 32.5 °C
 ```
 
-Each line names the branch that wrote it. Notice the order at 10:41:49.538:
-the reading, *then* the alarm, *then* the next beat. The sensor's one tick
-set off everything the tree did about it before anything else happened.
-Chapter 6 explains why that's guaranteed.
-
-## Prune the pulse
-
-The display now shows the tree is alive, so the pulse can go:
-
-```sh
-bonsai branch remove pulse
-bonsai list
-```
-
-```
-removed branch pulse
-updated src/wiring.rs, src/branches/mod.rs
-tree: greenhouse  (zero-2w (bcm2710a1))
-branches, in the order the core runs them:
-  sensor  (ticks 1/s)
-  watchdog  (settings: limit_c10)
-  display
-wires:
-  sensor --Reading--> watchdog, display
-  watchdog --Alarm--> display
-```
-
-```
-10:42:01.672Z  INFO bonsai: running
-10:42:01.673Z  INFO display: 26.5 °C, 55% humidity
-10:42:02.674Z  INFO display: 28.0 °C, 55% humidity
-10:42:03.674Z  INFO display: 29.5 °C, 55% humidity
-10:42:04.674Z  INFO display: 31.0 °C, 55% humidity
-10:42:04.674Z  WARN display: too hot: 31.0 °C
-```
-
-Removing a branch also removes its wires, takes it off every `to` list, and
-removes the arms nothing feeds any more.
+Each line names the branch that wrote it. Notice 11:48:08.718: the reading,
+*then* the alarm, both from the sensor's one tick. The core did everything
+that tick set off before taking the next event. Chapter 6 explains why
+that's guaranteed.
 
 **`cargo fmt`** tidies your code, and will move `// bonsai:input-arm` up
 behind the last arm (`} // bonsai:input-arm`). That's fine: bonsai puts it

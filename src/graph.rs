@@ -29,7 +29,30 @@ pub struct RecordCfg {
     pub panics: bool,
     pub errors: bool,
     pub edges: bool,
+    /// Retention: None leaves the runtime's default (`KEEP_RUNS`, keep_days
+    /// 0, `MAX_FILE_KB`); 0 means no limit.
+    pub keep_runs: Option<u32>,
+    pub keep_days: Option<u32>,
+    pub max_file_kb: Option<u32>,
 }
+
+impl Default for RecordCfg {
+    fn default() -> Self {
+        RecordCfg {
+            dir: "logs".to_string(),
+            events: false,
+            panics: false,
+            errors: false,
+            edges: false,
+            keep_runs: None,
+            keep_days: None,
+            max_file_kb: None,
+        }
+    }
+}
+
+/// `[record]`'s retention keys: whole numbers, 0 for no limit.
+pub const RECORD_LIMITS: [&str; 3] = ["keep_runs", "keep_days", "max_file_kb"];
 
 /// The kinds of line `[record]` can keep, each its own file.
 pub const RECORD_KINDS: [&str; 4] = ["events", "panics", "errors", "edges"];
@@ -218,15 +241,17 @@ pub fn parse(src: &str) -> Result<Config, String> {
         let t = item
             .as_table()
             .ok_or("bonsai.toml: `record` is a table: [record]")?;
-        let mut record = RecordCfg {
-            dir: "logs".to_string(),
-            events: false,
-            panics: false,
-            errors: false,
-            edges: false,
-        };
+        let mut record = RecordCfg::default();
         for (key, item) in t.iter() {
             let bad = || format!("bonsai.toml: [record] {key} is true or false");
+            let limit = || {
+                item.as_integer()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .map(Some)
+                    .ok_or_else(|| {
+                        format!("bonsai.toml: [record] {key} is a whole number (0: no limit)")
+                    })
+            };
             match key {
                 "dir" => {
                     record.dir = item
@@ -239,10 +264,14 @@ pub fn parse(src: &str) -> Result<Config, String> {
                 "panics" => record.panics = item.as_bool().ok_or_else(bad)?,
                 "errors" => record.errors = item.as_bool().ok_or_else(bad)?,
                 "edges" => record.edges = item.as_bool().ok_or_else(bad)?,
+                "keep_runs" => record.keep_runs = limit()?,
+                "keep_days" => record.keep_days = limit()?,
+                "max_file_kb" => record.max_file_kb = limit()?,
                 _ => {
                     return Err(format!(
-                        "bonsai.toml: [record] {key}: it takes dir, {}",
-                        RECORD_KINDS.join(", ")
+                        "bonsai.toml: [record] {key}: it takes dir, {}, {}",
+                        RECORD_KINDS.join(", "),
+                        RECORD_LIMITS.join(", ")
                     ));
                 }
             }
@@ -1082,16 +1111,21 @@ pub mod {name} {{
         o.push_str(&configs);
     }
 
-    let record = cfg.record.clone().unwrap_or(RecordCfg {
-        dir: "logs".to_string(),
-        events: false,
-        panics: false,
-        errors: false,
-        edges: false,
-    });
+    let record = cfg.record.clone().unwrap_or_default();
+    let limit = |n: Option<u32>, default: &str| match n {
+        Some(n) => n.to_string(),
+        None => format!("crate::bonsai::record::{default}"),
+    };
     o.push_str(&format!(
-        "\n/// The run logs to keep, from [record].\nconst RECORD_CONFIG: crate::bonsai::record::Config = crate::bonsai::record::Config {{\n    dir: {:?},\n    events: {},\n    panics: {},\n    errors: {},\n    edges: {},\n}};\n",
-        record.dir, record.events, record.panics, record.errors, record.edges
+        "\n/// The run logs to keep, from [record].\nconst RECORD_CONFIG: crate::bonsai::record::Config = crate::bonsai::record::Config {{\n    dir: {:?},\n    events: {},\n    panics: {},\n    errors: {},\n    edges: {},\n    keep_runs: {},\n    keep_days: {},\n    max_file_kb: {},\n}};\n",
+        record.dir,
+        record.events,
+        record.panics,
+        record.errors,
+        record.edges,
+        limit(record.keep_runs, "KEEP_RUNS"),
+        record.keep_days.unwrap_or(0),
+        limit(record.max_file_kb, "MAX_FILE_KB")
     ));
     o.push_str(
         "\n/// The links, in bonsai.toml order (from, message, to): for `bonsai top`.\nconst LINKS: &[crate::bonsai::stats::LinkInfo] = &[\n",
@@ -1919,6 +1953,15 @@ to = ["b"]
             "{w}"
         );
         assert!(w.contains("    dir: \"/var/log/tree\",\n    events: true,\n    panics: false,\n    errors: false,\n    edges: true,\n"), "{w}");
+        // Retention: the runtime's defaults unless set; 0 is "no limit".
+        assert!(w.contains("    keep_runs: crate::bonsai::record::KEEP_RUNS,\n    keep_days: 0,\n    max_file_kb: crate::bonsai::record::MAX_FILE_KB,\n"), "{w}");
+        let kept = parse("[record]\nkeep_runs = 5\nkeep_days = 30\nmax_file_kb = 0\n").unwrap();
+        assert!(
+            render_links(&kept)
+                .contains("    keep_runs: 5,\n    keep_days: 30,\n    max_file_kb: 0,\n")
+        );
+        let err = parse("[record]\nkeep_runs = -1\n").unwrap_err();
+        assert!(err.contains("keep_runs is a whole number"), "{err}");
         // No table: nothing kept.
         assert!(parse("").unwrap().record.is_none());
         assert!(render_links(&parse("").unwrap()).contains("    events: false,\n"));
@@ -1926,7 +1969,7 @@ to = ["b"]
             ("events = \"yes\"", "[record] events is true or false"),
             (
                 "crashes = true",
-                "[record] crashes: it takes dir, events, panics, errors, edges",
+                "[record] crashes: it takes dir, events, panics, errors, edges, keep_runs",
             ),
             ("dir = \"\"", "[record] dir is a folder"),
         ] {

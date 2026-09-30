@@ -49,7 +49,8 @@ already works. bonsai is built to prevent those:
   started, with a file per kind of line: the events you mark with
   `record!("launch: altitude {alt}")`, panics, errors, edges coming and
   going. Every file starts with START and ends with END and why; a run with
-  no END was killed or lost power.
+  no END didn't shut down cleanly. Old runs are pruned (`keep_runs`,
+  `keep_days`), and long runs' files roll over (`max_file_kb`).
 - **Units the compiler checks.** `temp: Celsius`, `alt: Meters`, `speed:
   Knots`: comparing a temperature with a bare number, or adding meters to
   seconds, doesn't build. `Meters / Seconds` is `MetersPerSecond`, and each

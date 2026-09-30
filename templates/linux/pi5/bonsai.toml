@@ -27,3 +27,6 @@ events = true       # record!("…") from a branch or an edge
 panics = true       # a branch or an edge panicked
 errors = false      # every error!/warn! line
 edges = false       # edges coming up and going down
+keep_runs = 100     # run folders kept, this one included (0: all)
+keep_days = 0       # delete run folders older than this (0: never)
+max_file_kb = 10240 # past this, a file moves to <kind>.1.log (0: never)

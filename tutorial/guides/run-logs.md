@@ -74,6 +74,9 @@ events = true       # record!("…") from a branch or an edge
 panics = true       # a branch or an edge panicked
 errors = false      # every error!/warn! line
 edges = false       # edges coming up and going down
+keep_runs = 100     # run folders kept, this one included (0: all)
+keep_days = 0       # delete run folders older than this (0: never)
+max_file_kb = 10240 # past this, a file moves to <kind>.1.log (0: never)
 ```
 
 Switch one with `bonsai record`, which keeps the comments:
@@ -91,21 +94,50 @@ updated src/links.rs
 |------|-------|
 | `events.log` | every `record!(..)` |
 | `panics.log` | each panic in a branch or an edge, with where and why |
-| `errors.log` | every `error!` and `warn!` line, like `hub: WARN connect 127.0.0.1:1: Connection refused (os error 111); retrying in 100ms` |
+| `errors.log` | every `error!` and `warn!` line, like `hub: WARN connect 127.0.0.1:1: Connection refused (os error 111); retrying in 100ms`, whatever `BONSAI_LOG` shows on the console |
 | `edges.log` | each edge coming `up`, or going `down` and why |
 
 `bonsai record` alone shows what's kept; `bonsai list` shows it too.
 `bonsai record dir /var/log/greenhouse` moves the folders.
 
+## How much is kept
+
+Each run starts by tidying up after the older ones:
+
+- **`keep_runs`** (default 100): the oldest run folders go until at most
+  that many are left, this one included (`bonsai record keep_runs 20`).
+- **`keep_days`** (default 0, off): run folders older than this go too.
+- **`max_file_kb`** (default 10240, 10 MiB): a file that grows past it
+  moves to `<kind>.1.log` (replacing the one there) and a new one starts
+  with `(continued from events.1.log: this file reached max_file_kb)`. So a
+  long run keeps at most twice that per kind.
+
+Only run folders are ever deleted: a folder named like a run
+(`2026-09-30_14-00-05`), holding only the files a run writes, and not in
+use. A folder with anything else in it (your notes, a copy you made) is
+left alone, and so is a run still going. Trees sharing a `dir` don't
+delete each other's runs: a running tree holds a lock on the `.running`
+file in its folder. The run that tidied up says so under its START
+(`removed 6 old run folder(s) (keep_runs 3, keep_days 0)`).
+
+`0` means no limit for any of the three. A tree whose `[record]` doesn't
+name them (one planted before they existed) gets the defaults.
+
 ## A run that didn't end
 
-A tree that was killed (`kill -9`) or lost power writes no END line. The
-next run notices, and says so under its START line:
+A run that didn't shut down cleanly (the program was killed with `kill -9`,
+crashed outside a branch, or the computer lost power or was reset) writes
+no END line. The next run notices, and says so under its START line:
 
 ```
-2026-09-30 14:05:30.641 START greenhouse 0.1.0 on vm (pid 5181, UTC-04:00)
-2026-09-30 14:05:30.641 previous run 2026-09-30_18-05-28 has no END line: it was killed or lost power
+2026-09-30 23:53:27.878 START greenhouse 0.1.0 on vm (pid 13424, UTC+02:00)
+2026-09-30 23:53:27.878 previous run 2026-09-30_21-53-25 did not shut down cleanly (it has no END line)
 ```
+
+It can't tell why, so it doesn't guess. It reads only the last 4 KiB of
+each of that run's files, however big they are, and an END cut off
+mid-line doesn't count. A run still going (another tree sharing the
+folder) isn't mistaken for one that died.
 
 ## Where the folders go
 

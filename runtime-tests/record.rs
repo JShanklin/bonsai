@@ -18,8 +18,14 @@ fn configure() {
         panics: kinds.contains("panics"),
         errors: kinds.contains("errors"),
         edges: kinds.contains("edges"),
-        ..record::Config::DEFAULT
+        keep_runs: env_or("RT_KEEP_RUNS", record::KEEP_RUNS),
+        keep_days: env_or("RT_KEEP_DAYS", 0),
+        max_file_kb: env_or("RT_MAX_FILE_KB", record::MAX_FILE_KB),
     });
+}
+
+fn env_or(key: &str, default: u32) -> u32 {
+    std::env::var(key).map_or(default, |v| v.parse().unwrap())
 }
 
 fn stop_self() {
@@ -379,5 +385,125 @@ fn a_flood_of_records_is_dropped_visibly_with_bounded_memory() {
         hwm_kb(&ran.stdout) < 64 * 1024,
         "{} kB",
         hwm_kb(&ran.stdout)
+    );
+}
+
+/// An old run folder that ended cleanly, last touched `age_days` ago.
+fn old_run(dir: &Path, name: &str, age_days: u64) -> PathBuf {
+    let run = dir.join(name);
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(
+        run.join("events.log"),
+        "2000-01-01 00:00:00.000 START t 0.1.0 on h (pid 1, UTC)\n\
+         2000-01-01 00:00:05.000 END SIGTERM, after 5s\n",
+    )
+    .unwrap();
+    backdate(&run, age_days);
+    run
+}
+
+fn backdate(path: &Path, age_days: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(age_days * 86_400 + 60);
+    std::fs::File::open(path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+}
+
+#[test]
+fn old_runs_go_but_never_a_running_one_or_anything_else() {
+    let dir = scratch("retention");
+    // Oldest first: day 20 down to day 10.
+    let unrelated = old_run(&dir, "2000-01-01_09-00-00", 20);
+    std::fs::write(unrelated.join("notes.txt"), "mine").unwrap();
+    backdate(&unrelated, 20);
+    let olds: Vec<PathBuf> = (1..=6)
+        .map(|i| old_run(&dir, &format!("2000-01-0{i}_00-00-00"), 16 - i as u64))
+        .collect();
+    std::fs::create_dir_all(dir.join("photos")).unwrap();
+    // A tree still running, its folder made to look oldest of all.
+    let env = [("RT_DIR", dir.to_str().unwrap())];
+    let first = spawn(SCENARIO, &env);
+    std::thread::sleep(Duration::from_millis(800));
+    let running = runs(&dir)
+        .into_iter()
+        .find(|r| !r.starts_with(&unrelated) && !olds.contains(r) && r.join("events.log").is_file())
+        .expect("the running tree's folder");
+    backdate(&running, 30);
+    // keep_runs = 3: this run and the 2 newest others.
+    let ran = child(
+        SCENARIO,
+        &[env[0], ("RT_KEEP_RUNS", "3"), ("RT_STOP", "3")],
+        Duration::from_secs(10),
+    );
+    first.signal(libc::SIGTERM);
+    let _ = first.wait(Duration::from_secs(10));
+    assert!(ran.code == Some(0), "{ran:?}");
+    assert!(running.is_dir(), "a running tree's folder was deleted");
+    assert!(
+        unrelated.join("notes.txt").is_file(),
+        "a folder with other files was deleted"
+    );
+    assert!(
+        dir.join("photos").is_dir(),
+        "a folder that isn't a run was deleted"
+    );
+    // Past the limit, every plain old run went: what couldn't go (the
+    // running one, the one with notes.txt) and this run make the 3.
+    assert!(olds.iter().all(|r| !r.exists()), "{:?}", runs(&dir));
+    assert_eq!(runs(&dir).len(), 4, "3 runs and photos: {:?}", runs(&dir));
+    // The run that did it says so (found by its note: when the running
+    // tree stopped, its folder became the newest).
+    let said = runs(&dir)
+        .iter()
+        .filter_map(|r| std::fs::read_to_string(r.join("events.log")).ok())
+        .any(|t| t.contains("removed 6 old run folder(s)"));
+    assert!(said, "no run said what it removed");
+}
+
+#[test]
+fn runs_older_than_keep_days_go() {
+    let dir = scratch("keep-days");
+    let old = old_run(&dir, "2000-01-01_00-00-00", 40);
+    let recent = old_run(&dir, "2000-01-02_00-00-00", 2);
+    let ran = child(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("RT_KEEP_DAYS", "30"),
+            ("RT_KEEP_RUNS", "0"),
+            ("RT_STOP", "3"),
+        ],
+        Duration::from_secs(10),
+    );
+    assert!(ran.code == Some(0), "{ran:?}");
+    assert!(!old.exists() && recent.is_dir());
+}
+
+#[test]
+fn a_file_past_max_file_kb_moves_aside_and_the_new_one_ends_with_end() {
+    let dir = scratch("rotate");
+    let ran = child(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("RT_MAX_FILE_KB", "4"),
+            ("RT_BURST", "20"),
+            ("RT_STOP", "20"),
+        ],
+        Duration::from_secs(10),
+    );
+    assert!(ran.code == Some(0), "{ran:?}");
+    let run = runs(&dir).pop().unwrap();
+    let old = std::fs::metadata(run.join("events.1.log"))
+        .expect("events.1.log")
+        .len();
+    let now = read(run.join("events.log"));
+    assert!(old <= 5 * 1024, "events.1.log is {old} bytes");
+    assert!(now.len() <= 5 * 1024, "events.log is {} bytes", now.len());
+    assert!(now.contains("(continued from events.1.log"), "{now}");
+    assert!(
+        now.lines().last().unwrap().contains(" END SIGTERM"),
+        "{now}"
     );
 }

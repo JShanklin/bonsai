@@ -411,6 +411,15 @@ pub mod log {
     /// Log one line, from `source` (or whoever is running, when `None`).
     pub fn write(level: Level, source: Option<&str>, message: fmt::Arguments) {
         let source = source.unwrap_or_else(|| self::source());
+        // errors.log keeps every error and warning, whatever the console
+        // shows (BONSAI_LOG filters only the console and `bonsai top`).
+        if level <= Level::Warn && level != Level::Off {
+            super::record::write(
+                super::record::Kind::Errors,
+                source,
+                format_args!("{} {message}", level.label().trim()),
+            );
+        }
         let settings = settings();
         if !settings.filter.allows(level, source) {
             return;
@@ -436,13 +445,6 @@ pub mod log {
             // Not eprint!: that panics once stderr is gone, and a log line
             // mustn't take the tree down.
             let _ = std::io::stderr().write_all(shown.as_bytes());
-        }
-        if level <= Level::Warn {
-            super::record::write(
-                super::record::Kind::Errors,
-                source,
-                format_args!("{} {message}", level.label().trim()),
-            );
         }
         if let Ok(mut recent) = RECENT.lock() {
             let (lines, total) = &mut *recent;
@@ -574,6 +576,14 @@ pub mod record {
         pub panics: bool,
         pub errors: bool,
         pub edges: bool,
+        /// Run folders kept, this one included (0: all). Older ones are
+        /// deleted when a run starts.
+        pub keep_runs: u32,
+        /// Run folders older than this many days are deleted (0: never).
+        pub keep_days: u32,
+        /// A file this big (in KiB) moves to `<kind>.1.log`, replacing the
+        /// one there, and a new one starts (0: never).
+        pub max_file_kb: u32,
     }
 
     /// What a line is, and so which file it goes to.
@@ -597,6 +607,9 @@ pub mod record {
             panics: false,
             errors: false,
             edges: false,
+            keep_runs: KEEP_RUNS,
+            keep_days: 0,
+            max_file_kb: MAX_FILE_KB,
         };
     }
 
@@ -612,6 +625,16 @@ pub mod record {
             }
         }
 
+        /// Where a full file moves.
+        fn old_file(self) -> &'static str {
+            match self {
+                Kind::Events => "events.1.log",
+                Kind::Panics => "panics.1.log",
+                Kind::Errors => "errors.1.log",
+                Kind::Edges => "edges.1.log",
+            }
+        }
+
         fn on(self, config: &Config) -> bool {
             match self {
                 Kind::Events => config.events,
@@ -623,6 +646,17 @@ pub mod record {
     }
 
     static CONFIG: OnceLock<Config> = OnceLock::new();
+
+    /// Run folders kept unless `keep_runs` says otherwise.
+    pub const KEEP_RUNS: u32 = 100;
+    /// A file's size, in KiB, before it moves aside, unless `max_file_kb`
+    /// says otherwise: 10 MiB, so a kind's two files stay under 20 MiB.
+    pub const MAX_FILE_KB: u32 = 10 * 1024;
+    /// How much of a previous run's file is read to see how it ended.
+    const TAIL: u64 = 4096;
+    /// Held (flock) by a running tree in its run folder: a folder whose lock
+    /// is held belongs to a run still going.
+    const RUNNING: &str = ".running";
 
     /// Lines waiting for the writer thread, at most: past this, new lines
     /// are dropped (and counted), never waited for.
@@ -643,6 +677,7 @@ pub mod record {
             dir: PathBuf,
             kinds: Vec<Kind>,
             at: Local,
+            config: Config,
         },
         Line(Kind, String),
     }
@@ -709,7 +744,14 @@ pub mod record {
         let (tx, rx) = sync_channel(QUEUE);
         let at = Local::now();
         let _ = STARTED.set(Instant::now());
-        if tx.send(Job::Start { dir, kinds, at }).is_err() || QUEUE_TX.set(tx).is_err() {
+        let config = *config;
+        let start = Job::Start {
+            dir,
+            kinds,
+            at,
+            config,
+        };
+        if tx.send(start).is_err() || QUEUE_TX.set(tx).is_err() {
             return; // started already
         }
         let spawned = std::thread::Builder::new()
@@ -767,11 +809,17 @@ pub mod record {
     #[derive(Default)]
     struct Writer {
         files: [Option<BufWriter<File>>; 4],
+        /// Bytes in each file so far, for `max_file_kb`.
+        sizes: [u64; 4],
         /// Drops already noted in each file.
         noted: [u64; 4],
         flushed: Option<Instant>,
         synced: Option<Instant>,
         dirty: bool,
+        folder: Option<PathBuf>,
+        max_bytes: u64,
+        /// This run's lock, held until the writer ends.
+        lock: Option<File>,
     }
 
     impl Writer {
@@ -804,7 +852,12 @@ pub mod record {
 
         fn take(&mut self, job: Job) {
             match job {
-                Job::Start { dir, kinds, at } => self.start(&dir, &kinds, &at),
+                Job::Start {
+                    dir,
+                    kinds,
+                    at,
+                    config,
+                } => self.start(&dir, &kinds, &at, &config),
                 Job::Line(kind, text) => {
                     self.note_drops(kind);
                     self.put(kind, &text);
@@ -812,8 +865,12 @@ pub mod record {
             }
         }
 
-        fn start(&mut self, dir: &Path, kinds: &[Kind], at: &Local) {
-            let unfinished = last_run(dir).filter(|run| !finished(run));
+        fn start(&mut self, dir: &Path, kinds: &[Kind], at: &Local, config: &Config) {
+            // The run before this one, unless it's still going (another
+            // tree sharing the folder).
+            let unfinished = last_run(dir)
+                .filter(|run| !running(run))
+                .filter(|run| !finished(run));
             let folder = match new_folder(dir, &folder_name(at)) {
                 Ok(folder) => folder,
                 Err(e) => {
@@ -825,6 +882,9 @@ pub mod record {
                     return;
                 }
             };
+            self.lock = lock(&folder);
+            self.max_bytes = u64::from(config.max_file_kb) * 1024;
+            let removed = prune(dir, &folder, config);
             let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
             let mut start = format!(
                 "{} START {} {} on {} (pid {}, {})",
@@ -838,15 +898,25 @@ pub mod record {
             if let Some(run) = unfinished {
                 let name = run.file_name().unwrap_or_default().to_string_lossy();
                 start += &format!(
-                    "\n{} previous run {name} has no END line: it was killed or lost power",
+                    "\n{} previous run {name} did not shut down cleanly (it has no END line)",
                     stamp(at)
                 );
             }
+            if removed > 0 {
+                start += &format!(
+                    "\n{} removed {removed} old run folder(s) (keep_runs {}, keep_days {})",
+                    stamp(at),
+                    config.keep_runs,
+                    config.keep_days
+                );
+            }
+            self.folder = Some(folder.clone());
             for &kind in kinds {
                 let path = folder.join(kind.file());
                 match OpenOptions::new().create(true).append(true).open(&path) {
                     Ok(file) => {
                         self.files[kind as usize] = Some(BufWriter::new(file));
+                        self.sizes[kind as usize] = 0;
                         OPEN[kind as usize].store(true, Relaxed);
                         self.put(kind, &start);
                     }
@@ -877,6 +947,9 @@ pub mod record {
         }
 
         fn put(&mut self, kind: Kind, text: &str) {
+            if self.max_bytes > 0 && self.sizes[kind as usize] >= self.max_bytes {
+                self.rotate(kind);
+            }
             let Some(file) = self.files[kind as usize].as_mut() else {
                 return;
             };
@@ -894,7 +967,40 @@ pub mod record {
                     .and_then(|()| file.write_all(b"\n"))
             };
             match result {
-                Ok(()) => self.dirty = true,
+                Ok(()) => {
+                    self.dirty = true;
+                    self.sizes[kind as usize] += text.len() as u64 + 1;
+                }
+                Err(e) => self.fail(kind, &e),
+            }
+        }
+
+        /// Move a full file to `<kind>.1.log` (replacing the one there) and
+        /// start a new one that says so.
+        fn rotate(&mut self, kind: Kind) {
+            let Some(folder) = self.folder.clone() else {
+                return;
+            };
+            let Some(mut file) = self.files[kind as usize].take() else {
+                return;
+            };
+            let _ = file.flush();
+            drop(file);
+            let path = folder.join(kind.file());
+            let old = folder.join(kind.old_file());
+            let reopened = std::fs::rename(&path, &old)
+                .and_then(|()| OpenOptions::new().create(true).append(true).open(&path));
+            match reopened {
+                Ok(file) => {
+                    self.files[kind as usize] = Some(BufWriter::new(file));
+                    self.sizes[kind as usize] = 0;
+                    let note = format!(
+                        "{} (continued from {}: this file reached max_file_kb)",
+                        stamp(&Local::now()),
+                        kind.old_file()
+                    );
+                    self.put(kind, &note);
+                }
                 Err(e) => self.fail(kind, &e),
             }
         }
@@ -959,6 +1065,10 @@ pub mod record {
                 self.files[kind as usize] = None;
                 OPEN[kind as usize].store(false, Relaxed);
             }
+            if let Some(folder) = &self.folder {
+                let _ = std::fs::remove_file(folder.join(RUNNING));
+            }
+            self.lock = None;
         }
     }
 
@@ -1000,13 +1110,97 @@ pub mod record {
             .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
     }
 
-    /// Whether every file in a run's folder ends with its END line.
+    /// Whether every file in a run's folder ends with its END line. Reads
+    /// only each file's last `TAIL` bytes, however long it is.
     fn finished(run: &Path) -> bool {
         KINDS
             .iter()
             .map(|k| run.join(k.file()))
             .filter(|p| p.is_file())
-            .all(|p| std::fs::read_to_string(p).is_ok_and(|text| has_end(&text)))
+            .all(|p| tail(&p).is_some_and(|text| has_end(&text)))
+    }
+
+    /// The last `TAIL` bytes of a file, as text.
+    fn tail(path: &Path) -> Option<String> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = File::open(path).ok()?;
+        let len = file.metadata().ok()?.len();
+        file.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+        let mut bytes = Vec::with_capacity(TAIL as usize);
+        file.take(TAIL).read_to_end(&mut bytes).ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// Hold this run's lock in its folder, for as long as the file is open.
+    fn lock(folder: &Path) -> Option<File> {
+        use std::os::fd::AsRawFd;
+        let file = File::create(folder.join(RUNNING)).ok()?;
+        // SAFETY: flock on a descriptor we own.
+        let held = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        held.then_some(file)
+    }
+
+    /// Whether a run folder belongs to a tree still running: its lock is held.
+    fn running(run: &Path) -> bool {
+        use std::os::fd::AsRawFd;
+        let Ok(file) = File::open(run.join(RUNNING)) else {
+            return false;
+        };
+        // SAFETY: flock on a descriptor we own; closing it releases ours.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
+    }
+
+    /// Whether a folder holds only what a run writes (so it's safe to delete).
+    fn only_run_files(run: &Path) -> bool {
+        let known = |name: &str| {
+            name == RUNNING
+                || KINDS
+                    .iter()
+                    .any(|k| name == k.file() || name == k.old_file())
+        };
+        std::fs::read_dir(run).is_ok_and(|entries| {
+            entries.flatten().all(|e| {
+                e.file_type().is_ok_and(|t| t.is_file()) && known(&e.file_name().to_string_lossy())
+            })
+        })
+    }
+
+    /// Delete old run folders past `keep_runs` or `keep_days`, never this
+    /// one, one still running, or one holding anything a run didn't write.
+    /// Returns how many went.
+    fn prune(dir: &Path, this: &Path, config: &Config) -> usize {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        let mut runs: Vec<(SystemTime, PathBuf)> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p != this && p.is_dir())
+            .filter(|p| p.file_name().is_some_and(|n| is_run(&n.to_string_lossy())))
+            .filter_map(|p| Some((p.metadata().and_then(|m| m.modified()).ok()?, p)))
+            .collect();
+        runs.sort(); // oldest first
+        // Oldest first, delete what may be deleted until at most keep_runs
+        // are left (this one included); what may not still counts.
+        let keep = config.keep_runs.saturating_sub(1) as usize;
+        let max_age = Duration::from_secs(u64::from(config.keep_days) * 86_400);
+        let now = SystemTime::now();
+        let mut left = runs.len();
+        let mut removed = 0;
+        for (when, run) in &runs {
+            let too_many = config.keep_runs > 0 && left > keep;
+            let too_old =
+                config.keep_days > 0 && now.duration_since(*when).is_ok_and(|age| age > max_age);
+            if (too_many || too_old)
+                && !running(run)
+                && only_run_files(run)
+                && std::fs::remove_dir_all(run).is_ok()
+            {
+                removed += 1;
+                left -= 1;
+            }
+        }
+        removed
     }
 
     /// A run folder's name: `2026-09-30_14-00-05`, maybe with `-2` after it.
@@ -1015,8 +1209,14 @@ pub mod record {
         b.len() >= 19 && b[4] == b'-' && b[10] == b'_' && b[..4].iter().all(u8::is_ascii_digit)
     }
 
+    /// Whether a run's file ended cleanly: its last whole line (one ending
+    /// in a newline: a half-written last line doesn't count) is END.
     fn has_end(text: &str) -> bool {
-        text.lines()
+        let Some(whole) = text.strip_suffix('\n') else {
+            return false; // cut off mid-line
+        };
+        whole
+            .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
             .is_some_and(|l| l.split(' ').nth(2) == Some("END"))
@@ -1152,6 +1352,10 @@ pub mod record {
             // A record!("END …") from a branch isn't the tree's END.
             assert!(!has_end(&format!(
                 "{start}2026-09-30 14:01:00.000 sensor: END\n"
+            )));
+            // An END cut off mid-line (a crash, a power cut) isn't one.
+            assert!(!has_end(&format!(
+                "{start}2026-09-30 14:32:17.551 END Ctrl-C, aft"
             )));
         }
     }

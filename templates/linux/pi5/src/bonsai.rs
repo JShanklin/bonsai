@@ -768,6 +768,20 @@ pub mod record {
         pub static SLOW_MS: AtomicU64 = AtomicU64::new(0);
         /// Each write fails.
         pub static FAIL: AtomicBool = AtomicBool::new(false);
+
+        /// With `BONSAI_RT_PAUSE=<path>`, stop between making the run's
+        /// folder and locking it: say so by creating `<path>.paused`, and
+        /// go on once `<path>.go` exists.
+        pub fn pause_after_creating() {
+            let Some(at) = std::env::var_os("BONSAI_RT_PAUSE") else {
+                return;
+            };
+            let at = std::path::PathBuf::from(at);
+            let _ = std::fs::write(at.with_extension("paused"), "");
+            while !at.with_extension("go").exists() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
     }
 
     /// Lines dropped because the recorder fell behind, all told.
@@ -930,25 +944,34 @@ pub mod record {
         }
 
         fn start(&mut self, dir: &Path, kinds: &[Kind], at: &Local, config: &Config) {
+            // Trees sharing `dir` take turns: the check of the last run,
+            // making this one, and pruning happen under `dir`'s lock.
+            let _ = std::fs::create_dir_all(dir);
+            let turn = DirLock::take(dir);
             // The run before this one, unless it's still going (another
             // tree sharing the folder).
             let unfinished = last_run(dir)
                 .filter(|run| !running(run))
                 .filter(|run| !finished(run));
-            let folder = match new_folder(dir, &folder_name(at)) {
-                Ok(folder) => folder,
+            let (folder, lock) = match new_run(dir, &folder_name(at)) {
+                Ok(made) => made,
                 Err(e) => {
                     let _ = writeln!(
                         std::io::stderr(),
-                        "bonsai: no run logs: can't make a folder in {}: {e}",
+                        "bonsai: no run logs: can't make a run folder in {}: {e}",
                         dir.display()
                     );
                     return;
                 }
             };
-            self.lock = lock(&folder);
+            self.lock = Some(lock);
             self.max_bytes = u64::from(config.max_file_kb) * 1024;
-            let removed = prune(dir, &folder, config);
+            // Only with `dir`'s lock is anything deleted.
+            let (removed, skipped) = match &turn {
+                Ok(_) => (prune(dir, &folder, config), None),
+                Err(why) => (0, Some(why.clone())),
+            };
+            drop(turn);
             let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
             let mut start = format!(
                 "{} START {} {} on {} (pid {}, {})",
@@ -973,6 +996,9 @@ pub mod record {
                     config.keep_runs,
                     config.keep_days
                 );
+            }
+            if let Some(why) = skipped {
+                start += &format!("\n{} old runs not pruned this time: {why}", stamp(at));
             }
             self.folder = Some(folder.clone());
             for &kind in kinds {
@@ -1146,20 +1172,117 @@ pub mod record {
         false
     }
 
-    /// `2026-09-30_14-00-05`, or `…-2` when that one's taken (two runs in a second).
-    fn new_folder(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    /// Held by a tree while it checks, makes and prunes run folders in `dir`,
+    /// so trees sharing `dir` take turns.
+    const DIR_LOCK: &str = ".bonsai-record.lock";
+    /// How long to wait for `dir`'s lock before recording without pruning.
+    pub const DIR_LOCK_WAIT: Duration = Duration::from_secs(5);
+    /// A run folder being made: never a run's name, so never pruned as one.
+    const NEW: &str = ".new-";
+
+    /// `dir`'s lock, held until dropped.
+    struct DirLock(#[allow(dead_code)] File);
+
+    impl DirLock {
+        /// Wait up to `DIR_LOCK_WAIT` for `dir`'s lock (on the recorder's
+        /// thread); why not, when it can't be had.
+        fn take(dir: &Path) -> Result<DirLock, String> {
+            use std::os::fd::AsRawFd;
+            let path = dir.join(DIR_LOCK);
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+                .map_err(|e| format!("can't open {}: {e}", path.display()))?;
+            let started = Instant::now();
+            loop {
+                // SAFETY: flock on a descriptor we own.
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    return Ok(DirLock(file));
+                }
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::WouldBlock {
+                    return Err(format!("can't lock {}: {e}", path.display()));
+                }
+                if started.elapsed() >= DIR_LOCK_WAIT {
+                    return Err(format!(
+                        "another tree held {} for {DIR_LOCK_WAIT:?}",
+                        path.display()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// Make this run's folder, locked before it has a run's name: it's made
+    /// as `.new-<pid>-<n>`, its `.running` lock taken, and only then renamed
+    /// to `2026-09-30_14-00-05` (or `…-2` when that's taken), never over
+    /// another folder. So no tree ever sees an unlocked run to prune.
+    fn new_run(dir: &Path, name: &str) -> std::io::Result<(PathBuf, File)> {
         std::fs::create_dir_all(dir)?;
+        let mut n = 0;
+        let staging = loop {
+            let staging = dir.join(format!("{NEW}{}-{n}", std::process::id()));
+            match std::fs::create_dir(&staging) {
+                Ok(()) => break staging,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(e),
+            }
+        };
+        #[cfg(test)]
+        fault::pause_after_creating();
+        let Some(lock) = lock(&staging) else {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(std::io::Error::other("can't lock its .running file"));
+        };
         let mut n = 1;
         loop {
             let folder = match n {
                 1 => dir.join(name),
                 n => dir.join(format!("{name}-{n}")),
             };
-            match std::fs::create_dir(&folder) {
-                Ok(()) => return Ok(folder),
+            match rename_new(&staging, &folder) {
+                Ok(()) => return Ok((folder, lock)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(e);
+                }
             }
+        }
+    }
+
+    /// Rename `from` to `to`, failing with `AlreadyExists` rather than
+    /// replacing what's there (`renameat2` with `RENAME_NOREPLACE`, or, where
+    /// the filesystem lacks it, a check first: safe while `dir`'s lock is held).
+    fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::other);
+        let (old, new) = (c(from)?, c(to)?);
+        // SAFETY: renameat2 with two valid, NUL-terminated paths.
+        let done = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                old.as_ptr(),
+                libc::AT_FDCWD,
+                new.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if done == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::ENOSYS | libc::EINVAL) if to.exists() => {
+                Err(std::io::ErrorKind::AlreadyExists.into())
+            }
+            Some(libc::ENOSYS | libc::EINVAL) => std::fs::rename(from, to),
+            _ => Err(e),
         }
     }
 
@@ -1233,6 +1356,19 @@ pub mod record {
     /// one, one still running, or one holding anything a run didn't write.
     /// Returns how many went.
     fn prune(dir: &Path, this: &Path, config: &Config) -> usize {
+        // Folders left half-made by a tree that died making one: their lock
+        // is gone. (Not counted: they never held a run.)
+        for stale in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = stale.path();
+            let name = stale.file_name();
+            if name.to_string_lossy().starts_with(NEW)
+                && path.is_dir()
+                && !running(&path)
+                && only_run_files(&path)
+            {
+                let _ = std::fs::remove_dir_all(&path);
+            }
+        }
         let Ok(entries) = std::fs::read_dir(dir) else {
             return 0;
         };

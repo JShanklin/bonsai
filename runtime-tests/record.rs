@@ -507,3 +507,147 @@ fn a_file_past_max_file_kb_moves_aside_and_the_new_one_ends_with_end() {
         "{now}"
     );
 }
+
+/// Wait for a file to appear (another process's signal).
+fn await_file(path: &Path, within: Duration) {
+    let started = std::time::Instant::now();
+    while !path.exists() {
+        assert!(
+            started.elapsed() < within,
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Run folders being made (`.new-*`), left in `dir`.
+fn half_made(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with(".new-"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_run_being_made_is_never_pruned_by_another_tree() {
+    let dir = scratch("init-race");
+    let sync = scratch("init-race-sync").join("a");
+    let olds: Vec<PathBuf> = (1..=3)
+        .map(|i| old_run(&dir, &format!("2000-01-0{i}_00-00-00"), 10 - i as u64))
+        .collect();
+    // A stops between making its folder and locking it.
+    let a = spawn(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("BONSAI_RT_PAUSE", sync.to_str().unwrap()),
+        ],
+    );
+    await_file(&sync.with_extension("paused"), Duration::from_secs(10));
+    assert_eq!(half_made(&dir).len(), 1, "A's folder, not yet a run");
+    // B wants to keep 1 run: while A is paused, it waits its turn.
+    let b = spawn(
+        SCENARIO,
+        &[("RT_DIR", dir.to_str().unwrap()), ("RT_KEEP_RUNS", "1")],
+    );
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(
+        olds.iter().all(|r| r.is_dir()),
+        "B pruned while A held the folder's lock"
+    );
+    std::fs::write(sync.with_extension("go"), "").unwrap();
+    // A finishes making its run; then B prunes, around it.
+    std::thread::sleep(Duration::from_millis(1500));
+    b.signal(libc::SIGTERM);
+    let b = b.wait(Duration::from_secs(10));
+    a.signal(libc::SIGTERM);
+    let a = a.wait(Duration::from_secs(10));
+    assert!(a.code == Some(0) && b.code == Some(0), "{a:?}\n{b:?}");
+    assert!(
+        olds.iter().all(|r| !r.exists()),
+        "the old runs past keep_runs stay"
+    );
+    assert!(half_made(&dir).is_empty(), "{:?}", half_made(&dir));
+    let left = runs(&dir);
+    assert_eq!(left.len(), 2, "A's run and B's: {left:?}");
+    let texts: Vec<String> = left.iter().map(|r| read(r.join("events.log"))).collect();
+    assert!(
+        texts.iter().all(|t| t.contains(" END SIGTERM")),
+        "{texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("removed 3 old run folder(s)")),
+        "{texts:?}"
+    );
+}
+
+#[test]
+fn without_the_folder_lock_nothing_is_pruned() {
+    let dir = scratch("no-dir-lock");
+    let old = old_run(&dir, "2000-01-01_00-00-00", 10);
+    // The lock file can't be opened: it's a folder.
+    std::fs::create_dir_all(dir.join(".bonsai-record.lock")).unwrap();
+    let ran = child(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("RT_KEEP_RUNS", "1"),
+            ("RT_STOP", "3"),
+        ],
+        Duration::from_secs(10),
+    );
+    assert!(ran.code == Some(0), "{ran:?}");
+    assert!(old.is_dir(), "pruned without the folder's lock");
+    let text = read(runs(&dir).pop().unwrap().join("events.log"));
+    assert!(
+        text.contains("old runs not pruned this time: can't open"),
+        "{text}"
+    );
+    assert!(
+        text.contains(" END SIGTERM"),
+        "the run itself is still recorded: {text}"
+    );
+}
+
+#[test]
+fn a_tree_killed_while_making_its_run_leaves_nothing_in_the_way() {
+    let dir = scratch("init-killed");
+    let sync = scratch("init-killed-sync").join("a");
+    let old = old_run(&dir, "2000-01-01_00-00-00", 10);
+    let a = spawn(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("BONSAI_RT_PAUSE", sync.to_str().unwrap()),
+        ],
+    );
+    await_file(&sync.with_extension("paused"), Duration::from_secs(10));
+    a.signal(libc::SIGKILL);
+    let _ = a.wait(Duration::from_secs(5));
+    assert_eq!(half_made(&dir).len(), 1);
+    // The next tree gets the folder's lock (the OS let go of A's), clears
+    // A's half-made folder, and prunes as asked.
+    let ran = child(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("RT_KEEP_RUNS", "1"),
+            ("RT_STOP", "3"),
+        ],
+        Duration::from_secs(10),
+    );
+    assert!(ran.code == Some(0), "{ran:?}");
+    assert!(half_made(&dir).is_empty(), "{:?}", half_made(&dir));
+    assert!(!old.exists());
+    assert_eq!(runs(&dir).len(), 1);
+}

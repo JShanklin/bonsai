@@ -83,11 +83,16 @@ pub enum EdgeKind {
         connect: Option<String>,
         listen: Option<String>,
         framing: Framing,
+        /// The longest line (lines framing); None: the runtime's MAX_FRAME.
+        max_frame: Option<u64>,
+        /// A server's most clients at once; None: the runtime's MAX_CLIENTS.
+        max_clients: Option<u64>,
     },
     Serial {
         device: String,
         baud: u32,
         framing: Framing,
+        max_frame: Option<u64>,
     },
     Custom {
         settings: Vec<(String, Setting)>,
@@ -135,8 +140,11 @@ impl EdgeKind {
 /// The edge kinds and the keys each takes.
 pub const EDGE_KINDS: &[(&str, &[&str])] = &[
     ("udp", &["bind", "to", "join", "iface", "reply"]),
-    ("tcp", &["connect", "listen", "framing"]),
-    ("serial", &["device", "baud", "framing"]),
+    (
+        "tcp",
+        &["connect", "listen", "framing", "max_frame", "max_clients"],
+    ),
+    ("serial", &["device", "baud", "framing", "max_frame"]),
     ("custom", &[]),
 ];
 
@@ -335,6 +343,18 @@ fn edge_kind(t: &Table) -> Result<EdgeKind, String> {
             _ => Ok(a),
         }
     };
+    // A positive whole number, when the key is there.
+    let count = |key: &str| -> Result<Option<u64>, String> {
+        match t.get(key) {
+            None => Ok(None),
+            Some(item) => item
+                .as_integer()
+                .and_then(|n| u64::try_from(n).ok())
+                .filter(|n| *n > 0)
+                .map(Some)
+                .ok_or_else(|| format!("{key} is a positive whole number")),
+        }
+    };
     let framing = || -> Result<Framing, String> {
         match text("framing")?.as_deref() {
             None | Some("raw") => Ok(Framing::Raw),
@@ -390,10 +410,15 @@ fn edge_kind(t: &Table) -> Result<EdgeKind, String> {
                         .to_string(),
                 );
             }
+            if connect.is_some() && t.contains_key("max_clients") {
+                return Err("max_clients is for a server (`listen`)".to_string());
+            }
             EdgeKind::Tcp {
                 connect,
                 listen,
                 framing: framing()?,
+                max_frame: count("max_frame")?,
+                max_clients: count("max_clients")?,
             }
         }
         "serial" => {
@@ -408,6 +433,7 @@ fn edge_kind(t: &Table) -> Result<EdgeKind, String> {
                 device: needed("device")?,
                 baud,
                 framing: framing()?,
+                max_frame: count("max_frame")?,
             }
         }
         _ => {
@@ -983,6 +1009,11 @@ pub mod {name} {{
             Framing::Raw => "crate::bonsai::Framing::Raw",
             Framing::Lines => "crate::bonsai::Framing::Lines",
         };
+        // A limit from bonsai.toml, or the runtime's default.
+        let limit = |n: &Option<u64>, default: &str| match n {
+            Some(n) => n.to_string(),
+            None => default.to_string(),
+        };
         let upper = e.name.to_ascii_uppercase();
         match &e.kind {
             EdgeKind::Udp {
@@ -1009,30 +1040,39 @@ pub mod {name} {{
                 connect,
                 listen,
                 framing: f,
+                max_frame,
+                max_clients,
             } => configs.push_str(&format!(
                 "const {upper}: crate::bonsai::TcpConfig = crate::bonsai::TcpConfig {{
     connect: {},
     listen: {},
     framing: {},
+    max_frame: {},
+    max_clients: {},
 }};
 ",
                 opt(connect),
                 opt(listen),
-                framing(f)
+                framing(f),
+                limit(max_frame, "crate::bonsai::MAX_FRAME"),
+                limit(max_clients, "crate::bonsai::MAX_CLIENTS")
             )),
             EdgeKind::Serial {
                 device,
                 baud,
                 framing: f,
+                max_frame,
             } => configs.push_str(&format!(
                 "const {upper}: crate::edges::serial::SerialConfig = crate::edges::serial::SerialConfig {{
     device: {},
     baud: {baud},
     framing: {},
+    max_frame: {},
 }};
 ",
                 lit(device),
-                framing(f)
+                framing(f),
+                limit(max_frame, "crate::bonsai::MAX_FRAME")
             )),
             EdgeKind::Custom { .. } => {}
         }
@@ -1652,6 +1692,7 @@ to = ["mesh", "radio"]
                 device: "/dev/serial0".to_string(),
                 baud: 921_600,
                 framing: Framing::Lines,
+                max_frame: None,
             }
         );
         assert_eq!(
@@ -1826,6 +1867,43 @@ to = ["b"]
         // Send only: no bind, any free port.
         let cfg = parse("[edge.out]\nkind = \"udp\"\nto = \"h:1\"\n").unwrap();
         assert!(matches!(&cfg.edges[0].kind, EdgeKind::Udp { bind, .. } if bind == "0.0.0.0:0"));
+    }
+
+    #[test]
+    fn stream_edges_take_limits_or_the_runtime_defaults() {
+        let cfg = parse(
+            "[edge.hub]\nkind = \"tcp\"\nlisten = \"0.0.0.0:7000\"\nmax_frame = 4096\nmax_clients = 8\n\
+             [edge.up]\nkind = \"tcp\"\nconnect = \"h:1\"\n",
+        )
+        .unwrap();
+        let w = render_links(&cfg);
+        assert!(
+            w.contains("    max_frame: 4096,\n    max_clients: 8,\n"),
+            "{w}"
+        );
+        assert!(
+            w.contains("    max_frame: crate::bonsai::MAX_FRAME,\n    max_clients: crate::bonsai::MAX_CLIENTS,\n"),
+            "{w}"
+        );
+        for (table, expect) in [
+            ("max_frame = 0", "max_frame is a positive whole number"),
+            (
+                "max_frame = \"big\"",
+                "max_frame is a positive whole number",
+            ),
+            (
+                "connect = \"h:1\"\nmax_clients = 4",
+                "max_clients is for a server",
+            ),
+        ] {
+            let listen = if table.contains("connect") {
+                ""
+            } else {
+                "listen = \"h:1\"\n"
+            };
+            let err = parse(&format!("[edge.e]\nkind = \"tcp\"\n{listen}{table}\n")).unwrap_err();
+            assert!(err.contains(expect), "{err}");
+        }
     }
 
     #[test]

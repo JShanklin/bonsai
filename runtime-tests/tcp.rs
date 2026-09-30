@@ -102,7 +102,9 @@ async fn clients_that_come_and_go_leave_nothing_behind() {
         next(&mut inbox).await;
         drop(c);
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // A client that stopped sending keeps its connection for LINGER, for
+    // replies; after that, nothing of it is left.
+    tokio::time::sleep(crate::bonsai::LINGER + Duration::from_millis(500)).await;
     let after = open_fds();
     assert!(
         after <= before + 5,
@@ -215,4 +217,75 @@ async fn a_client_that_stops_reading_holds_up_no_one() {
         "a stalled client held up the healthy one"
     );
     drop(slow);
+}
+
+#[tokio::test]
+async fn dropping_a_server_closes_every_client_and_ends_its_tasks() {
+    use crate::bonsai::Edge;
+    let addr: &'static str = Box::leak(format!("127.0.0.1:{}", free_port()).into_boxed_str());
+    let cfg = TcpConfig {
+        listen: Some(addr),
+        framing: Framing::Lines,
+        ..TcpConfig::DEFAULT
+    };
+    let mut edge = Tcp::setup(cfg).await.unwrap();
+    let (got_tx, mut got) = mpsc::channel(8);
+    // The edge's own task, as spawn_edge runs it; aborting it drops the edge,
+    // as a restart does.
+    let task = tokio::spawn(async move {
+        while let Ok(p) = edge.recv().await {
+            let _ = got_tx.send(p).await;
+        }
+    });
+    let mut a = connect(addr.parse().unwrap()).await;
+    let mut b = connect(addr.parse().unwrap()).await;
+    a.write_all(b"a\n").await.unwrap();
+    b.write_all(b"b\n").await.unwrap();
+    for _ in 0..2 {
+        timeout(Duration::from_secs(3), got.recv())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    task.abort();
+    for c in [&mut a, &mut b] {
+        let mut buf = [0u8; 8];
+        let read = timeout(Duration::from_secs(3), c.read(&mut buf)).await;
+        assert!(
+            matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+            "a client of a dropped server stayed connected: {read:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_client_sending_an_endless_line_is_cut_off_alone() {
+    let addr: &'static str = Box::leak(format!("127.0.0.1:{}", free_port()).into_boxed_str());
+    let cfg = TcpConfig {
+        listen: Some(addr),
+        framing: Framing::Lines,
+        max_frame: 1024,
+        ..TcpConfig::DEFAULT
+    };
+    let (events, mut inbox) = mpsc::channel(64);
+    let tx = spawn_edge::<Tcp, Packet, _>("rt_endless", move || Tcp::setup(cfg), events, |p| p);
+    let mut out = EdgeOut::new("rt_endless");
+    out.connect(tx);
+    let addr: SocketAddr = addr.parse().unwrap();
+    let mut good = connect(addr).await;
+    good.write_all(b"good\n").await.unwrap();
+    assert_eq!(next(&mut inbox).await.bytes, b"good");
+    let mut bad = connect(addr).await;
+    bad.write_all(&[b'x'; 4096]).await.unwrap();
+    // The bad one is closed once its linger is over...
+    let mut buf = [0u8; 8];
+    let read = timeout(
+        crate::bonsai::LINGER + Duration::from_secs(3),
+        bad.read(&mut buf),
+    )
+    .await;
+    assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "{read:?}");
+    // ...and the good one is untouched.
+    good.write_all(b"still good\n").await.unwrap();
+    assert_eq!(next(&mut inbox).await.bytes, b"still good");
 }

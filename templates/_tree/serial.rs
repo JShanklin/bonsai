@@ -14,6 +14,9 @@ pub struct SerialConfig {
     pub device: &'static str,
     pub baud: u32,
     pub framing: Framing,
+    /// The longest line, with lines framing (`crate::bonsai::MAX_FRAME`
+    /// unless `max_frame` is set).
+    pub max_frame: usize,
 }
 
 pub struct Serial(Framed<SerialStream>);
@@ -23,7 +26,7 @@ impl Serial {
         let port = tokio_serial::new(cfg.device, cfg.baud)
             .open_native_async()
             .map_err(|e| io::Error::other(format!("open {}: {e}", cfg.device)))?;
-        Ok(Serial(Framed::new(port, cfg.framing)))
+        Ok(Serial(Framed::with_limit(port, cfg.framing, cfg.max_frame)))
     }
 }
 

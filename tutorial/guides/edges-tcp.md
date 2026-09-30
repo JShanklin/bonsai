@@ -19,8 +19,10 @@ bonsai edge add <name> tcp --listen ADDR:PORT [--framing lines]    # a server
 | key | means |
 |-----|-------|
 | `connect` | a client: connect there; when the connection drops or fails, try again (0.1 s, 0.2 s, … up to 5 s apart) |
-| `listen` | a server: accept clients there, as many as connect |
+| `listen` | a server: accept clients there, up to `max_clients` at once |
 | `framing` | `raw` (the default): each read is one packet, for protocols that frame themselves; `lines`: one packet per line, without its newline, and a newline added to each packet sent |
+| `max_frame` | the longest line, in bytes, with `lines` framing (default 1 MiB, `MAX_FRAME`). A longer one is refused as it arrives, before it's buffered: a client edge reconnects, a server closes that client |
+| `max_clients` | a server's most clients at once (default 64, `MAX_CLIENTS`). Past it, a client that has stopped sending makes room; when every client is still sending, the new connection is closed at once, with one warning |
 
 A **client**'s packets carry the server's address as `peer`. A **server**'s
 carry the client that sent them; a packet out goes to its `peer`, or to
@@ -148,7 +150,11 @@ The hub, the relay and the clients carry on the whole time.
   is dropped and counted (`bonsai top`'s **dropped**), so a long outage
   doesn't grow memory without end, and the core never waits. A message the
   edge was carrying out when it failed is counted as **lost**.
-- A client that disconnects from a server edge is simply forgotten; sends
-  to it are skipped.
+- A server client that stops sending (it closed its side, or sent a line
+  past `max_frame`) keeps its connection for 2 s (`LINGER`), so replies to
+  what it sent still reach it; broadcasts skip it. Then it's closed, and
+  its task ends. A client whose write fails is closed at once.
+- When a server edge restarts, every client's connection is closed and its
+  tasks end with it; clients reconnect to the new one.
 - For binary protocols, keep `framing = "raw"` and put the parsing in
   `process`; see the [binary messages](binary-messages.md) guide.

@@ -1896,6 +1896,11 @@ pub enum Framing {
     Lines,
 }
 
+/// The longest line a stream edge takes (lines framing) unless its
+/// `max_frame` says otherwise: 1 MiB. A longer one is refused as soon as it
+/// passes the limit, before it's buffered.
+pub const MAX_FRAME: usize = 1 << 20;
+
 /// A byte stream cut into packets.
 pub struct Framed<S> {
     io: S,
@@ -1903,20 +1908,36 @@ pub struct Framed<S> {
     buf: Vec<u8>,
     /// Read but not yet handed out (lines framing).
     pending: Vec<u8>,
+    max_frame: usize,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Framed<S> {
     pub fn new(io: S, framing: Framing) -> Self {
+        Framed::with_limit(io, framing, MAX_FRAME)
+    }
+
+    /// Lines longer than `max_frame` bytes (without their newline) are
+    /// refused with an `InvalidData` error.
+    pub fn with_limit(io: S, framing: Framing, max_frame: usize) -> Self {
         Framed {
             io,
             framing,
             buf: vec![0; 4096],
             pending: Vec::new(),
+            max_frame,
         }
     }
 
+    /// Bytes read but not handed out yet.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
     /// The next packet. Cancel-safe: nothing is kept between awaits but
-    /// `pending`, which is updated only once a read has finished.
+    /// `pending`, which is updated only once a read has finished. With lines
+    /// framing, a line longer than `max_frame` is an `InvalidData` error the
+    /// moment it passes the limit: `pending` never holds more than the limit
+    /// plus one read.
     pub async fn recv(&mut self) -> io::Result<Vec<u8>> {
         loop {
             if self.framing == Framing::Lines
@@ -1935,7 +1956,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Framed<S> {
             }
             match self.framing {
                 Framing::Raw => return Ok(self.buf[..n].to_vec()),
-                Framing::Lines => self.pending.extend_from_slice(&self.buf[..n]),
+                Framing::Lines => {
+                    // `pending` has no newline here: the line so far runs to
+                    // the first newline in what was just read, if any.
+                    let upto = self.buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
+                    if self.pending.len() + upto > self.max_frame {
+                        self.pending.clear();
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("a line longer than {} bytes", self.max_frame),
+                        ));
+                    }
+                    self.pending.extend_from_slice(&self.buf[..n]);
+                }
             }
         }
     }
@@ -2028,12 +2061,31 @@ impl Edge for Udp {
     }
 }
 
+/// A TCP server's most clients at once unless its `max_clients` says
+/// otherwise. A connection past it is closed straight away.
+pub const MAX_CLIENTS: usize = 64;
+
 /// A TCP edge's settings: a client (`connect`) or a server (`listen`).
 #[derive(Clone, Copy, Debug)]
 pub struct TcpConfig {
     pub connect: Option<&'static str>,
     pub listen: Option<&'static str>,
     pub framing: Framing,
+    /// The longest line, with lines framing.
+    pub max_frame: usize,
+    /// A server's most clients at once.
+    pub max_clients: usize,
+}
+
+impl TcpConfig {
+    /// Nothing to connect to, and the default limits.
+    pub const DEFAULT: TcpConfig = TcpConfig {
+        connect: None,
+        listen: None,
+        framing: Framing::Raw,
+        max_frame: MAX_FRAME,
+        max_clients: MAX_CLIENTS,
+    };
 }
 
 pub enum Tcp {
@@ -2049,77 +2101,200 @@ impl Tcp {
                     .await
                     .map_err(|e| io::Error::new(e.kind(), format!("connect {addr}: {e}")))?;
                 let peer = stream.peer_addr().ok();
-                Ok(Tcp::Client(Framed::new(stream, cfg.framing), peer))
+                let framed = Framed::with_limit(stream, cfg.framing, cfg.max_frame);
+                Ok(Tcp::Client(framed, peer))
             }
             (None, Some(addr)) => {
                 let listener = TcpListener::bind(addr)
                     .await
                     .map_err(|e| io::Error::new(e.kind(), format!("listen {addr}: {e}")))?;
-                let (tx, rx) = mpsc::channel(1024);
-                Ok(Tcp::Server(Server {
-                    listener,
-                    framing: cfg.framing,
-                    clients: HashMap::new(),
-                    from_clients: (tx, rx),
-                }))
+                Ok(Tcp::Server(Server::new(listener, cfg)))
             }
             (None, None) => Err(invalid("a tcp edge needs `connect` or `listen`")),
         }
     }
 }
 
+/// How long a client that has stopped sending (shut down its side, or
+/// sent a line past `max_frame`) keeps its connection for replies to what it
+/// sent. Broadcasts skip it meanwhile; then it's closed.
+pub const LINGER: Duration = Duration::from_secs(2);
+
+/// What a client's reader tells its server.
+enum FromClient {
+    Packet(Packet),
+    /// It won't read from this client again.
+    ReadEnded(SocketAddr),
+}
+
+/// One connected client.
+struct Client {
+    write: OwnedWriteHalf,
+    reader: tokio::task::AbortHandle,
+    /// When its reader ended: closed once `LINGER` has passed.
+    read_ended: Option<Instant>,
+}
+
 /// A TCP server edge: every client's packets come in with its address; a
-/// packet out goes to its `peer`, or to every client.
+/// packet out goes to its `peer`, or to every client. It holds at most
+/// `max_clients`, and closes a client when its reader ends (after `LINGER`)
+/// or a write to it fails. Dropping it (the edge restarting) ends every
+/// client's task and closes every connection.
 pub struct Server {
     listener: TcpListener,
     framing: Framing,
-    clients: HashMap<SocketAddr, OwnedWriteHalf>,
-    from_clients: (mpsc::Sender<Packet>, mpsc::Receiver<Packet>),
+    max_frame: usize,
+    max_clients: usize,
+    clients: HashMap<SocketAddr, Client>,
+    from_clients: (mpsc::Sender<FromClient>, mpsc::Receiver<FromClient>),
+    /// Turning connections away now: warned already.
+    full: bool,
 }
 
 impl Server {
+    fn new(listener: TcpListener, cfg: TcpConfig) -> Self {
+        Server {
+            listener,
+            framing: cfg.framing,
+            max_frame: cfg.max_frame,
+            max_clients: cfg.max_clients,
+            clients: HashMap::new(),
+            from_clients: mpsc::channel(1024),
+            full: false,
+        }
+    }
+
     async fn recv(&mut self) -> io::Result<Packet> {
         loop {
+            let next_close = self
+                .clients
+                .values()
+                .filter_map(|c| c.read_ended)
+                .min()
+                .map(|t| t + LINGER);
             tokio::select! {
                 accepted = self.listener.accept() => {
                     let (stream, peer) = accepted?;
-                    let (read, write) = stream.into_split();
-                    self.clients.insert(peer, write);
-                    let to_edge = self.from_clients.0.clone();
-                    let mut framed = Framed::new(ReadOnly(read), self.framing);
-                    tokio::spawn(async move {
-                        while let Ok(bytes) = framed.recv().await {
-                            let packet = Packet { bytes, peer: Some(peer) };
-                            if to_edge.send(packet).await.is_err() {
-                                return;
-                            }
-                        }
-                    });
+                    self.admit(stream, peer);
                 }
-                Some(packet) = self.from_clients.1.recv() => return Ok(packet),
+                Some(got) = self.from_clients.1.recv() => match got {
+                    FromClient::Packet(packet) => return Ok(packet),
+                    FromClient::ReadEnded(peer) => {
+                        if let Some(client) = self.clients.get_mut(&peer) {
+                            client.read_ended = Some(Instant::now());
+                        }
+                    }
+                },
+                _ = tokio::time::sleep_until(next_close.unwrap_or_else(Instant::now).into()),
+                    if next_close.is_some() => self.close_lingering(),
             }
         }
     }
 
+    /// Take a new client. At `max_clients`, the client that stopped sending
+    /// longest ago makes room (its linger is cut short); when every client is
+    /// still sending, the new one is turned away.
+    fn admit(&mut self, stream: TcpStream, peer: SocketAddr) {
+        if self.clients.len() >= self.max_clients
+            && let Some(oldest) = self
+                .clients
+                .iter()
+                .filter_map(|(p, c)| c.read_ended.map(|t| (t, *p)))
+                .min()
+                .map(|(_, p)| p)
+        {
+            self.clients.remove(&oldest);
+        }
+        if self.clients.len() >= self.max_clients {
+            drop(stream); // closed: the client sees its connection end
+            if !self.full {
+                self.full = true;
+                warn!(
+                    "{} clients already; turning new ones away (max_clients)",
+                    self.max_clients
+                );
+            }
+            return;
+        }
+        self.full = false;
+        let (read, write) = stream.into_split();
+        let to_server = self.from_clients.0.clone();
+        let mut framed = Framed::with_limit(ReadOnly(read), self.framing, self.max_frame);
+        let edge = log::source();
+        let reader = tokio::spawn(log::EDGE.scope(edge, async move {
+            loop {
+                match framed.recv().await {
+                    Ok(bytes) => {
+                        let packet = Packet {
+                            bytes,
+                            peer: Some(peer),
+                        };
+                        if to_server.send(FromClient::Packet(packet)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::InvalidData {
+                            warn!("{peer}: {e}; no longer reading from it");
+                        }
+                        let _ = to_server.send(FromClient::ReadEnded(peer)).await;
+                        return;
+                    }
+                }
+            }
+        }));
+        self.clients.insert(
+            peer,
+            Client {
+                write,
+                reader: reader.abort_handle(),
+                read_ended: None,
+            },
+        );
+    }
+
+    /// Close the clients whose `LINGER` is over.
+    fn close_lingering(&mut self) {
+        let now = Instant::now();
+        self.clients
+            .retain(|_, c| c.read_ended.is_none_or(|t| now < t + LINGER));
+    }
+
     async fn execute(&mut self, out: Packet) -> io::Result<()> {
+        self.close_lingering();
         let mut bytes = out.bytes;
         if self.framing == Framing::Lines && bytes.last() != Some(&b'\n') {
             bytes.push(b'\n');
         }
+        // A reply goes to its peer, even one that has stopped sending; a
+        // broadcast only to clients still sending.
         let peers: Vec<SocketAddr> = match out.peer {
             Some(peer) => vec![peer],
-            None => self.clients.keys().copied().collect(),
+            None => self
+                .clients
+                .iter()
+                .filter(|(_, c)| c.read_ended.is_none())
+                .map(|(p, _)| *p)
+                .collect(),
         };
         for peer in peers {
             let gone = match self.clients.get_mut(&peer) {
-                Some(client) => client.write_all(&bytes).await.is_err(),
+                Some(client) => client.write.write_all(&bytes).await.is_err(),
                 None => false,
             };
-            if gone {
-                self.clients.remove(&peer);
+            if gone && let Some(client) = self.clients.remove(&peer) {
+                client.reader.abort();
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        for client in self.clients.values() {
+            client.reader.abort();
+        }
     }
 }
 

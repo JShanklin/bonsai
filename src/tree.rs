@@ -144,6 +144,11 @@ pub fn sync_tree() -> io::Result<()> {
             changed.push(path.to_string());
         }
     }
+    // Trees from before the log macros: bring them into scope.
+    if let Some(new) = with_macro_use(&read("src/main.rs")) {
+        std::fs::write("src/main.rs", new)?;
+        changed.push("src/main.rs (#[macro_use] mod bonsai)".to_string());
+    }
     // The serial edge's code and crate come and go with the tree's serial edges.
     let manifest = read("Cargo.toml");
     if cfg.has_serial() {
@@ -845,9 +850,43 @@ pub fn list() -> io::Result<()> {
     Ok(())
 }
 
+/// `main_src` with `#[macro_use]` above `mod bonsai;` (so every module can
+/// log with `info!` and friends), or None when it's there already or there's
+/// no `mod bonsai;` line.
+pub fn with_macro_use(main_src: &str) -> Option<String> {
+    let lines: Vec<&str> = main_src.lines().collect();
+    let at = lines.iter().position(|l| l.trim() == "mod bonsai;")?;
+    if at > 0 && lines[at - 1].trim() == "#[macro_use]" {
+        return None;
+    }
+    let indent = &lines[at][..lines[at].len() - lines[at].trim_start().len()];
+    let mut out = String::with_capacity(main_src.len() + 16);
+    for (i, line) in main_src.split_inclusive('\n').enumerate() {
+        if i == at {
+            out.push_str(indent);
+            out.push_str("#[macro_use]\n");
+        }
+        out.push_str(line);
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn macro_use_is_added_once() {
+        let old = "//! doc\n\nmod bonsai;\nmod branches;\n";
+        let new = with_macro_use(old).unwrap();
+        assert_eq!(new, "//! doc\n\n#[macro_use]\nmod bonsai;\nmod branches;\n");
+        assert_eq!(with_macro_use(&new), None);
+        assert_eq!(with_macro_use("mod branches;\n"), None);
+        assert_eq!(
+            with_macro_use("mod bonsai;"),
+            Some("#[macro_use]\nmod bonsai;".into())
+        );
+    }
 
     #[test]
     fn arms_match_their_variant_only() {

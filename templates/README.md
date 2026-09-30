@@ -16,7 +16,7 @@ templates/
   _tree/
     bonsai.rs              # the runtime every tree carries as src/bonsai.rs:
                            # the Branch and Edge traits, the core loop, ticks,
-                           # edge supervision, UDP/TCP edges, shutdown. Baked
+                           # edge supervision, UDP/TCP edges, logs, shutdown. Baked
                            # into the binary; `bonsai sync` keeps each tree's
                            # copy current.
     serial.rs              # the serial edge: written to src/edges/serial.rs
@@ -76,6 +76,11 @@ impl Branch for Display {
 `rate`), so the compiler makes a branch handle each new wire. `out.send(m)`
 compiles only for messages the branch is wired to send. The struct is
 `branches::<name>::<CamelName>`, which the generated core refers to.
+
+`info!`, `warn!`, `error!` and `debug!` log a line tagged with the branch (or
+edge) that wrote it. They're defined in `src/bonsai.rs`, which `main.rs`
+declares first, with `#[macro_use]`, so every module can use them without an
+import; `bonsai sync` adds the attribute to a tree that lacks it.
 
 Two markers, matched as whole lines (a comment mentioning one in prose isn't
 mistaken for it), keep them intact:

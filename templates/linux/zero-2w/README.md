@@ -18,8 +18,8 @@ cargo local-test        # tests on this computer
 
 Set your Pi's address once in `.cargo/config.toml` (`BONSAI_PI =
 "user@host"`), or for one run: `BONSAI_PI=me@mypi.local cargo run --release`.
-On the Pi itself, `cargo run` runs in place. The built-in pulse prints
-`bonsai: beat` twice per second. Stop it with Ctrl-C.
+On the Pi itself, `cargo run` runs in place. The built-in pulse logs
+`INFO pulse: beat` twice per second. Stop it with Ctrl-C.
 
 `cargo build --release` needs a linker for the Pi's CPU. The simplest is zig:
 run `bonsai tools` and pick zigbuild, which installs it once and sets this

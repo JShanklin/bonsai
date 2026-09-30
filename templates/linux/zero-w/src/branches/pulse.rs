@@ -18,7 +18,7 @@ impl Branch for Pulse {
     fn process(&mut self, input: Input, out: &mut Out) {
         let _ = out;
         match input {
-            Input::Tick => println!("bonsai: beat"),
+            Input::Tick => info!("beat"),
             // bonsai:input-arm
         }
     }

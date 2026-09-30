@@ -116,6 +116,7 @@ systemd's own setup units working under CPU emulation; leave them in place.
 | `Containerfile` | the system inside: Debian with systemd, ssh, sudo and network tools. Add packages your Pi needs to its `apt-get` line |
 | `rootfs/` | files copied onto the board as they are laid out here: service units and their configs |
 | `board.container` | the Quadlet unit systemd runs each board from |
+| `bonsai-relay@.service` | on Wi-Fi, a relay per multicast group in `VIRTUAL_PI_RELAY`: this computer joins the group and forwards each packet to the board's host link, since many Wi-Fi drivers drop incoming multicast on its way into the board |
 | `bonsai-host.network`, `bonsai-lan.network` | the two networks every board shares. The LAN one is macvlan on a wire and ipvlan on Wi-Fi (access points only pass your computer's MAC); `install.sh` picks, and rebuilds it when you move between them |
 
 `install.sh` does the one-time work: it checks the CPU emulation (and turns

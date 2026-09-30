@@ -94,6 +94,29 @@ sudo VIRTUAL_PI_LAN_DEV=enp4s0 VIRTUAL_PI_LAN_IP=192.168.1.40 containers/install
 sudo VIRTUAL_PI_LAN_DRIVER=macvlan containers/install.sh pi5
 ```
 
+**Multicast from the LAN on Wi-Fi.** Many Wi-Fi drivers drop incoming
+multicast on its way into the board's link: the phone's packets reach your
+computer's Wi-Fi but never the board. Name the groups the board listens to, and
+your computer joins them itself and forwards every packet to the board over the
+host link:
+
+```sh
+sudo pacman -S socat          # the relay runs socat (dnf/apt install socat)
+sudo VIRTUAL_PI_RELAY="239.2.3.2:6969" containers/install.sh zero-w
+```
+
+```
+virtual-zero-w: relaying 239.2.3.2:6969 from wlan0 to the board
+```
+
+Each group runs as a service (`systemctl status bonsai-relay@virtual-zero-w-1`),
+started at boot. Separate several groups with spaces. A later install keeps
+them; `VIRTUAL_PI_RELAY=` (empty) or an install on a wire removes them. If
+`ufw` is on, let the port in: `sudo ufw allow 6969/udp`. Your program needs no
+change as long as its socket is bound to `0.0.0.0:<port>`; the relayed packets
+arrive on the host link. Only incoming multicast needs this: the board's own
+multicast goes out on its LAN link as usual.
+
 ## 3. Deploy
 
 In the tree:
@@ -188,4 +211,5 @@ To start your own program at boot (your tree, say), add a unit file under
 | `the board didn't answer on 10.89.0.2` | `journalctl -u virtual-pi5` shows why it didn't start |
 | `tcpdump: can't get TPACKET_V3 header len` inside | tcpdump can't capture under emulation; run your computer's in the board's network: `sudo nsenter -t "$(sudo podman inspect -f '{{.State.Pid}}' virtual-pi5)" -n tcpdump -ni any udp port 14550` |
 | the phone can't see it | a guest network or hotspot keeping devices apart (see step 2), you changed between Wi-Fi and a wire without installing again, or a firewall on your computer blocking the LAN address |
+| on Wi-Fi, `tcpdump -ni wlan0` on your computer shows the phone's multicast but the board's `lan0` doesn't | the Wi-Fi driver drops it on the way to the board: relay the group (`VIRTUAL_PI_RELAY`, step 2) |
 | `netavark … has no ipvlan` while installing | Podman's network helper is older than 1.5: update podman and netavark, or use a wire |

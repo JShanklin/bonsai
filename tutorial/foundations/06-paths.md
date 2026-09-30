@@ -115,7 +115,7 @@ A broadcast tapper that falls behind loses the oldest nutrients, and bonsai
 counts every loss. Run with lag reports:
 
 ```sh
-BONSAI_SAP_DEBUG=1 cargo local    # Pi/PC trees; on a Pico set DEFMT_LOG = "debug"
+BONSAI_SAP_DEBUG=1 cargo local
 ```
 
 ```

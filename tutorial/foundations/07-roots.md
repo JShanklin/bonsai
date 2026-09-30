@@ -5,10 +5,6 @@ that connects the tree to the outside world: a network, a serial port,
 another program. In this chapter the greenhouse sends its readings over the
 network and takes a new temperature limit back.
 
-Roots are for Pi / PC trees. On a microcontroller, drivers are already async,
-so an ordinary branch talks to the hardware directly (see
-[Pico GPIO](../guides/pico-gpio.md)).
-
 ## Why a root is different
 
 Chapter 3's rule: [never block](03-how-firmware-runs.md#2-never-block). But

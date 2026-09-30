@@ -33,22 +33,20 @@ in `bonsai tools`, and add a step that installs zig and
 `cargo install cargo-zigbuild` before the build (see
 [Build tools](build-tools.md)).
 
-## Pico tree
+## Host tree
 
-The same, building for the chip, plus the [logic crate's](testing.md) tests
-on the runner:
+A tree for this computer (`host`) builds for the CI machine itself, so plain
+cargo commands do everything:
 
 ```yaml
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: thumbv6m-none-eabi        # Pico 2: thumbv8m.main-none-eabihf
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --release -- -D warnings
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
       - run: cargo build --release
-      - run: cargo build --release --no-default-features   # the lean image builds too
-      - run: cd logic && cargo test --target host-tuple
 ```
 
 ## Also worth checking

@@ -14,11 +14,10 @@ bonsai
 
 A menu opens. Use the arrow keys (or `j`/`k`) and Enter:
 
-1. **MCU:** `rpi`
-2. **Chip:** `bcm2710a1`
-3. **Board:** `zero-2w`
-4. **Where:** `new folder`
-5. **Project name:** type `greenhouse`, then Enter.
+1. **Board:** `zero-2w`
+2. **Build tools:** Enter, to keep what's offered
+3. **Where:** `new folder`
+4. **Project name:** type `greenhouse`, then Enter.
 
 bonsai hands off to `cargo-generate` and creates a `greenhouse/` folder
 (already a git repository).

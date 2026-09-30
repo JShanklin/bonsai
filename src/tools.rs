@@ -61,11 +61,12 @@ impl Tool {
         Tool::ALL.into_iter().find(|t| t.name() == name)
     }
 
-    /// Whether it helps a tree on `mcu`. mold and zigbuild are for Linux builds.
-    pub fn fits(self, mcu: &str) -> bool {
+    /// Whether it helps a tree on `board`. zigbuild links cross builds for a
+    /// Pi, so a tree for this computer (`host`) has no use for it.
+    pub fn fits(self, board: &str) -> bool {
         match self {
-            Tool::Mold | Tool::Zigbuild => mcu == "rpi",
-            Tool::Sccache | Tool::Bacon => true,
+            Tool::Zigbuild => board != "host",
+            Tool::Sccache | Tool::Mold | Tool::Bacon => true,
         }
     }
 
@@ -236,6 +237,9 @@ pub fn configure(config: &str, tools: &[Tool], target: &str, host: &str) -> io::
     } else if build.get("rustc-wrapper").and_then(Item::as_str) == Some("sccache") {
         build.remove("rustc-wrapper");
     }
+    if build.is_empty() {
+        doc.remove("build"); // a host tree has no [build] of its own
+    }
 
     // mold: links builds for this computer (`cargo local`). Not when this
     // computer is the tree's target: that table holds the Pi's own linker.
@@ -376,8 +380,9 @@ pub fn apply(dir: &Path, tools: &[Tool], target: &str) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    const PI5: &str = include_str!("../templates/rpi/pi5/.cargo/config.toml");
-    const ZERO_W: &str = include_str!("../templates/rpi/zero-w/.cargo/config.toml");
+    const PI5: &str = include_str!("../templates/linux/pi5/.cargo/config.toml");
+    const ZERO_W: &str = include_str!("../templates/linux/zero-w/.cargo/config.toml");
+    const HOST_TREE: &str = include_str!("../templates/linux/host/.cargo/config.toml");
     const AARCH64: &str = "aarch64-unknown-linux-gnu";
     const ARMV6: &str = "arm-unknown-linux-gnueabihf";
     const HOST: &str = "x86_64-unknown-linux-gnu";
@@ -416,15 +421,15 @@ mod tests {
     }
 
     #[test]
-    fn mcu_trees_get_sccache_only() {
-        let config = "[build]\ntarget = \"thumbv6m-none-eabi\"\n";
-        let fitting: Vec<Tool> = Tool::ALL.into_iter().filter(|t| t.fits("pico")).collect();
-        assert_eq!(fitting, [Tool::Sccache, Tool::Bacon]);
-        let on = configure(config, &fitting, "thumbv6m-none-eabi", HOST).unwrap();
-        assert_eq!(
-            on,
-            "[build]\ntarget = \"thumbv6m-none-eabi\"\n# sccache reuses compiled crates (`bonsai tools`).\nrustc-wrapper = \"sccache\"\n"
-        );
+    fn host_trees_get_mold_for_their_own_builds_and_no_zigbuild() {
+        let fitting: Vec<Tool> = Tool::ALL.into_iter().filter(|t| t.fits("host")).collect();
+        assert_eq!(fitting, [Tool::Sccache, Tool::Mold, Tool::Bacon]);
+        // A host tree has no [build] target: mold links its (native) builds.
+        let on = configure(HOST_TREE, &fitting, "", HOST).unwrap();
+        assert!(on.contains("[target.x86_64-unknown-linux-gnu]"), "{on}");
+        assert!(on.contains("\"link-arg=-fuse-ld=mold\""), "{on}");
+        assert_eq!(configured(&on), [Tool::Sccache, Tool::Mold]);
+        assert_eq!(configure(&on, &[], "", HOST).unwrap(), HOST_TREE);
     }
 
     #[test]

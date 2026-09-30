@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`bonsai` is a **host-side CLI** that scaffolds embedded Rust firmware. The crate
-itself is an ordinary `std` binary (a ratatui TUI + a `branch` subcommand) — it
-is *not* embedded/`no_std` code. The embedded firmware lives entirely under
-`templates/*/src/` and is **data** (baked into the binary, rendered for the
-user's new project); it is never compiled as part of this crate. Keep this
-distinction in mind: editing `src/main.rs` changes the CLI; editing
-`templates/**` changes what firmware the CLI emits.
+`bonsai` is a **host-side CLI** that scaffolds Linux applications in Rust (a
+Raspberry Pi or the computer it runs on). The crate itself is an ordinary binary
+(a ratatui TUI + subcommands). The generated applications live entirely under
+`templates/linux/*/src/` and are **data** (baked into the binary, rendered for
+the user's new project); they are never compiled as part of this crate. Keep
+this distinction in mind: editing `src/main.rs` changes the CLI; editing
+`templates/**` changes what the CLI emits. Microcontroller support (Pico,
+ESP32, defmt, `bonsai ide`) was removed: bonsai is a Linux tool.
 
 Domain vocabulary (tree / trunk / branch / graft / sap / pulse / nutrient) is
 defined in `README.md` — read it once for the metaphor.
@@ -31,7 +32,7 @@ cargo run -- sync           # regenerate src/sap.rs from the wiring
 cargo run -- tap <branch> <Nutrient>     # branch consumes it (untap to reverse)
 cargo run -- release <branch> <Nutrient> # branch produces it (unrelease to reverse)
 cargo run -- list           # summarize the tree (device, flow graph, branches)
-cargo run -- retarget <board>  # move the tree to another board of its family
+cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
 cargo test                  # run the unit tests (src/main.rs + src/flow.rs)
 cargo test marker_matches_whole_line_not_substring   # run a single test by name
 cargo install --path .      # put `bonsai` on PATH (embeds templates/ into the binary)
@@ -49,23 +50,17 @@ tests) plus `src/flow.rs` (the pure sap generator — see below). Entry points a
 dispatched in `main()`:
 
 - **Wizard** (`create_device` / `Wizard` / `run_wizard`): a ratatui TUI that
-  walks a fixed hardware cascade `MCU → Chip → Board → WiFi → Tools → Where →
-  project name`, then shells out to `cargo-generate` to render the per-board trunk
-  template. *WiFi* is asked only when `has_wifi(mcu)` (esp32); it passes
-  `-d wifi=true|false` (`template_defines`, shared with `regrow`/`update`, which
-  read it back with `tree_has_wifi`: an `esp-radio` dependency). The ESP32
-  templates gate WiFi with Liquid `{% if wifi %}` blocks plus
-  `[conditional.'!wifi']` dropping `src/wifi.rs` (esp-radio 1.0.0-beta.1 +
-  esp-alloc + embassy-net; SSID/password are `env!` values from
-  `.cargo/config.toml` `[env]`, whose `build-std` gains `alloc`: Xtensa has no
-  prebuilt std, and the C6 builds used to check WiFi don't catch that), so a no-WiFi render is unchanged. *Where*
+  walks `Board → Tools → Where → project name` (`BOARD_STEP`…`NAME_STEP`), then
+  shells out to `cargo-generate` to render `templates/linux/<board>/` with
+  `-d chip=… -d board=…` (`template_defines`, shared with `regrow`/`update`/
+  `retarget`). *Where*
   is `here` (cwd, `cargo generate --init`: no subfolder, no git init; the name is
   prefilled from the folder via `crate_name`) or `new folder`; the cursor
   defaults to `here` when the cwd holds only dotfiles (`only_dotfiles`).
   `bonsai init` = `create_device(true)`: here only, Where skipped. Planting here
   never overwrites: `refuse_planting_in` rejects `/`, `$HOME` and an existing
   tree, and `plant_here_conflicts` lists template files already in the cwd
-  (skipping `cargo-generate.toml`/`pre.rhai`) and aborts before generating. `ratatui::init`
+  (skipping `cargo-generate.toml`) and aborts before generating. `ratatui::init`
   uses the alternate screen, so `ratatui::restore()` **must** run before any
   cargo-generate output is printed (see the comment in `create_device`).
 - **`branch [--produces|--duplex|--roots] <name>`** (`add_branch`, `BranchMode`):
@@ -112,14 +107,16 @@ dispatched in `main()`:
   by every `sync_sap`) moves the old `mod sap;` out of main.rs; the template's
   trunk.rs must contain `SAP_MOD_IN_TRUNK` verbatim (tested).
 - **Every template builds for its device by default** (`.cargo/config.toml`
-  `[build] target`): Pico/ESP32 via `pre.rhai`-derived targets with flash
-  runners; the rpi boards hard-code theirs (`aarch64-unknown-linux-gnu`, Zero W
-  `arm-unknown-linux-gnueabihf`) with an inline `sh -c` runner that scp's the
+  `[build] target`): the Pi boards hard-code theirs (`aarch64-unknown-linux-gnu`,
+  Zero W `arm-unknown-linux-gnueabihf`) with an inline `sh -c` runner that scp's the
   binary to `$BONSAI_PI` (set in `[env]`) and runs it over `ssh -t`, or runs in
   place when `uname -m` matches. `cargo local` / `cargo local-test` (aliases,
   `--target host-tuple`) run on the host, which the tutorial uses throughout.
   The Zero W sets no linker: Debian's armhf gcc emits ARMv7 startup code that
   crashes on ARMv6, so it builds with zig (the zigbuild build tool, below).
+  The `host` template's config is only a comment: no target, so plain `cargo
+  run` builds and runs on this computer (`parse_target` → None; size estimates
+  then use the CLI's own pointer width).
 - **Build tools** (`src/tools.rs`, `bonsai tools [names]` → `tools_command`, and
   the wizard's *Tools* step via `ToolPicker`): sccache, mold, zigbuild, bacon.
   Missing ones install once (`tools::install`: system packages with `sudo`
@@ -132,13 +129,13 @@ dispatched in `main()`:
   with the right `-target`/`-mcpu` (ARMv6 for the Zero W), so plain `cargo
   build/run` link with zig. `GCC_COMMENT` must match the Pi 5 / Zero 2 W
   templates' linker comment. bacon has no settings. `regrow` reapplies the
-  tools it reads back with `tools::configured`. mold/zigbuild fit rpi only.
-- **Footprint defaults** live in the templates: Pico `panic-messages` feature
-  (default on; `--no-default-features` drops `print-defmt`),
-  `DEFMT_RTT_BUFFER_SIZE = "256"`, `codegen-units = 1`; rpi release profile
-  (`lto`, `strip`, `panic = "abort"`, `opt-level = "s"`). Generated code panics
-  with fixed messages instead of `unwrap()`/`expect()` so no `Debug` formatting
-  is linked.
+  tools it reads back with `tools::configured`. `Tool::fits(board)`: zigbuild
+  fits the Pi boards only; on `host` mold links the tree's own (native) builds.
+  `configure` drops a `[build]` table it leaves empty (a host tree has none).
+- **Footprint defaults** live in the templates' release profile (`lto`,
+  `codegen-units = 1`, `strip`, `panic = "abort"`, `opt-level = "s"`; `3` on
+  pi5 and host). Generated code panics with fixed messages instead of
+  `unwrap()`/`expect()`.
 - **Pre-sap trees** (no `src/sap.rs`, grown before per-nutrient paths) are not
   supported: every tree command calls `require_managed`, which refuses them and
   points at README's migration section. Only `migrate_sap_module` remains, for
@@ -155,48 +152,36 @@ dispatched in `main()`:
   left untouched.
 - **`regrow`** (`regrow`): wipes the cwd back to a fresh template (destructive,
   y/N confirmed). Recovers the device from the tree's own `Cargo.toml` stamp
-  (`parse_board` → `device_from_board` reverses the cascade) and its name
+  (`parse_board`, then `chip_of` from `BOARDS`) and its name
   (`parse_package_name`), so it needs no args. Guardrails: refuses unless the dir
   has the full bonsai signature (Cargo.toml stamp + both marker files + trunk/
   pulse) and is not `/` or `$HOME`; renders into a `.bonsai-regrow` staging dir
   and only wipes on success (a failed regen leaves the tree intact); preserves
-  `.git/`. The pure helpers (`parse_board`, `parse_package_name`,
-  `device_from_board`) are unit-tested; the fs orchestration is not.
-- **`retarget <board>`** (`retarget`): moves a tree to another board of the
-  same MCU family (refuses across families). Renders the new board's template
+  `.git/`. The pure helpers (`parse_board`, `parse_package_name`, `chip_of`)
+  are unit-tested; the fs orchestration is not.
+- **`retarget <board>`** (`retarget`): moves a tree to any other board,
+  `host` included. Renders the new board's template
   to a temp dir, then takes only its board-owned parts: `retargeted_manifest`
   (the stamp line, template dependencies via `updated_manifest`, `[profile]`),
   `retargeted_config` (the whole `.cargo/config.toml`, keeping the tree's
-  `[env]` values), `BOARD_FILES` (`build.rs`, `memory.x`,
-  `rust-toolchain.toml`) and `retargeted_main` (main.rs's first doc line, only
+  `[env]` values: moving a Pi tree to `host` keeps `BONSAI_PI`, placed under
+  the host template's comment, for moving back) and `retargeted_main` (main.rs's
+  first doc line, only
   while it's still the generated one). Lists the changed files and asks y/N,
   then reapplies the tree's build tools. Branches and the rest of `src/` are
-  untouched. The pure helpers are unit-tested (round trips between the Pi
-  templates); the fs orchestration is not.
-- **`ide`** (`ide` → `setup_ide`): generates a project-local Zed rust-analyzer
-  setup for **esp/Xtensa** trees only. Xtensa isn't in mainline Rust and Zed's
-  rust-analyzer sends `cargo metadata --lockfile-path`, which the esp cargo fork
-  rejects — so RA reads no crate graph. `setup_ide` writes `.zed/{settings.json,
-  cargo-esp-lockfile-shim, zed-ra-esp}`: a launcher that runs Zed's own RA (or
-  rustup's, since Zed stops downloading RA once `binary.path` is set) with
-  `CARGO` pointed at a shim that strips `--lockfile-path` and forwards to the esp
-  cargo (resolved at runtime via `rustup which --toolchain esp cargo`). Gated on
-  the target read back from `.cargo/config.toml` (`parse_target`); a non-`xtensa`
-  target is a no-op. Nothing is written outside the tree, so no regrow-style
-  host guardrails. The wizard also offers it after planting an esp board.
-  `parse_target` is unit-tested; the fs orchestration is not.
+  untouched. The pure helpers are unit-tested (round trips between every
+  board's templates); the fs orchestration is not.
 
 ### Two independent templating mechanisms (a gotcha)
 
-1. **Trunk templates** (`templates/<mcu>/<board>/`) are rendered by
-   cargo-generate through **Liquid** (`{{ project-name }}`, `{% if %}`). A
-   per-template `pre.rhai` hook derives build vars (`target`, and `probe_chip`
-   for Pico) from the chosen `chip` so the rendered files stay simple.
+1. **Trunk templates** (`templates/linux/<board>/`) are rendered by
+   cargo-generate through **Liquid** (`{{ project-name }}`, `{% if %}`). Each
+   hard-codes its own target; `chip`/`board` are passed as defines.
 2. **The branch scaffolds** (`templates/_branch/*.rs`) are **not** rendered by
    cargo-generate. The CLI does a plain `.replace("{{branch_name}}", name)`. So
    `{{branch_name}}` there is a bonsai convention, not Liquid.
 3. **`src/sap.rs`** in each trunk template is *generated by the CLI* (run
-   `bonsai sync` inside `templates/<mcu>/<board>/` after touching that template's
+   `bonsai sync` inside `templates/linux/<board>/` after touching that template's
    `trunk.rs`/`pulse.rs`/`bonsai.toml`). It holds no Liquid, so cargo-generate
    copies it verbatim. `template_sap_matches_generator` fails if any board's copy
    is stale — so changing `flow::render` means re-syncing every template.
@@ -236,11 +221,10 @@ works from inside a generated tree where `templates/` isn't present.
   continuation line (`.await;`) after a multi-line call. **Migration:** trees generated before this
   change lack the catch-all, so enum-only `feed` would break their exhaustive
   matches — `regrow` them first.
-- **The hardware cascade** — `MCUS`, `chips()`, `boards()` in `src/main.rs` — is
-  the single place the CLI encodes supported hardware. Adding a board means
-  editing the cascade **and** adding `templates/<mcu>/<board>/`; the
-  `src/trunk.rs` + `src/branches/` template files are MCU-portable and should be
-  reused as-is.
+- **The board list** — `BOARDS` in `src/main.rs` (board, chip, description) —
+  is the single place the CLI encodes supported hardware. Adding a board means
+  editing it **and** adding `templates/linux/<board>/`; the `src/trunk.rs` +
+  `src/branches/` template files are board-portable and should be reused as-is.
 - **Embedded-template completeness**: dotfiles like `.cargo/config.toml` are easy
   to drop from the `include_dir!` set, producing a project that can't build. The
   `embedded_template_includes_all_files` test guards this — extend it when a
@@ -255,8 +239,13 @@ rootful container (`sudo containers/install.sh <board> [remove]`). One shared
 macvlan on a wire, ipvlan on Wi-Fi, since access points drop frames from other
 MACs; `install.sh` fills in `@DRIVER@`, falls back to macvlan when netavark is
 older than 1.5, and recreates the network, restarting its boards, when its
-driver/parent/subnet changed); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
-named after the rpi boards in the cascade. `install.sh` also adds the qemu `C`
+driver/parent/subnet changed). On Wi-Fi, incoming multicast often never
+reaches an ipvlan board (the driver drops it), so `VIRTUAL_PI_RELAY="group:port
+…"` makes one `bonsai-relay@<board>-<n>` host service each (socat joins the
+group on the Wi-Fi interface and sends every datagram to the board's host
+link; settings in `/etc/bonsai/relay-*.env`, kept across installs when the
+variable is unset, removed by an empty value, a wired install or `remove`); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
+named after the Pi boards in `BOARDS`. `install.sh` also adds the qemu `C`
 binfmt flag (sudo inside), builds with `--network host`, and writes the ssh
 config + known_hosts entry. Boards boot systemd (`CMD /sbin/init`): the
 Containerfile copies `containers/rootfs/` over `/` and enables every regular

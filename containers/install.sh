@@ -4,7 +4,9 @@
 #   sudo ./install.sh <board> remove   stop it and delete everything it made
 # Boards are the files in boards/: pi5, zero-2w, zero-w.
 # Overrides: VIRTUAL_PI_LAN_DEV (network interface), VIRTUAL_PI_LAN_IP (its LAN address),
-# VIRTUAL_PI_LAN_DRIVER (macvlan or ipvlan; default: ipvlan on Wi-Fi, macvlan on a wire).
+# VIRTUAL_PI_LAN_DRIVER (macvlan or ipvlan; default: ipvlan on Wi-Fi, macvlan on a wire),
+# VIRTUAL_PI_RELAY (on Wi-Fi: multicast groups to relay to the board, "239.2.3.2:6969 …";
+# kept across installs, empty to remove).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,7 +30,19 @@ home="$(getent passwd "$user" | cut -d: -f6)"
 command -v podman >/dev/null || die "install podman first"
 command -v systemctl >/dev/null || die "needs systemd, which runs the virtual board"
 
+# The Wi-Fi relays of this board (bonsai-relay@<board>-<n>).
+drop_relays() {
+    for env in /etc/bonsai/relay-"$name"-*.env; do
+        [ -e "$env" ] || continue
+        inst="$(basename "$env" .env)"
+        inst="${inst#relay-}"
+        systemctl disable --now "bonsai-relay@$inst.service" 2>/dev/null || true
+        rm -f "$env"
+    done
+}
+
 if [ "${2:-}" = remove ]; then
+    drop_relays
     systemctl stop "$name.service" 2>/dev/null || true
     rm -f "$units/$name.container"
     # The shared networks go with the last board. Stop their units too, or
@@ -145,7 +159,46 @@ for other in $restart_boards; do
     systemctl restart "$other.service"
 done
 
-# 5. ssh: a `virtual-<board>` host, and its key trusted so nothing asks.
+# 5. On Wi-Fi, multicast from the LAN often never reaches the board: the Wi-Fi
+# driver drops it on the way into ipvlan. So this computer joins each group in
+# VIRTUAL_PI_RELAY itself and forwards every packet to the board's host link,
+# where the board's socket (bound to 0.0.0.0:<port>) receives it. Rebuilt on
+# every install; installing on a wire, or with VIRTUAL_PI_RELAY= (empty),
+# removes them.
+# Unset keeps the groups from the last install; set (even empty) replaces them.
+previous=""
+for env in /etc/bonsai/relay-"$name"-*.env; do
+    [ -e "$env" ] || continue
+    previous="$previous $(. "$env"; echo "$GROUP:$PORT")"
+done
+relays="${VIRTUAL_PI_RELAY-$previous}"
+drop_relays
+if [ -e "/sys/class/net/$dev/wireless" ] && [ -n "$relays" ]; then
+    command -v socat >/dev/null || die "the Wi-Fi relay needs socat: install it (pacman/dnf/apt install socat), then run this again"
+    mkdir -p /etc/bonsai
+    cp "$here/bonsai-relay@.service" /etc/systemd/system/
+    systemctl daemon-reload
+    n=0
+    for entry in $relays; do
+        group="${entry%:*}"
+        port="${entry##*:}"
+        [[ "$group" =~ ^2(2[4-9]|3[0-9])\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && [[ "$port" =~ ^[0-9]+$ ]] ||
+            die "VIRTUAL_PI_RELAY entries are group:port, like 239.2.3.2:6969, not $entry"
+        n=$((n + 1))
+        printf 'GROUP=%s\nPORT=%s\nDEV=%s\nTARGET=%s\n' "$group" "$port" "$dev" "$HOST_IP" \
+            > "/etc/bonsai/relay-$name-$n.env"
+        systemctl enable --now "bonsai-relay@$name-$n.service"
+        say "relaying $group:$port from $dev to the board"
+    done
+    if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        say "ufw is on: let the relayed ports in, e.g. sudo ufw allow ${port}/udp"
+    fi
+elif [ -e "/sys/class/net/$dev/wireless" ]; then
+    say "tip: if multicast from the LAN (ATAK, a GCS) doesn't reach the board, relay its groups:"
+    say "     sudo VIRTUAL_PI_RELAY=\"239.2.3.2:6969\" containers/install.sh $board"
+fi
+
+# 6. ssh: a `virtual-<board>` host, and its key trusted so nothing asks.
 cfg="$home/.ssh/config"
 if ! grep -qx "Host $name" "$cfg" 2>/dev/null; then
     printf '\nHost %s\n    HostName %s\n    User pi\n' "$name" "$HOST_IP" >> "$cfg"

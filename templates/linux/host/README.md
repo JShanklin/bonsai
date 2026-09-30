@@ -1,8 +1,8 @@
 # {{project-name}}
 
-Linux userspace application for this computer. It uses Embassy tasks, grown with
-bonsai's trunk, branch, and nutrient commands. Linux owns hardware
-initialization; add a suitable Linux crate when a branch needs a device.
+Linux userspace application for this computer. Its branches decide;
+bonsai's deterministic core runs them, one event at a time, on tokio. Linux
+owns the hardware; add a suitable Linux crate when the tree needs a device.
 
 ## Run
 
@@ -20,7 +20,7 @@ To move the tree to a Raspberry Pi, run `bonsai retarget <board>` (`pi5`,
 `zero-2w` or `zero-w`): it switches the build target and adds the runner that
 copies the binary to the Pi over ssh.
 
-Use `bonsai branch <name>`, `bonsai feed`, `bonsai tap`, and `bonsai release`
-to grow the application. The generated branch `start()` functions take the
-Embassy spawner and trunk. Pass device handles from `src/main.rs` when a branch
-needs hardware.
+Grow it with `bonsai branch add <name>`, `bonsai message add <Name>` and
+`bonsai wire <from> <Message> <to>`; `bonsai list` shows the graph. Each
+branch's `process` decides what to do with its inputs, with no I/O, so it can
+be tested on its own.

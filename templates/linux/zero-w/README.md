@@ -1,9 +1,9 @@
 # {{project-name}}
 
-Linux userspace application for Raspberry Pi Zero W. It uses Embassy tasks,
-grown with bonsai's trunk, branch, and nutrient commands. Linux owns hardware
-initialization; add a suitable Linux GPIO, I²C, or SPI crate
-when a branch needs a device. No kernel image or flashing tool is generated.
+Linux userspace application for Raspberry Pi Zero W. Its branches decide;
+bonsai's deterministic core runs them, one event at a time, on tokio. Linux
+owns the hardware; add a suitable Linux GPIO, I²C, or SPI crate when the tree
+needs a device. No kernel image or flashing tool is generated.
 
 ## Run and deploy
 
@@ -28,7 +28,7 @@ Zero W.)
 
 On the Zero W itself, plain `cargo build --release` works (slowly).
 
-Use `bonsai branch <name>`, `bonsai feed`, `bonsai tap`, and `bonsai release`
-to grow the application. The generated branch `start()` functions take the
-Embassy spawner and trunk. Pass Linux device handles from `src/main.rs` when
-a branch needs hardware.
+Grow it with `bonsai branch add <name>`, `bonsai message add <Name>` and
+`bonsai wire <from> <Message> <to>`; `bonsai list` shows the graph. Each
+branch's `process` decides what to do with its inputs, with no I/O, so it can
+be tested on its own.

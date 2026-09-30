@@ -13,8 +13,16 @@ this distinction in mind: editing `src/main.rs` changes the CLI; editing
 `templates/**` changes what the CLI emits. Microcontroller support (Pico,
 ESP32, defmt, `bonsai ide`) was removed: bonsai is a Linux tool.
 
-Domain vocabulary (tree / trunk / branch / graft / sap / pulse / nutrient) is
-defined in `README.md` — read it once for the metaphor.
+Vocabulary (tree / trunk / branch / message / wire / rate / wiring / pulse) is
+defined in `README.md`'s Concepts table. This is **bonsai 2**: a deterministic
+core on tokio. bonsai 1's Embassy vocabulary (nutrient, sap, tap/release,
+feed/starve, graft/snip, roots, paths) is gone; `renamed()` in `main.rs` points
+old commands at their replacements.
+
+bonsai 2 lands as a series of PRs: 1 Linux only (done), 2 the deterministic
+core (this), 3 edges (built-in UDP/TCP/serial bridges to the outside, in
+`bonsai.toml`, plus an `Edge` trait), 4 logs tagged by branch, 5 stats and
+`bonsai top` (a live TUI over ssh), 6 the tutorial rewrite.
 
 ## Commands
 
@@ -22,18 +30,19 @@ defined in `README.md` — read it once for the metaphor.
 cargo build                 # build the CLI
 cargo run                   # launch the interactive wizard (plant a tree)
 cargo run -- init           # the wizard, planting into the cwd (no new folder)
-cargo run -- branch <name>  # run the `branch` subcommand (needs a bonsai tree in cwd)
-cargo run -- branch --produces|--duplex|--roots <name>  # producer / both / std I/O bridge
-cargo run -- branch         # no name → interactive TUI (name + kind)
-cargo run -- feed <Name> [--broadcast|--directed|--state] [--cap N] [field:type ...]
-cargo run -- feed           # no args → interactive TUI (name + fields + path shape/cap)
-cargo run -- path <Nutrient> [<shape>] [--cap N]  # show / reshape a nutrient's path
-cargo run -- sync           # regenerate src/sap.rs from the wiring
-cargo run -- tap <branch> <Nutrient>     # branch consumes it (untap to reverse)
-cargo run -- release <branch> <Nutrient> # branch produces it (unrelease to reverse)
-cargo run -- list           # summarize the tree (device, flow graph, branches)
+cargo run -- branch add <name>            # add a branch (needs a bonsai tree in cwd)
+cargo run -- branch remove <name>         # remove it and every wire from/to it
+cargo run -- branch         # no name → interactive TUI (name)
+cargo run -- message add <Name> [field:type ...]   # a struct in src/messages.rs
+cargo run -- message remove <Name>        # refused while wired
+cargo run -- message        # no args → interactive TUI (name + fields)
+cargo run -- wire <from> <Message> <to> [<to> ...]  # a [[wire]] in bonsai.toml
+cargo run -- unwire <from> <Message> [<to> ...]     # all receivers when none named
+cargo run -- rate <branch> <hz|off>       # Input::Tick at that rate
+cargo run -- sync           # regenerate src/{bonsai,wiring,settings}.rs + branches/mod.rs
+cargo run -- list           # branches, wires, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
-cargo test                  # run the unit tests (src/main.rs + src/flow.rs)
+cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs)
 cargo test marker_matches_whole_line_not_substring   # run a single test by name
 cargo install --path .      # put `bonsai` on PATH (embeds templates/ into the binary)
 ```
@@ -45,9 +54,10 @@ edit templates and generate without rebuilding.
 
 ## Architecture
 
-The CLI is `src/main.rs` (commands, TUIs, fs orchestration, ~3k lines incl.
-tests) plus `src/flow.rs` (the pure sap generator — see below). Entry points are
-dispatched in `main()`:
+The CLI is `src/main.rs` (the wizard, TUIs, `tools`/`regrow`/`retarget`/
+`update`, shared text helpers, tests), `src/tree.rs` (the commands that grow a
+tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out) and
+`src/tools.rs`. Entry points are dispatched in `main()`:
 
 - **Wizard** (`create_device` / `Wizard` / `run_wizard`): a ratatui TUI that
   walks `Board → Tools → Where → project name` (`BOARD_STEP`…`NAME_STEP`), then
@@ -63,49 +73,46 @@ dispatched in `main()`:
   (skipping `cargo-generate.toml`) and aborts before generating. `ratatui::init`
   uses the alternate screen, so `ratatui::restore()` **must** run before any
   cargo-generate output is printed (see the comment in `create_device`).
-- **`branch [--produces|--duplex|--roots] <name>`** (`add_branch`, `BranchMode`):
-  grafts a subsystem into the tree in the cwd. It does *not* use cargo-generate; it
-  writes `src/branches/<name>.rs` from an embedded scaffold — `BRANCH_TEMPLATE`
-  (consumer), `BRANCH_PRODUCER_TEMPLATE` (no `match Nutrient`),
-  `BRANCH_DUPLEX_TEMPLATE` (both), `BRANCH_ROOTS_TEMPLATE` (std-only I/O bridge,
-  still just `start` + `run`: `start` opens the link and passes a blocking
-  receive closure and a send closure to `roots::bridge`; `run` does
-  `select(inbox.next(), taps.next())`, with `// bonsai:emit` in the inbox arm and
-  `// bonsai:nutrient-arm` in the taps arm; the transport and the
-  `Inbound`/`Outbound` types are TODOs) — and edits two files via
-  `insert_before_marker`. The threads and queues live in one shared
-  `src/roots.rs` (`ROOTS_BRIDGE`, from `templates/_branch/roots.rs`): the first
-  `branch --roots` writes it, adds `mod roots;` after `mod pulse;` and
-  `embassy-futures` to Cargo.toml; `snip` deletes it (and the `mod` line) once
-  no branch calls `roots::bridge(`. With no name, `branch_interactive` runs a small ratatui
-  TUI (name + kind). Consumer/duplex/roots carry `// bonsai:nutrient-arm` (for
-  `tap`); producer/duplex/roots carry `// bonsai:emit` (for `release`). `pulse` is
-  refused as a name (it's already a node in the generated sap).
-- **The generated sap** (`sync_sap` → `flow::render`): every wiring command
-  (branch/snip/feed/starve/tap/untap/release/unrelease/path/sync) ends by
-  regenerating `src/sap.rs` from the graph: nutrients (`flow::parse_variants` over
-  the enum), per-nutrient shape/cap (`bonsai.toml`, `flow::Config`), and each
-  node's taps/releases (`flow::Node::scan` over `pulse.rs` + every branch). Paths
-  layout = one `PubSubChannel` (broadcast) / `Channel` (directed) / `Watch` (state)
-  per nutrient with SUBS/receivers counted from the graph; `layout = "trunk"` = one
-  shared bus. Each node gets `sap::<node>::Taps` (round-robin `next()`, lag
-  counter, yields after `BURST` ready polls); releasers get the ZST `Sap`
-  (`release().await` / `try_release()` route by variant). `Graph::warnings` flags
-  self-deadlock / directed cycles / feedback / directed fan-out; `size_hint` warns
-  on big variants. `flow.rs` is pure and unit-tested; fs orchestration is in
-  `main.rs`.
-- **Slots, not the enum.** In the paths layout each path carries only its own
-  variant's payload: a generated `<Nutrient>Slot` struct (field names and types
-  from `parse_variants`) or `()` for a unit variant; `<nutrient>_nutrient()`
-  rebuilds the enum when `Taps::next()` returns. `Sap::release` is a plain fn
-  returning `Release`, a hand-rolled future holding at most one directed path's
-  `SendFuture` — never a whole `Nutrient` — so tasks stay small. The trunk layout
-  still carries `Nutrient` on its one bus.
-- **The sap is a child of the trunk** (`#[path = "sap.rs"] pub mod sap;` in
-  trunk.rs, `use trunk::sap;` in main.rs), so slot field types resolve with
-  trunk.rs's own imports (`use super::*` in sap.rs). `migrate_sap_module` (run
-  by every `sync_sap`) moves the old `mod sap;` out of main.rs; the template's
-  trunk.rs must contain `SAP_MOD_IN_TRUNK` verbatim (tested).
+- **The tree model.** A tree's graph is `bonsai.toml`: `[branch.<name>]`
+  tables (in core order; `rate` → `Input::Tick`s per second; every other key a
+  setting) and `[[wire]]`s (`from`, `message`, `to = [..]`). Messages are
+  top-level `pub struct`s in `src/messages.rs` (`graph::parse_messages`).
+  `graph::parse` → `graph::check` (errors refuse generation: unknown
+  branch/message, self-wire, duplicates, bad names, `Tick`; warnings: loops via
+  `cycles`, branches with no inputs and no rate) → `render_wiring`,
+  `render_settings`, `render_mod`. `tree::sync_tree` writes those plus
+  `src/bonsai.rs` (`tree::RUNTIME`, from `templates/_tree/bonsai.rs`), only when
+  changed; every graph command ends with it.
+- **The runtime** (`templates/_tree/bonsai.rs`, a tree's `src/bonsai.rs`):
+  `trait Branch { type Input; type Out: Default; fn setup() -> Self; fn
+  process(&mut self, Input, &mut Out) }`, `trait Sends<M>`, `Slot<B>`
+  (catch_unwind around `process`; a panic logs and re-runs `setup`), `drain`
+  (run-to-completion with a `MAX_DELIVERIES` runaway cap) and `run()`: one
+  tokio interval task per rate feeding an mpsc of `Event`s, a core loop that
+  handles one event at a time, and shutdown on Ctrl-C/SIGTERM (the shutdown
+  future is made once and pinned: rebuilt per iteration, it missed signals).
+  Templates build with `flavor = "current_thread"` and **no**
+  `panic = "abort"` (unwinding is what makes the reset possible).
+- **The generated wiring** (`src/wiring.rs`): `enum Msg` (one variant per
+  wire, `<FromCamel><Message>`), and per branch `mod <name> { enum Input
+  (Tick if rated, then each wired message); struct Out { sent: Vec<Msg> } }`
+  with an inherent generic `out.send(m)` bounded on `Sends<M>`, implemented
+  only for the wires from that branch. `Core` holds a `Slot` per branch and
+  delivers each `Msg` to its `to` list in order (cloning for all but the
+  last). A branch's struct is `branches::<name>::<CamelName>`.
+- **Graph commands** (`src/tree.rs`): `branch add` writes the scaffold
+  (`templates/_branch/branch.rs`, `{{branch_name}}`/`{{BranchName}}` by plain
+  replace) and an empty `[branch.x]`; `branch remove` also drops its wires,
+  takes it out of `to` lists, and removes arms no longer fed. `wire` merges
+  into an existing (from, message) wire and inserts `Input::M(_m) => {}` at
+  `// bonsai:input-arm` in each new receiver; `unwire` removes arms
+  (`remove_balanced_span`, so filled-in multi-line arms go whole) only when no
+  wire still delivers that message there. `rate` adds/removes the `Tick` arm.
+  `message add` inserts a `#[derive(Clone, Debug)]` struct above
+  `// bonsai:message`; `message remove` (refused while wired) takes it with
+  its attributes/docs (`without_struct`). toml_edit keeps `bonsai.toml`'s
+  comments; the fs round-trip test checks every file comes back byte-identical.
+  `require_tree` refuses bonsai 1 trees (`src/sap.rs` or `embassy-executor`).
 - **Every template builds for its device by default** (`.cargo/config.toml`
   `[build] target`): the Pi boards hard-code theirs (`aarch64-unknown-linux-gnu`,
   Zero W `arm-unknown-linux-gnueabihf`) with an inline `sh -c` runner that scp's the
@@ -133,29 +140,16 @@ dispatched in `main()`:
   fits the Pi boards only; on `host` mold links the tree's own (native) builds.
   `configure` drops a `[build]` table it leaves empty (a host tree has none).
 - **Footprint defaults** live in the templates' release profile (`lto`,
-  `codegen-units = 1`, `strip`, `panic = "abort"`, `opt-level = "s"`; `3` on
-  pi5 and host). Generated code panics with fixed messages instead of
-  `unwrap()`/`expect()`.
-- **Pre-sap trees** (no `src/sap.rs`, grown before per-nutrient paths) are not
-  supported: every tree command calls `require_managed`, which refuses them and
-  points at README's migration section. Only `migrate_sap_module` remains, for
-  trees from the first sap release (`mod sap;` in main.rs).
-- **Scaffolds leave application-specific code as TODOs:** the roots transport,
-  the producer's wake-up source (a `pending()` placeholder), and where a duplex
-  branch releases (the `// bonsai:emit` marker sits after the `match` and is
-  flagged to move into the replying arm). The pulse only beats; queue depth is
-  opt-in via `sap::depths()`.
-- **`snip <name>`** (`remove_branch`): the inverse of `branch` — deletes the
-  branch file and reverses both wiring edits via `remove_line`. The `main.rs`
-  start call is matched by prefix (`branches::<name>::start(`), so a call
-  hand-edited to pass hardware is still found; user-added peripheral setup is
-  left untouched.
+  `codegen-units = 1`, `strip`, `opt-level = "s"`; `3` on pi5 and host), and
+  in tokio's trimmed features (`rt`, `macros`, `time`, `sync`, `signal`).
+  No proc macros: the glue is generated source.
 - **`regrow`** (`regrow`): wipes the cwd back to a fresh template (destructive,
   y/N confirmed). Recovers the device from the tree's own `Cargo.toml` stamp
   (`parse_board`, then `chip_of` from `BOARDS`) and its name
   (`parse_package_name`), so it needs no args. Guardrails: refuses unless the dir
-  has the full bonsai signature (Cargo.toml stamp + both marker files + trunk/
-  pulse) and is not `/` or `$HOME`; renders into a `.bonsai-regrow` staging dir
+  has the bonsai signature (Cargo.toml stamp + `bonsai.toml` + the messages
+  marker + `src/wiring.rs`, or a bonsai 1 tree's equivalents, so an old tree
+  can be regrown into a new one) and is not `/` or `$HOME`; renders into a `.bonsai-regrow` staging dir
   and only wipes on success (a failed regen leaves the tree intact); preserves
   `.git/`. The pure helpers (`parse_board`, `parse_package_name`, `chip_of`)
   are unit-tested; the fs orchestration is not.
@@ -177,54 +171,46 @@ dispatched in `main()`:
 1. **Trunk templates** (`templates/linux/<board>/`) are rendered by
    cargo-generate through **Liquid** (`{{ project-name }}`, `{% if %}`). Each
    hard-codes its own target; `chip`/`board` are passed as defines.
-2. **The branch scaffolds** (`templates/_branch/*.rs`) are **not** rendered by
-   cargo-generate. The CLI does a plain `.replace("{{branch_name}}", name)`. So
-   `{{branch_name}}` there is a bonsai convention, not Liquid.
-3. **`src/sap.rs`** in each trunk template is *generated by the CLI* (run
-   `bonsai sync` inside `templates/linux/<board>/` after touching that template's
-   `trunk.rs`/`pulse.rs`/`bonsai.toml`). It holds no Liquid, so cargo-generate
-   copies it verbatim. `template_sap_matches_generator` fails if any board's copy
-   is stale — so changing `flow::render` means re-syncing every template.
+2. **The branch scaffold** (`templates/_branch/branch.rs`) is **not** rendered
+   by cargo-generate. The CLI does a plain `.replace` of `{{branch_name}}` and
+   `{{BranchName}}`, a bonsai convention, not Liquid.
+3. **The generated files** (`src/bonsai.rs`, `src/wiring.rs`,
+   `src/settings.rs`, `src/branches/mod.rs`) in each trunk template are
+   *written by the CLI* (run `bonsai sync` inside `templates/linux/<board>/`
+   after touching that template's `bonsai.toml`/`messages.rs`, or after
+   changing `graph::render_*` or `templates/_tree/bonsai.rs`). They hold no
+   Liquid. `template_wiring_matches_generator` fails if any board's copy is
+   stale, and checks `bonsai.toml`, `messages.rs` and `pulse.rs` are identical
+   across boards.
 
 ### Template resolution (`template_dir`)
 
 Order: `$BONSAI_TEMPLATES` → `./templates` (running from the repo) → the copy
 **embedded in the binary** via `include_dir!` (installed, run from anywhere). The
 embedded copy is extracted to a temp dir for cargo-generate, then deleted.
-The branch scaffolds are embedded separately with `include_str!` so `branch`
-works from inside a generated tree where `templates/` isn't present.
+The branch scaffold and the runtime are embedded separately with
+`include_str!` so the graph commands work inside a tree where `templates/`
+isn't present.
 
 ## Invariants to preserve
 
-- **Marker lines** `// bonsai:mod` (in `templates/**/src/branches/mod.rs`),
-  `// bonsai:start` (in `templates/**/src/main.rs`), `// bonsai:nutrient` (in the
-  `Nutrient` enum in `templates/**/src/trunk.rs`), `// bonsai:nutrient-arm` (inside
-  each `match Nutrient` block, above the `_ => {}` catch-all — where `tap` inserts a
-  handler arm), and `// bonsai:emit` (in producer/duplex branch loops — where
-  `release` inserts a publish call) are how the commands find where to insert.
-  `insert_before_marker`/`insert_indented_before` match them as a **whole trimmed
-  line**, so never remove them and never let a template's only occurrence be inside
-  prose. Edits are computed before writing, so a missing marker aborts cleanly.
-- **`src/sap.rs` is output, never input.** Nothing reads it back except
-  `sap_managed()` (its existence). Its sources of truth are the enum, `bonsai.toml`
-  and the branch files. `is_release_of` (strict, line *is* the call) drives edits;
-  `mentions_release_of` (loose, anywhere in the line) drives graph reads. Keep that
-  split so removal never takes out surrounding code.
-- **Connection model (per-branch).** Every `match Nutrient` ends in a `_ => {}`
-  catch-all, so a branch only handles the nutrients it's explicitly wired to and
-  compiles regardless of which variants exist. So `feed` is **enum-only** (just adds
-  the variant; catch-alls absorb it) and `starve` removes the variant *and* any
-  dangling `tap` arms / `release` calls for it. Wiring is per-branch: `tap`/`untap`
-  add/remove a consumer's arm (`Nutrient::X { .. } => …` for payloads),
-  `release`/`unrelease` add/remove a producer/duplex branch's
-  `sap.release(Nutrient::X).await`. `remove_balanced_span` also takes a rustfmt
-  continuation line (`.await;`) after a multi-line call. **Migration:** trees generated before this
-  change lack the catch-all, so enum-only `feed` would break their exhaustive
-  matches — `regrow` them first.
+- **Marker lines** `// bonsai:input-arm` (inside every branch's `match
+  input`) and `// bonsai:message` (in `src/messages.rs`) are where the
+  commands insert. `insert_before_marker`/`insert_indented_before` match them
+  as a **whole trimmed line**, so never remove them and never let a template's
+  only occurrence be inside prose. A missing arm marker only prints a note
+  (the compiler still demands the arm).
+- **Generated files are output, never input.** The sources of truth are
+  `bonsai.toml` and `src/messages.rs`; branch files are scanned for nothing
+  (the compiler checks them against the generated `Input`/`Out`). Arms are
+  found with `is_input_arm` (`Input::M(` / `Input::Tick` then a delimiter).
+- **Determinism.** `process` must stay sync and I/O-free, and the core must
+  deliver in `bonsai.toml` order, run-to-completion per event. Anything that
+  talks to the outside world belongs on an edge (PR 3), never in `process`.
 - **The board list** — `BOARDS` in `src/main.rs` (board, chip, description) —
   is the single place the CLI encodes supported hardware. Adding a board means
-  editing it **and** adding `templates/linux/<board>/`; the `src/trunk.rs` +
-  `src/branches/` template files are board-portable and should be reused as-is.
+  editing it **and** adding `templates/linux/<board>/`; `bonsai.toml`,
+  `src/messages.rs` and `src/branches/pulse.rs` are the same on every board.
 - **Embedded-template completeness**: dotfiles like `.cargo/config.toml` are easy
   to drop from the `include_dir!` set, producing a project that can't build. The
   `embedded_template_includes_all_files` test guards this — extend it when a
@@ -258,16 +244,18 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
 
 ## Docs
 
-- `README.md` explains what bonsai is. How-to material lives in `tutorial/`:
+- `README.md` explains what bonsai is. How-to material lives in `tutorial/`,
+  which still describes bonsai 1 from chapter 3 on (flagged at its top) until
+  PR 6 rewrites it:
   `foundations/` (read in order; builds the running **greenhouse** project on
   the rpi zero-2w template, so it runs on a PC) and `guides/` (short
-  self-contained recipes: roots over UDP/TCP/serial/MAVLink, wire format, GPIO,
+  self-contained recipes: roots over UDP/TCP/serial/MAVLink, wire format,
   testing, deploy, a virtual Pi (arm64 Podman container, qemu, macvlan/ipvlan), CI,
   troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold
   comments are one short line saying what to change and why; placeholders
-  (`let _ = &sap;`, `pending()`) say to delete them once used.
+  (`let _ = out; // delete once it sends`) say to delete them once used.
 - Tutorial code and command output are taken from real runs. When you change a
   scaffold, a generated file or any CLI message, update the snippets and
   outputs that quote it, and re-run the affected chapter or guide.

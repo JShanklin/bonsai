@@ -55,6 +55,12 @@ pub mod pulse {
             &self.sent
         }
     }
+
+    impl crate::bonsai::Outbox for Out {
+        fn count(&self) -> usize {
+            self.sent.len()
+        }
+    }
 }
 
 /// Every branch and edge, set up and waiting for events.

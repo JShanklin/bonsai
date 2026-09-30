@@ -46,6 +46,8 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -63,7 +65,7 @@ pub trait Branch: Sized {
     /// has a `rate`. Generated as `crate::wiring::<branch>::Input`.
     type Input;
     /// Where it sends: `crate::wiring::<branch>::Out`.
-    type Out: Default;
+    type Out: Default + Outbox;
 
     /// Setup: the branch's starting state. Runs again after `process` panics.
     fn setup() -> Self;
@@ -77,6 +79,11 @@ pub trait Branch: Sized {
 /// `out.send(message)`: there's one for each message a branch is wired to send.
 pub trait Sends<M> {
     fn send(&mut self, message: M);
+}
+
+/// A branch's `Out`: how much it holds, for the branch's stats.
+pub trait Outbox {
+    fn count(&self) -> usize;
 }
 
 /// Something from outside the core.
@@ -104,6 +111,7 @@ pub trait Tree {
 pub struct Slot<B: Branch> {
     name: &'static str,
     branch: B,
+    stats: Arc<stats::BranchStats>,
 }
 
 impl<B: Branch> Slot<B> {
@@ -111,6 +119,7 @@ impl<B: Branch> Slot<B> {
         Slot {
             name,
             branch: B::setup(),
+            stats: stats::branch(name),
         }
     }
 
@@ -119,15 +128,19 @@ impl<B: Branch> Slot<B> {
         let mut out = B::Out::default();
         let branch = &mut self.branch;
         let outer = log::enter(self.name);
+        let started = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| branch.process(input, &mut out)));
+        let took = started.elapsed();
         if result.is_err() {
             self.branch = B::setup();
         }
         log::enter(outer);
         if result.is_err() {
+            self.stats.record(took, 0, true);
             log::write(log::Level::Warn, Some(self.name), format_args!("set up again after a panic"));
             return B::Out::default();
         }
+        self.stats.record(took, out.count(), false);
         out
     }
 }
@@ -160,7 +173,9 @@ pub fn drain<M>(queue: &mut VecDeque<M>, mut deliver: impl FnMut(M, &mut VecDequ
 /// Run the tree until Ctrl-C or SIGTERM.
 pub async fn run<T: Tree>(mut tree: T) {
     log::catch_panics();
+    stats::start();
     log::write(log::Level::Info, Some("bonsai"), format_args!("running"));
+    top::start();
     let (events, mut inbox) = mpsc::channel::<Event<T::EdgeIn>>(1024);
     tree.start_edges(&events);
     for (index, hz) in tree.rates() {
@@ -181,7 +196,11 @@ pub async fn run<T: Tree>(mut tree: T) {
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            Some(event) = inbox.recv() => tree.handle(event),
+            Some(event) = inbox.recv() => {
+                let started = Instant::now();
+                tree.handle(event);
+                stats::CORE.record(started.elapsed(), inbox.len());
+            }
             _ = &mut shutdown => break,
         }
     }
@@ -344,11 +363,24 @@ pub mod log {
 
     /// Lines kept for `recent`.
     pub const KEEP: usize = 1000;
-    static RECENT: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+    /// The lines kept, and how many were ever logged.
+    static RECENT: Mutex<(VecDeque<String>, u64)> = Mutex::new((VecDeque::new(), 0));
 
     /// The last `KEEP` lines logged, oldest first.
     pub fn recent() -> Vec<String> {
-        RECENT.lock().map(|r| r.iter().cloned().collect()).unwrap_or_default()
+        since(0).0
+    }
+
+    /// The kept lines numbered `from` on (the first line logged is 0), and the
+    /// number of the next line: pass it back to get only what's new.
+    pub fn since(from: u64) -> (Vec<String>, u64) {
+        let Ok(recent) = RECENT.lock() else {
+            return (Vec::new(), from);
+        };
+        let (lines, total) = &*recent;
+        let first = total - lines.len() as u64;
+        let skip = from.saturating_sub(first).min(lines.len() as u64) as usize;
+        (lines.iter().skip(skip).cloned().collect(), *total)
     }
 
     /// Log one line, from `source` (or whoever is running, when `None`).
@@ -374,10 +406,12 @@ pub mod log {
             let _ = std::io::stderr().write_all(shown.as_bytes());
         }
         if let Ok(mut recent) = RECENT.lock() {
-            if recent.len() == KEEP {
-                recent.pop_front();
+            let (lines, total) = &mut *recent;
+            if lines.len() == KEEP {
+                lines.pop_front();
             }
-            recent.push_back(line);
+            lines.push_back(line);
+            *total += 1;
         }
     }
 
@@ -460,6 +494,314 @@ pub mod log {
 }
 
 // ---------------------------------------------------------------------------
+// Stats, and the server `bonsai top` reads them from
+// ---------------------------------------------------------------------------
+
+/// What each branch and edge has done since the tree started. Counting never
+/// changes what a branch sends: it's only watched.
+pub mod stats {
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::atomic::{AtomicU8, AtomicU64};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// One branch's counts.
+    #[derive(Default)]
+    pub struct BranchStats {
+        pub inputs: AtomicU64,
+        pub sent: AtomicU64,
+        pub panics: AtomicU64,
+        /// Time spent in `process`, in all and at most once.
+        pub busy_ns: AtomicU64,
+        pub max_ns: AtomicU64,
+    }
+
+    impl BranchStats {
+        pub fn record(&self, took: Duration, sent: usize, panicked: bool) {
+            let ns = took.as_nanos() as u64;
+            self.inputs.fetch_add(1, Relaxed);
+            self.sent.fetch_add(sent as u64, Relaxed);
+            if panicked {
+                // Its time is mostly the panic's own report: not the branch's.
+                self.panics.fetch_add(1, Relaxed);
+                return;
+            }
+            self.busy_ns.fetch_add(ns, Relaxed);
+            self.max_ns.fetch_max(ns, Relaxed);
+        }
+    }
+
+    pub const STARTING: u8 = 0;
+    pub const UP: u8 = 1;
+    pub const RETRYING: u8 = 2;
+
+    /// One edge's counts.
+    #[derive(Default)]
+    pub struct EdgeStats {
+        pub state: AtomicU8,
+        pub received: AtomicU64,
+        pub sent: AtomicU64,
+        pub dropped: AtomicU64,
+        pub restarts: AtomicU64,
+        pub error: Mutex<String>,
+    }
+
+    impl EdgeStats {
+        pub fn failed(&self, why: &str) {
+            self.state.store(RETRYING, Relaxed);
+            self.restarts.fetch_add(1, Relaxed);
+            if let Ok(mut error) = self.error.lock() {
+                *error = why.to_string();
+            }
+        }
+    }
+
+    /// The core's counts.
+    pub struct CoreStats {
+        pub events: AtomicU64,
+        pub max_ns: AtomicU64,
+        /// Events waiting when the last one was handled.
+        pub inbox: AtomicU64,
+    }
+
+    impl CoreStats {
+        pub fn record(&self, took: Duration, inbox: usize) {
+            self.events.fetch_add(1, Relaxed);
+            self.max_ns.fetch_max(took.as_nanos() as u64, Relaxed);
+            self.inbox.store(inbox as u64, Relaxed);
+        }
+    }
+
+    pub static CORE: CoreStats = CoreStats {
+        events: AtomicU64::new(0),
+        max_ns: AtomicU64::new(0),
+        inbox: AtomicU64::new(0),
+    };
+
+    type Registry<T> = Mutex<Vec<(&'static str, Arc<T>)>>;
+    static BRANCHES: Registry<BranchStats> = Mutex::new(Vec::new());
+    static EDGES: Registry<EdgeStats> = Mutex::new(Vec::new());
+    static STARTED: OnceLock<Instant> = OnceLock::new();
+
+    fn find<T: Default>(registry: &Registry<T>, name: &'static str) -> Arc<T> {
+        let mut all = registry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, stats)) = all.iter().find(|(n, _)| *n == name) {
+            return stats.clone();
+        }
+        let stats = Arc::new(T::default());
+        all.push((name, stats.clone()));
+        stats
+    }
+
+    /// A branch's counts (the same ones each time it's asked for by name).
+    pub fn branch(name: &'static str) -> Arc<BranchStats> {
+        find(&BRANCHES, name)
+    }
+
+    pub fn edge(name: &'static str) -> Arc<EdgeStats> {
+        find(&EDGES, name)
+    }
+
+    /// The tree is running: uptime counts from now.
+    pub fn start() {
+        STARTED.get_or_init(Instant::now);
+    }
+
+    /// Every count at one moment.
+    #[derive(Debug, Default, PartialEq)]
+    pub struct Snapshot {
+        pub uptime_ms: u64,
+        pub events: u64,
+        pub max_event_us: u64,
+        pub inbox: u64,
+        /// name, inputs, sent, panics, busy µs, max µs
+        pub branches: Vec<(String, [u64; 5])>,
+        /// name, state, received, sent, dropped, restarts, last error
+        pub edges: Vec<(String, &'static str, [u64; 4], String)>,
+    }
+
+    pub fn snapshot() -> Snapshot {
+        let branches = BRANCHES.lock().unwrap_or_else(|e| e.into_inner());
+        let edges = EDGES.lock().unwrap_or_else(|e| e.into_inner());
+        Snapshot {
+            uptime_ms: STARTED.get().map_or(0, |s| s.elapsed().as_millis() as u64),
+            events: CORE.events.load(Relaxed),
+            max_event_us: CORE.max_ns.load(Relaxed) / 1000,
+            inbox: CORE.inbox.load(Relaxed),
+            branches: branches
+                .iter()
+                .map(|(name, s)| {
+                    let n = [
+                        s.inputs.load(Relaxed),
+                        s.sent.load(Relaxed),
+                        s.panics.load(Relaxed),
+                        s.busy_ns.load(Relaxed) / 1000,
+                        s.max_ns.load(Relaxed) / 1000,
+                    ];
+                    (name.to_string(), n)
+                })
+                .collect(),
+            edges: edges
+                .iter()
+                .map(|(name, s)| {
+                    let state = match s.state.load(Relaxed) {
+                        UP => "up",
+                        RETRYING => "retrying",
+                        _ => "starting",
+                    };
+                    let n = [
+                        s.received.load(Relaxed),
+                        s.sent.load(Relaxed),
+                        s.dropped.load(Relaxed),
+                        s.restarts.load(Relaxed),
+                    ];
+                    let error = s.error.lock().map(|e| e.clone()).unwrap_or_default();
+                    (name.to_string(), state, n, error)
+                })
+                .collect(),
+        }
+    }
+
+    /// A snapshot and new log lines as `bonsai top` reads them: a line per
+    /// row, fields split by tabs, ending in `end`.
+    pub fn render(s: &Snapshot, logs: &[String]) -> String {
+        let clean = |t: &str| t.replace(['\t', '\n', '\r'], " ");
+        let mut o = format!(
+            "bonsai-top 1\t{}\t{}\t{}\t{}\n",
+            s.uptime_ms, s.events, s.max_event_us, s.inbox
+        );
+        for (name, n) in &s.branches {
+            o += &format!("branch\t{}\t{}\t{}\t{}\t{}\t{}\n", clean(name), n[0], n[1], n[2], n[3], n[4]);
+        }
+        for (name, state, n, error) in &s.edges {
+            o += &format!(
+                "edge\t{}\t{state}\t{}\t{}\t{}\t{}\t{}\n",
+                clean(name),
+                n[0],
+                n[1],
+                n[2],
+                n[3],
+                clean(error)
+            );
+        }
+        for line in logs {
+            o += &format!("log\t{}\n", clean(line));
+        }
+        o + "end\n"
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_snapshot_renders_as_tab_separated_rows() {
+            let s = Snapshot {
+                uptime_ms: 1500,
+                events: 3,
+                max_event_us: 40,
+                inbox: 0,
+                branches: vec![("pulse".into(), [3, 0, 0, 12, 5])],
+                edges: vec![("net".into(), "retrying", [1, 2, 0, 1], "bind\tx".into())],
+            };
+            assert_eq!(
+                render(&s, &["a line".into()]),
+                "bonsai-top 1\t1500\t3\t40\t0\n\
+                 branch\tpulse\t3\t0\t0\t12\t5\n\
+                 edge\tnet\tretrying\t1\t2\t0\t1\tbind x\n\
+                 log\ta line\n\
+                 end\n"
+            );
+        }
+
+        #[test]
+        fn the_same_name_gets_the_same_counts() {
+            let a = branch("stats_test_branch");
+            a.record(Duration::from_micros(7), 2, false);
+            let b = branch("stats_test_branch");
+            assert_eq!(b.inputs.load(Relaxed), 1);
+            assert_eq!(b.sent.load(Relaxed), 2);
+        }
+    }
+}
+
+/// The server `bonsai top` connects to: `BONSAI_TOP` is where it listens
+/// (`127.0.0.1:7777` unless set; a port alone means on 127.0.0.1; `off`
+/// turns it off). It listens on this computer only unless told otherwise:
+/// from another one, `bonsai top` comes in over ssh.
+pub mod top {
+    use std::time::Duration;
+
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    use super::{log, stats};
+
+    pub const DEFAULT: &str = "127.0.0.1:7777";
+    /// Log lines a new client gets from before it connected.
+    const BACKLOG: u64 = 200;
+
+    /// Where to listen, from `BONSAI_TOP`'s value; None: don't.
+    pub fn address(setting: Option<&str>) -> Option<String> {
+        match setting.map(str::trim) {
+            None | Some("") => Some(DEFAULT.to_string()),
+            Some("off") => None,
+            Some(port) if port.parse::<u16>().is_ok() => Some(format!("127.0.0.1:{port}")),
+            Some(addr) => Some(addr.to_string()),
+        }
+    }
+
+    pub fn start() {
+        let Some(addr) = address(std::env::var("BONSAI_TOP").ok().as_deref()) else {
+            return;
+        };
+        tokio::spawn(async move {
+            let listener = match TcpListener::bind(&addr).await {
+                Ok(listener) => listener,
+                Err(e) => {
+                    warn!("top: can't listen on {addr} ({e}); set BONSAI_TOP to another port, or off");
+                    return;
+                }
+            };
+            debug!("top: listening on {addr}");
+            loop {
+                let Ok((mut client, _)) = listener.accept().await else {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                };
+                tokio::spawn(async move {
+                    let (_, now) = log::since(0);
+                    let mut next = now.saturating_sub(BACKLOG);
+                    let mut every = tokio::time::interval(Duration::from_millis(500));
+                    loop {
+                        every.tick().await;
+                        let (lines, now) = log::since(next);
+                        next = now;
+                        let text = stats::render(&stats::snapshot(), &lines);
+                        if client.write_all(text.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn bonsai_top_picks_the_address() {
+            assert_eq!(address(None).as_deref(), Some(DEFAULT));
+            assert_eq!(address(Some("off")), None);
+            assert_eq!(address(Some("7000")).as_deref(), Some("127.0.0.1:7000"));
+            assert_eq!(address(Some("0.0.0.0:7000")).as_deref(), Some("0.0.0.0:7000"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Edges
 // ---------------------------------------------------------------------------
 
@@ -510,6 +852,7 @@ impl Packet {
 /// the edge falls behind, what it can't take is dropped and counted.
 pub struct EdgeOut<T> {
     name: &'static str,
+    stats: Arc<stats::EdgeStats>,
     tx: Option<mpsc::Sender<T>>,
     /// Sent before the edge started: what tests check.
     offline: Vec<T>,
@@ -520,6 +863,7 @@ impl<T> EdgeOut<T> {
     pub fn new(name: &'static str) -> Self {
         EdgeOut {
             name,
+            stats: stats::edge(name),
             tx: None,
             offline: Vec::new(),
             dropped: 0,
@@ -533,7 +877,10 @@ impl<T> EdgeOut<T> {
     pub fn send(&mut self, value: T) {
         match &self.tx {
             Some(tx) => {
-                if tx.try_send(value).is_err() {
+                if tx.try_send(value).is_ok() {
+                    self.stats.sent.fetch_add(1, Relaxed);
+                } else {
+                    self.stats.dropped.fetch_add(1, Relaxed);
                     if self.dropped == 0 {
                         log::write(
                             log::Level::Warn,
@@ -569,6 +916,7 @@ where
     F: Future<Output = io::Result<E>> + Send + 'static,
 {
     let (tx, mut outbound) = mpsc::channel::<E::Out>(64);
+    let stats = stats::edge(name);
     // Every line an edge logs, from any of its tasks, is tagged with its name.
     tokio::spawn(log::EDGE.scope(name, async move {
         let mut backoff = Duration::from_millis(100);
@@ -579,7 +927,7 @@ where
             let (to_attempt, attempt_rx) = mpsc::channel::<E::Out>(64);
             let mut attempt = tokio::spawn(log::EDGE.scope(
                 name,
-                attempt::<E, I, F>(setup(), attempt_rx, events.clone(), wrap),
+                attempt::<E, I, F>(setup(), attempt_rx, events.clone(), wrap, stats.clone()),
             ));
             let why = loop {
                 tokio::select! {
@@ -596,6 +944,7 @@ where
             if started.elapsed() > Duration::from_secs(30) {
                 backoff = Duration::from_millis(100);
             }
+            stats.failed(&why);
             warn!("{why}; retrying in {backoff:?}");
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(5));
@@ -609,6 +958,7 @@ async fn attempt<E, I, F>(
     mut outbound: mpsc::Receiver<E::Out>,
     events: mpsc::Sender<Event<I>>,
     wrap: fn(E::In) -> I,
+    stats: Arc<stats::EdgeStats>,
 ) -> io::Result<()>
 where
     E: Edge,
@@ -619,6 +969,7 @@ where
         Out(Out),
     }
     let mut edge = setup.await?;
+    stats.state.store(stats::UP, Relaxed);
     info!("up");
     loop {
         let step = tokio::select! {
@@ -627,7 +978,9 @@ where
         };
         match step {
             Step::In(got) => {
-                if events.send(Event::Edge(wrap(got?))).await.is_err() {
+                let got = got?;
+                stats.received.fetch_add(1, Relaxed);
+                if events.send(Event::Edge(wrap(got))).await.is_err() {
                     return Ok(());
                 }
             }

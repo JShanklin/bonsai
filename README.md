@@ -135,6 +135,7 @@ bonsai wire <from> <to> [<to> …]                with an edge at one end: no me
 bonsai rate <branch> <hz|off>                   tick a branch this many times a second
 bonsai list                                     branches, wires, warnings
 bonsai sync                                     regenerate the wiring after editing bonsai.toml
+bonsai top [user@host] [--once]                 watch a running tree, here or on a Pi
 bonsai update                                   refresh template crates and Cargo.lock
 bonsai regrow                                   reset the tree to a fresh template
 bonsai retarget <board>                         move the tree to another board
@@ -214,6 +215,50 @@ the default, or `debug`), then any branch or edge that should differ:
 land in the journal, and `cargo test` hides them unless a test fails. A panic
 is one line; set `RUST_BACKTRACE=1` for the backtrace too.
 
+## Watching a tree
+
+`bonsai top`, run in a tree's folder while it runs, shows it live: every
+branch in the order the core runs them (inputs and sends per second, time
+per input, panics), every edge (up or retrying, packets in and out, drops,
+restarts, the last error), and the log. `↑`/`↓` and `enter` show one
+branch's or edge's lines only. Here, a tree echoing UDP packets back
+uppercase, just after one packet made it panic:
+
+```
+ logtree  up 4s  8 events/s  slowest event 125.0 ms  0 waiting
+┌ branches ────────────────────────────────────────────────────────────────┐
+│branch                      inputs/s    sent/s    avg µs    max µs  panics│
+│pulse                            2.0       0.0        21        32       0│
+│echo                             6.0       6.0         7        12       1│
+└──────────────────────────────────────────────────────────────────────────┘
+┌ edges ───────────────────────────────────────────────────────────────────┐
+│edge          state          in/s     out/s   dropped  restarts last error│
+│net           up              6.0       6.0         0         0           │
+│radio         up              0.0       0.0         0         0           │
+└──────────────────────────────────────────────────────────────────────────┘
+┌ log ─────────────────────────────────────────────────────────────────────┐
+│06:54:05.088Z  INFO pulse: beat                                           │
+│06:54:05.588Z  INFO pulse: beat                                           │
+│06:54:05.995Z ERROR echo: panicked at src/branches/echo.rs:30: asked to   │
+│06:54:06.120Z  WARN echo: set up again after a panic                      │
+│06:54:06.120Z  INFO pulse: beat                                           │
+│06:54:06.587Z  INFO pulse: beat                                           │
+│06:54:07.087Z  INFO pulse: beat                                           │
+│06:54:07.588Z  INFO pulse: beat                                           │
+│06:54:08.088Z  INFO pulse: beat                                           │
+│06:54:08.588Z  INFO pulse: beat                                           │
+└──────────────────────────────────────────────────────────────────────────┘
+ ↑↓ select  enter show only its log  p pause  q quit
+```
+
+The tree serves these on `127.0.0.1:7777`, on its own computer only. For a
+tree that builds for a Pi, `bonsai top` goes there over ssh (`BONSAI_PI`, as
+`cargo run` does; `ssh -W`, so the Pi needs nothing but sshd); `bonsai top
+user@host` names one, `bonsai top local` this computer. `--once` prints the
+tables and exits. `BONSAI_TOP` moves a tree's server to another port
+(`BONSAI_TOP=7778`; `bonsai top --port 7778`) or turns it off (`off`).
+Counting what branches do never changes what they send.
+
 ## Status
 
 bonsai 2 lands in steps:
@@ -223,7 +268,7 @@ bonsai 2 lands in steps:
 3. ✅ Edges: built-in UDP (with multicast), TCP (client and server) and
    serial, configured in `bonsai.toml`, plus an `Edge` trait for your own.
 4. ✅ Logs tagged with the branch or edge that wrote them.
-5. Stats, and `bonsai top`: a live view of a running tree.
+5. ✅ Stats, and `bonsai top`: a live view of a running tree.
 6. The tutorial, rewritten.
 
 | board | chip | target | status |

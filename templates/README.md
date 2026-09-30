@@ -16,7 +16,8 @@ templates/
   _tree/
     bonsai.rs              # the runtime every tree carries as src/bonsai.rs:
                            # the Branch and Edge traits, the core loop, ticks,
-                           # edge supervision, UDP/TCP edges, logs, shutdown. Baked
+                           # edge supervision, UDP/TCP edges, logs, stats and
+                           # the server `bonsai top` reads, shutdown. Baked
                            # into the binary; `bonsai sync` keeps each tree's
                            # copy current.
     serial.rs              # the serial edge: written to src/edges/serial.rs
@@ -81,6 +82,10 @@ compiles only for messages the branch is wired to send. The struct is
 edge) that wrote it. They're defined in `src/bonsai.rs`, which `main.rs`
 declares first, with `#[macro_use]`, so every module can use them without an
 import; `bonsai sync` adds the attribute to a tree that lacks it.
+
+While a tree runs, it counts what each branch and edge does, and serves the
+counts and the log on `127.0.0.1:7777` (`BONSAI_TOP`) for `bonsai top`.
+The generated `Out` implements `bonsai::Outbox`, so the core can count sends.
 
 Two markers, matched as whole lines (a comment mentioning one in prose isn't
 mistaken for it), keep them intact:

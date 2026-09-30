@@ -1,5 +1,6 @@
 mod graph;
 mod tools;
+mod top;
 mod tree;
 
 use std::io;
@@ -2211,6 +2212,8 @@ fn print_help() {
     println!("  bonsai rate <branch> <hz|off>   tick a branch this many times a second");
     println!("  bonsai sync            regenerate the wiring after editing bonsai.toml");
     println!("  bonsai list            the tree's branches and wires, and any warnings");
+    println!("  bonsai top [user@host|local] [--port N] [--once]");
+    println!("                         watch a running tree: its branches, edges and log");
     println!("  bonsai update          refresh template crates and Cargo.lock");
     println!("  bonsai regrow          reset the tree in the cwd to a fresh template");
     println!(
@@ -2259,6 +2262,13 @@ fn main() -> io::Result<()> {
         ["regrow"] => regrow(),
         ["update"] => update(),
         ["retarget", board] => retarget(board),
+        ["top", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
+            top::top(&rest).map_err(|e| {
+                eprintln!("bonsai top: {e}");
+                std::process::exit(1)
+            })
+        }
         ["tools", names @ ..] => {
             let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
             tools_command(&names)

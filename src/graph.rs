@@ -836,6 +836,12 @@ pub mod {name} {{
             &self.sent
         }
     }
+
+    impl crate::bonsai::Outbox for Out {
+        fn count(&self) -> usize {
+            self.sent.len()
+        }
+    }
 ",
         );
         for w in cfg.wires.iter().filter(|w| w.from == b.name) {

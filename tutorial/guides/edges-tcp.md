@@ -21,7 +21,7 @@ bonsai edge add <name> tcp --listen ADDR:PORT [--framing lines]    # a server
 | `connect` | a client: connect there; when the connection drops or fails, try again (0.1 s, 0.2 s, … up to 5 s apart) |
 | `listen` | a server: accept clients there, up to `max_clients` at once |
 | `framing` | `raw` (the default): each read is one packet, for protocols that frame themselves; `lines`: one packet per line, without its newline, and a newline added to each packet sent |
-| `max_frame` | the longest line, in bytes, with `lines` framing (default 1 MiB, `MAX_FRAME`). A longer one is refused as it arrives, before it's buffered: a client edge reconnects, a server closes that client |
+| `max_frame` | the longest line, in bytes, with `lines` framing (default 1 MiB, `MAX_FRAME`): its payload, without the `\n` or `\r\n`, so `abcd\n` and `abcd\r\n` are both 4. Every line is held to it, however the bytes arrive (several lines in one read, or one line over many); a longer one is refused as soon as it must be longer, before it's buffered: a client edge reconnects, a server closes that client |
 | `max_clients` | a server's most clients at once (default 64, `MAX_CLIENTS`). Past it, a client that has stopped sending makes room; when every client is still sending, the new connection is closed at once, with one warning |
 
 A **client**'s packets carry the server's address as `peer`. A **server**'s

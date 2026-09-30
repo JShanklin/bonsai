@@ -145,8 +145,11 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   the reader reports `ReadEnded`; a client that stopped
   sending lingers `LINGER` (2 s) for replies, broadcasts skip it; `Drop`
   aborts every client task), `Framed<S>` (raw / lines, `max_frame`,
-  default `MAX_FRAME` 1 MiB: an over-long line is `InvalidData` before it's
-  buffered; `pending_len`) shared with `Serial`; all carry
+  default `MAX_FRAME` 1 MiB, measured on the payload without `\n`/`\r\n`:
+  every complete frame is checked as it's handed out, and the incomplete
+  tail after every read by `frame_len` (a last `\r` not counted yet), so
+  validity doesn't depend on how reads split the bytes; an over-long line is
+  `InvalidData` and clears what's buffered; `pending_len`) shared with `Serial`; all carry
   `Packet { bytes, peer }`. `max_frame`/`max_clients` are optional keys in
   `[edge.<name>]` (`graph::EdgeKind`), rendered as the runtime constants
   when absent.

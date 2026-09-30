@@ -84,42 +84,78 @@ While the tree runs, open another terminal in the tree's folder:
 bonsai top local
 ```
 
+It opens on the tree's graph. Here the arrow keys have selected the display,
+just after its panic:
+
 ```
- greenhouse  up 12s  1 events/s  slowest event 327 µs  0 waiting
-┌ branches ──────────────────────────────────────────────────────────────────┐
-│branch                        inputs/s    sent/s    avg µs    max µs  panics│
-│sensor                             1.0       1.0         6        25       0│
-│watchdog                           1.0       2.0         3        10       0│
-│display                            2.0       0.0        20        42       2│
-└────────────────────────────────────────────────────────────────────────────┘
-┌ edges ─────────────────────────────────────────────────────────────────────┐
-│edge            state          in/s     out/s   dropped  restarts last error│
-│uplink          up              0.0       1.0         0         0           │
-└────────────────────────────────────────────────────────────────────────────┘
-┌ log ───────────────────────────────────────────────────────────────────────┐
-│11:56:43.352Z  INFO display: 31.0 °C, 55% humidity                          │
-│11:56:43.352Z  WARN display: too hot: 31.0 °C                               │
-│11:56:44.352Z  INFO display: 32.5 °C, 55% humidity                          │
-│11:56:44.352Z  WARN display: too hot: 32.5 °C                               │
-│11:56:45.352Z  INFO display: 34.0 °C, 55% humidity                          │
-│11:56:45.352Z  WARN display: too hot: 34.0 °C                               │
-│11:56:45.352Z ERROR display: panicked at src/branches/display.rs:33: way too│
-│11:56:45.352Z  WARN display: set up again after a panic                     │
-└────────────────────────────────────────────────────────────────────────────┘
- ↑↓ select  enter show only its log  p pause  q quit
+ greenhouse  up 8s  1 events/s  slowest event 265 µs  0 waiting
+  1 Graph   2 Branches   3 Edges   4 Log   5 System
+┌ graph ─────────────────────────────────────────────────────────────────────────────────┐
+│             ┌────────────────────────────────────────────┐                             │
+│             │                                            │                             │
+│┌──────────┐ │Reading 1.0/s   ┌──────────┐  Alarm 0.0/s   │ ┌─────────┐                 │
+││ sensor   │─┴─┬─────────────▶│ watchdog │────────────────┴▶│ display │                 │
+││ 1.0/s    │   │              │ 1.0/s    │                  │ 1.0/s   │                 │
+│└──────────┘   │              └──────────┘                  └─────────┘                 │
+│               │                    │                                                   │
+│╭──────────╮   │0.0/s               │                                                   │
+││ uplink   │───┘                    │                                                   │
+││ up 0.0/s │                        │                                                   │
+│╰──────────╯                        │                                                   │
+│       ▲                            │                                                   │
+│       └─ 0.0/s ────────────────────┘                                                   │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│────────────────────────────────────────────────────────────────────────────────────────│
+│ display: 1.0 inputs/s, avg 24 µs, max 61 µs, 1 panic                                   │
+│12:19:09.095Z  WARN display: set up again after a panic                                 │
+│12:19:10.094Z  INFO display: 25.0 °C, 55% humidity                                      │
+│12:19:11.095Z  INFO display: 26.5 °C, 55% humidity                                      │
+│12:19:12.095Z  INFO display: 28.0 °C, 55% humidity                                      │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ 1-5/tab/click switch  ←→↑↓ select  enter its log  p pause  q quit
 ```
 
-- **The header** is the core: how long it's run, events per second, the
-  slowest event so far, and how many events are waiting (more than a few
-  means the core is falling behind).
-- **Branches**, in the order the core runs them: inputs and sends per
-  second, the average and longest time `process` took, and panics.
-- **Edges**: `up` or `retrying`, packets in and out per second, what was
-  dropped because the edge fell behind, how often it restarted, and why it
-  last failed.
-- **The log**: the latest lines. `↑`/`↓` pick a branch or edge, and `enter`
-  shows only its lines (`esc` shows them all again). `p` pauses the tables;
-  `q` quits.
+Every branch is a square box and every edge a round one, laid out left to
+right the way messages flow, each with its inputs (or packets) a second.
+Colour shows state: green when busy, grey when idle, red for a branch that
+panicked in the last 10 seconds (the display, here) or an edge that's
+retrying, yellow for an edge starting up. Arrows are the wires, labelled
+with the message and how many a second, and brighter while busy; a wire
+that closes a loop (the watchdog answering the uplink) runs back underneath.
+The strip at the bottom is the selected node: its numbers and latest lines.
+
+The top row holds five **tabs**; switch with their number, `Tab`, or a
+click:
+
+1. **Graph**, above. `←→↑↓` select a node; `enter` opens its log.
+2. **Branches**: each branch in the order the core runs them, with inputs
+   and sends a second, the average and longest time `process` took, and
+   panics.
+
+   ```
+   ┌ branches ──────────────────────────────────────────────────────────────────────────────┐
+   │branch                                    inputs/s    sent/s    avg µs    max µs  panics│
+   │sensor                                         1.0       1.0         4         6       0│
+   │watchdog                                       1.0       2.0         3         7       0│
+   │display                                        2.0       0.0        19        32       1│
+   │                                                                                        │
+   ```
+
+3. **Edges**: `up` or `retrying`, packets in and out a second, what was
+   dropped because the edge fell behind, restarts, and why it last failed.
+4. **Log**: the lines as they come. `↑↓`/`PgUp`/`PgDn` scroll back, `/`
+   searches, `l` steps through the levels shown (all, info+, warn+,
+   errors), `esc` clears.
+5. **System**: the tree's CPU and memory, its threads, and the computer's
+   memory and load.
+
+**The header** above the tabs is the core, on every tab: how long it's run,
+events a second, the slowest event so far, and how many are waiting (more
+than a few means the core is falling behind). `p` pauses the numbers; `q`
+quits. It's all one program in one terminal: no tmux or zellij needed.
 
 Why `local`? The greenhouse is a Pi tree, so plain `bonsai top` goes to the
 Pi in `.cargo/config.toml`'s `BONSAI_PI`, over ssh, as `cargo run` does. It
@@ -130,20 +166,26 @@ $ bonsai top --once
 bonsai top: ssh: Could not resolve hostname raspberrypi.local: Name or service not known
 ```
 
-`--once` prints the tables instead of the live view, for scripts:
+`--once` prints the numbers instead of the live view, for scripts, the
+wires included:
 
 ```sh
 bonsai top local --once
 ```
 
 ```
-greenhouse: up 9s, 1 events/s, slowest event 327 µs, 0 waiting
+greenhouse: up 9s, 1 events/s, slowest event 143 µs, 0 waiting
 branch            inputs/s    sent/s    avg µs    max µs  panics
-sensor                 1.0       1.0         6        25       0
-watchdog               1.0       0.0         2         9       0
-display                1.0       0.0        23        42       1
+sensor                 1.0       1.0         4         5       0
+watchdog               1.0       0.0         2         7       0
+display                1.0       0.0        21        32       1
 edge                 state      in/s     out/s   dropped restarts  last error
 uplink                  up       0.0       0.0         0       0  
+wire                                                msgs/s
+sensor --Reading--> watchdog, display                  1.0
+watchdog --Alarm--> display                            0.0
+uplink --> watchdog                                    0.0
+watchdog --> uplink                                    0.0
 ```
 
 The tree serves these on `127.0.0.1:7777`, on its own computer only (ssh is

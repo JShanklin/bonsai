@@ -1,8 +1,11 @@
 //! `bonsai top`: a live view of a running tree. The tree serves its stats on
 //! 127.0.0.1:7777 (`BONSAI_TOP`, in its `src/bonsai.rs`); top reads them there,
 //! or on a Pi through `ssh -W`, which needs nothing on the Pi but sshd.
+//! The live view is in `view` (its tabs) and `graph` (the node graph).
 
-use std::collections::VecDeque;
+mod graph;
+mod view;
+
 use std::io::{self, BufRead, BufReader};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
@@ -10,17 +13,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Layout};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Row, Table, TableState};
-use ratatui::{DefaultTerminal, Frame};
-
 /// The port a tree serves top on unless its `BONSAI_TOP` says otherwise.
 pub const PORT: u16 = 7777;
-/// Log lines top keeps.
-const KEEP: usize = 1000;
 /// Rates are taken over this long, so a branch ticking once a second doesn't
 /// flicker between 0 and 2 from one half-second report to the next.
 const WINDOW_MS: u64 = 2000;
@@ -46,7 +40,30 @@ pub struct Edge {
     pub error: String,
 }
 
+/// A wire in bonsai.toml, and how many deliveries it has carried.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Wire {
+    pub from: String,
+    /// The message; empty when an edge is at one end.
+    pub label: String,
+    pub to: Vec<String>,
+    pub count: u64,
+}
+
+/// The tree's process and its computer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Sys {
+    pub rss_kb: u64,
+    pub cpu_ms: u64,
+    pub threads: u64,
+    /// The one-minute load average, times 100.
+    pub load: u64,
+    pub mem_total_kb: u64,
+    pub mem_available_kb: u64,
+}
+
 /// One report from the tree: its counts, and the log lines since the last.
+/// A tree from before `wire` and `sys` rows sends none of either.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub uptime_ms: u64,
@@ -55,6 +72,8 @@ pub struct Snapshot {
     pub inbox: u64,
     pub branches: Vec<Branch>,
     pub edges: Vec<Edge>,
+    pub wires: Vec<Wire>,
+    pub sys: Option<Sys>,
     pub logs: Vec<String>,
 }
 
@@ -118,6 +137,28 @@ pub fn parse(lines: &[String]) -> io::Result<Snapshot> {
                 restarts: num(f.next())?,
                 error: f.next().unwrap_or_default().to_string(),
             }),
+            Some("wire") => s.wires.push(Wire {
+                from: f.next().unwrap_or_default().to_string(),
+                label: f.next().unwrap_or_default().to_string(),
+                to: f
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|t| !t.is_empty())
+                    .map(String::from)
+                    .collect(),
+                count: num(f.next())?,
+            }),
+            Some("sys") => {
+                s.sys = Some(Sys {
+                    rss_kb: num(f.next())?,
+                    cpu_ms: num(f.next())?,
+                    threads: num(f.next())?,
+                    load: num(f.next())?,
+                    mem_total_kb: num(f.next())?,
+                    mem_available_kb: num(f.next())?,
+                })
+            }
             Some("log") => s.logs.push(line["log\t".len()..].to_string()),
             _ => {} // a row kind from a newer tree: skip it
         }
@@ -172,7 +213,7 @@ pub fn destination(arg: Option<&str>, env: Option<&str>, config: Option<&str>) -
 // Connecting
 // ---------------------------------------------------------------------------
 
-enum Update {
+pub(crate) enum Update {
     Snapshot(Snapshot),
     Down(String),
 }
@@ -309,7 +350,7 @@ pub fn top(args: &[String]) -> io::Result<()> {
         std::thread::spawn(move || reader(dest, port, tx, ssh));
     }
     let terminal = ratatui::init();
-    let result = run_ui(terminal, rx, title);
+    let result = view::run(terminal, rx, title);
     ratatui::restore();
     if let Some(mut child) = ssh.lock().unwrap_or_else(|e| e.into_inner()).take() {
         let _ = child.kill();
@@ -382,286 +423,29 @@ fn print_once(dest: &Option<String>, port: u16, title: &str) -> io::Result<()> {
             );
         }
     }
+    if !b.wires.is_empty() {
+        println!("{:<48} {:>9}", "wire", "msgs/s");
+        for (i, w) in b.wires.iter().enumerate() {
+            let before = a.wires.get(i).map_or(0, |x| x.count);
+            println!("{:<48} {:>9.1}", wire_text(w), per_sec(before, w.count, ms));
+        }
+    }
     Ok(())
 }
 
-fn avg_us(b: &Branch) -> u64 {
+/// `sensor --Reading--> watchdog, display`, as `bonsai list` shows a wire.
+pub(crate) fn wire_text(w: &Wire) -> String {
+    let arrow = if w.label.is_empty() {
+        "-->".to_string()
+    } else {
+        format!("--{}-->", w.label)
+    };
+    format!("{} {arrow} {}", w.from, w.to.join(", "))
+}
+
+pub(crate) fn avg_us(b: &Branch) -> u64 {
     // A panicked input isn't timed.
     b.busy_us / (b.inputs - b.panics).max(1)
-}
-
-// ---------------------------------------------------------------------------
-// The live view
-// ---------------------------------------------------------------------------
-
-struct App {
-    title: String,
-    /// Earlier snapshots, oldest first, back to `WINDOW_MS` ago.
-    history: VecDeque<Snapshot>,
-    now: Option<Snapshot>,
-    logs: VecDeque<String>,
-    status: Option<String>,
-    /// A row in branches, then edges.
-    selected: usize,
-    /// Only this branch's or edge's lines.
-    filter: Option<String>,
-    paused: bool,
-}
-
-impl App {
-    fn new(title: String) -> Self {
-        App {
-            title,
-            history: VecDeque::new(),
-            now: None,
-            logs: VecDeque::new(),
-            status: None,
-            selected: 0,
-            filter: None,
-            paused: false,
-        }
-    }
-
-    fn update(&mut self, u: Update) {
-        match u {
-            Update::Snapshot(mut s) => {
-                self.status = None;
-                // A restarted tree starts its counts again.
-                if self.now.as_ref().is_some_and(|n| s.uptime_ms < n.uptime_ms) {
-                    self.now = None;
-                    self.history.clear();
-                }
-                for line in s.logs.drain(..) {
-                    if self.logs.len() == KEEP {
-                        self.logs.pop_front();
-                    }
-                    self.logs.push_back(line);
-                }
-                if !self.paused {
-                    self.history.extend(self.now.take());
-                    // Keep the newest one at least WINDOW_MS older than `s`.
-                    while self
-                        .history
-                        .get(1)
-                        .is_some_and(|h| h.uptime_ms + WINDOW_MS <= s.uptime_ms)
-                    {
-                        self.history.pop_front();
-                    }
-                    self.now = Some(s);
-                }
-            }
-            Update::Down(why) => self.status = Some(why),
-        }
-    }
-
-    fn names(&self) -> Vec<String> {
-        let Some(s) = &self.now else {
-            return Vec::new();
-        };
-        let b = s.branches.iter().map(|b| b.name.clone());
-        b.chain(s.edges.iter().map(|e| e.name.clone())).collect()
-    }
-
-    fn draw(&self, frame: &mut Frame) {
-        let dim = Style::new().fg(Color::DarkGray);
-        let (b_rows, e_rows) = self
-            .now
-            .as_ref()
-            .map_or((0, 0), |s| (s.branches.len(), s.edges.len()));
-        let [head, branches, edges, logs, help] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(b_rows as u16 + 3),
-            Constraint::Length(if e_rows == 0 { 0 } else { e_rows as u16 + 3 }),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
-
-        // The header: the tree, and the core.
-        let mut header = vec![Span::styled(
-            format!(" {} ", self.title),
-            Style::new().add_modifier(Modifier::BOLD),
-        )];
-        match (&self.status, &self.now) {
-            (Some(why), _) => header.push(Span::styled(
-                format!(" {why}; retrying "),
-                Style::new().fg(Color::Red),
-            )),
-            (None, None) => header.push(Span::styled(" connecting… ", dim)),
-            (None, Some(s)) => {
-                let ms = self.ms();
-                let events = self.before().map_or(0, |b| b.events);
-                header.push(Span::raw(format!(
-                    " up {}  {:.0} events/s  slowest event {}  {} waiting",
-                    uptime(s.uptime_ms),
-                    per_sec(events, s.events, ms),
-                    took(s.max_event_us),
-                    s.inbox
-                )));
-            }
-        }
-        if self.paused {
-            header.push(Span::styled("  paused", Style::new().fg(Color::Yellow)));
-        }
-        frame.render_widget(Paragraph::new(Line::from(header)), head);
-
-        let Some(s) = &self.now else {
-            self.draw_logs(frame, logs);
-            frame.render_widget(Paragraph::new(" q quit").style(dim), help);
-            return;
-        };
-        let ms = self.ms();
-        let head_style = Style::new().add_modifier(Modifier::BOLD);
-        let selected_style = Style::new().add_modifier(Modifier::REVERSED);
-
-        // Branches, in the order the core runs them.
-        let rows = s.branches.iter().map(|b| {
-            let before = self
-                .before()
-                .and_then(|x| x.branches.iter().find(|x| x.name == b.name));
-            let (inputs, sent) = before.map_or((b.inputs, b.sent), |x| (x.inputs, x.sent));
-            let panics = if b.panics > 0 {
-                Span::styled(b.panics.to_string(), Style::new().fg(Color::Red))
-            } else {
-                Span::raw("0")
-            };
-            Row::new(vec![
-                Line::from(b.name.clone()),
-                Line::from(format!("{:.1}", per_sec(inputs, b.inputs, ms))).right_aligned(),
-                Line::from(format!("{:.1}", per_sec(sent, b.sent, ms))).right_aligned(),
-                Line::from(avg_us(b).to_string()).right_aligned(),
-                Line::from(b.max_us.to_string()).right_aligned(),
-                Line::from(panics).right_aligned(),
-            ])
-        });
-        let widths = [
-            Constraint::Min(16),
-            Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Length(9),
-            Constraint::Length(7),
-        ];
-        let table = Table::new(rows, widths)
-            .header(
-                Row::new(
-                    ["branch", "inputs/s", "sent/s", "avg µs", "max µs", "panics"].map(|h| {
-                        if h == "branch" {
-                            Line::from(h)
-                        } else {
-                            Line::from(h).right_aligned()
-                        }
-                    }),
-                )
-                .style(head_style),
-            )
-            .row_highlight_style(selected_style)
-            .block(Block::bordered().title(" branches "));
-        let mut state =
-            TableState::default().with_selected((self.selected < b_rows).then_some(self.selected));
-        frame.render_stateful_widget(table, branches, &mut state);
-
-        // Edges.
-        if e_rows > 0 {
-            let rows = s.edges.iter().map(|e| {
-                let before = self
-                    .before()
-                    .and_then(|x| x.edges.iter().find(|x| x.name == e.name));
-                let (rx, tx) = before.map_or((e.received, e.sent), |x| (x.received, x.sent));
-                let color = match e.state.as_str() {
-                    "up" => Color::Green,
-                    "retrying" => Color::Red,
-                    _ => Color::Yellow,
-                };
-                Row::new(vec![
-                    Line::from(e.name.clone()),
-                    Line::from(Span::styled(e.state.clone(), Style::new().fg(color))),
-                    Line::from(format!("{:.1}", per_sec(rx, e.received, ms))).right_aligned(),
-                    Line::from(format!("{:.1}", per_sec(tx, e.sent, ms))).right_aligned(),
-                    Line::from(e.dropped.to_string()).right_aligned(),
-                    Line::from(e.restarts.to_string()).right_aligned(),
-                    Line::from(e.error.clone()),
-                ])
-            });
-            let widths = [
-                Constraint::Length(16),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Min(10),
-            ];
-            let heads = [
-                "edge",
-                "state",
-                "in/s",
-                "out/s",
-                "dropped",
-                "restarts",
-                "last error",
-            ];
-            let table = Table::new(rows, widths)
-                .header(
-                    Row::new(heads.map(|h| match h {
-                        "edge" | "state" | "last error" => Line::from(h),
-                        _ => Line::from(h).right_aligned(),
-                    }))
-                    .style(head_style),
-                )
-                .row_highlight_style(selected_style)
-                .block(Block::bordered().title(" edges "));
-            let mut state = TableState::default()
-                .with_selected(self.selected.checked_sub(b_rows).filter(|&i| i < e_rows));
-            frame.render_stateful_widget(table, edges, &mut state);
-        }
-
-        self.draw_logs(frame, logs);
-        let keys = if self.filter.is_some() {
-            " ↑↓ select  enter show its log  esc show every log  p pause  q quit"
-        } else {
-            " ↑↓ select  enter show only its log  p pause  q quit"
-        };
-        frame.render_widget(Paragraph::new(keys).style(dim), help);
-    }
-
-    fn draw_logs(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        let fits = area.height.saturating_sub(2) as usize;
-        let shown: Vec<&String> = self
-            .logs
-            .iter()
-            .filter(|l| {
-                self.filter
-                    .as_ref()
-                    .is_none_or(|f| source(l) == Some(f.as_str()))
-            })
-            .collect();
-        let lines: Vec<Line> = shown[shown.len().saturating_sub(fits)..]
-            .iter()
-            .map(|l| log_line(l))
-            .collect();
-        let title = match &self.filter {
-            Some(f) => format!(" log: {f} "),
-            None => " log ".to_string(),
-        };
-        frame.render_widget(
-            Paragraph::new(lines).block(Block::bordered().title(title)),
-            area,
-        );
-    }
-
-    /// The snapshot rates are taken from: about `WINDOW_MS` ago.
-    fn before(&self) -> Option<&Snapshot> {
-        self.history.front()
-    }
-
-    /// Milliseconds between the two snapshots rates are taken from.
-    fn ms(&self) -> u64 {
-        match (self.before(), &self.now) {
-            (Some(b), Some(n)) => n.uptime_ms.saturating_sub(b.uptime_ms),
-            _ => 0,
-        }
-    }
 }
 
 /// Who wrote a log line: `14:05:03.123Z  INFO sensor: 26.5 °C` → `sensor`.
@@ -669,60 +453,6 @@ pub fn source(line: &str) -> Option<&str> {
     let rest = line.get(14..)?.trim_start();
     let rest = rest.split_once(' ')?.1;
     Some(rest.split_once(": ")?.0)
-}
-
-/// A log line with its level coloured, as the tree shows it on a terminal.
-fn log_line(l: &str) -> Line<'_> {
-    let Some((time, rest)) = l.split_at_checked(13) else {
-        return Line::from(l);
-    };
-    let Some((label, rest)) = rest.split_at_checked(6) else {
-        return Line::from(l);
-    };
-    let color = match label.trim() {
-        "ERROR" => Color::Red,
-        "WARN" => Color::Yellow,
-        "INFO" => Color::Green,
-        _ => Color::Blue,
-    };
-    Line::from(vec![
-        Span::styled(time, Style::new().fg(Color::DarkGray)),
-        Span::styled(label, Style::new().fg(color)),
-        Span::raw(rest),
-    ])
-}
-
-fn run_ui(mut term: DefaultTerminal, rx: mpsc::Receiver<Update>, title: String) -> io::Result<()> {
-    let mut app = App::new(title);
-    loop {
-        while let Ok(u) = rx.try_recv() {
-            app.update(u);
-        }
-        term.draw(|f| app.draw(f))?;
-        if !event::poll(Duration::from_millis(100))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        let rows = app.names().len();
-        match key.code {
-            KeyCode::Char('q') => return Ok(()),
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-            KeyCode::Esc if app.filter.is_some() => app.filter = None,
-            KeyCode::Esc => return Ok(()),
-            KeyCode::Up | KeyCode::Char('k') => app.selected = app.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.selected = (app.selected + 1).min(rows.saturating_sub(1));
-            }
-            KeyCode::Enter => app.filter = app.names().get(app.selected).cloned(),
-            KeyCode::Char('p') => app.paused = !app.paused,
-            _ => {}
-        }
-    }
 }
 
 #[cfg(test)]
@@ -771,7 +501,7 @@ mod tests {
         assert!(parse(&lines("HTTP/1.1 200 OK")).is_err());
         assert!(parse(&lines("bonsai-top 2\t1\t1\t1\t1")).is_err());
         // Rows it doesn't know yet are skipped.
-        let s = parse(&lines("bonsai-top 1\t1\t1\t1\t1\nwire\ta\tb")).unwrap();
+        let s = parse(&lines("bonsai-top 1\t1\t1\t1\t1\nfuture\ta\tb")).unwrap();
         assert_eq!(s.events, 1);
     }
 
@@ -786,25 +516,6 @@ mod tests {
         assert_eq!(took(850), "850 µs");
         assert_eq!(took(12_400), "12.4 ms");
         assert_eq!(took(1_200_000), "1.2 s");
-    }
-
-    #[test]
-    fn rates_are_taken_over_about_two_seconds() {
-        let mut app = App::new("t".into());
-        let at = |ms: u64| {
-            Update::Snapshot(Snapshot {
-                uptime_ms: ms,
-                ..Default::default()
-            })
-        };
-        for ms in (0..=3000).step_by(500) {
-            app.update(at(ms));
-        }
-        assert_eq!(app.before().map(|b| b.uptime_ms), Some(1000));
-        assert_eq!(app.ms(), 2000);
-        // A restarted tree starts over.
-        app.update(at(500));
-        assert_eq!(app.ms(), 0);
     }
 
     #[test]

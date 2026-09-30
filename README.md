@@ -217,36 +217,45 @@ is one line; set `RUST_BACKTRACE=1` for the backtrace too.
 
 ## Watching a tree
 
-`bonsai top`, run in a tree's folder while it runs, shows it live: every
-branch in the order the core runs them (inputs and sends per second, time
-per input, panics), every edge (up or retrying, packets in and out, drops,
-restarts, the last error), and the log. `↑`/`↓` and `enter` show one
-branch's or edge's lines only. Here, the tutorial's greenhouse, whose
-display was made to panic above 33 °C:
+`bonsai top`, run in a tree's folder while it runs, shows it live, in five
+tabs you switch with their number, `Tab` or a click: the **graph** (every
+branch and edge as a box coloured by its state: green busy, grey idle, red
+after a panic or while retrying; every wire an arrow with its message and
+rate), **branches** (inputs and sends a second, time per input, panics),
+**edges** (up or retrying, packets in and out, drops, restarts, the last
+error), the **log** (scroll, search, filter by level or by who wrote it)
+and the **system** (the tree's CPU and memory, the computer's load). Here,
+the tutorial's greenhouse, its display selected just after a panic:
 
 ```
- greenhouse  up 12s  1 events/s  slowest event 183 µs  0 waiting
-┌ branches ──────────────────────────────────────────────────────────────────┐
-│branch                        inputs/s    sent/s    avg µs    max µs  panics│
-│sensor                             1.0       1.0         3         4       0│
-│watchdog                           1.0       2.0         4        35       0│
-│display                            2.0       0.0        30       110       2│
-└────────────────────────────────────────────────────────────────────────────┘
-┌ edges ─────────────────────────────────────────────────────────────────────┐
-│edge            state          in/s     out/s   dropped  restarts last error│
-│uplink          up              0.0       1.0         0         0           │
-└────────────────────────────────────────────────────────────────────────────┘
-┌ log ───────────────────────────────────────────────────────────────────────┐
-│10:47:12.116Z  INFO display: 31.0 °C, 55% humidity                          │
-│10:47:12.116Z  WARN display: too hot: 31.0 °C                               │
-│10:47:13.116Z  INFO display: 32.5 °C, 55% humidity                          │
-│10:47:13.116Z  WARN display: too hot: 32.5 °C                               │
-│10:47:14.116Z  INFO display: 34.0 °C, 55% humidity                          │
-│10:47:14.116Z  WARN display: too hot: 34.0 °C                               │
-│10:47:14.116Z ERROR display: panicked at src/branches/display.rs:35: way too│
-│10:47:14.116Z  WARN display: set up again after a panic                     │
-└────────────────────────────────────────────────────────────────────────────┘
- ↑↓ select  enter show only its log  p pause  q quit
+ greenhouse  up 8s  1 events/s  slowest event 265 µs  0 waiting
+  1 Graph   2 Branches   3 Edges   4 Log   5 System
+┌ graph ─────────────────────────────────────────────────────────────────────────────────┐
+│             ┌────────────────────────────────────────────┐                             │
+│             │                                            │                             │
+│┌──────────┐ │Reading 1.0/s   ┌──────────┐  Alarm 0.0/s   │ ┌─────────┐                 │
+││ sensor   │─┴─┬─────────────▶│ watchdog │────────────────┴▶│ display │                 │
+││ 1.0/s    │   │              │ 1.0/s    │                  │ 1.0/s   │                 │
+│└──────────┘   │              └──────────┘                  └─────────┘                 │
+│               │                    │                                                   │
+│╭──────────╮   │0.0/s               │                                                   │
+││ uplink   │───┘                    │                                                   │
+││ up 0.0/s │                        │                                                   │
+│╰──────────╯                        │                                                   │
+│       ▲                            │                                                   │
+│       └─ 0.0/s ────────────────────┘                                                   │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│────────────────────────────────────────────────────────────────────────────────────────│
+│ display: 1.0 inputs/s, avg 24 µs, max 61 µs, 1 panic                                   │
+│12:19:09.095Z  WARN display: set up again after a panic                                 │
+│12:19:10.094Z  INFO display: 25.0 °C, 55% humidity                                      │
+│12:19:11.095Z  INFO display: 26.5 °C, 55% humidity                                      │
+│12:19:12.095Z  INFO display: 28.0 °C, 55% humidity                                      │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ 1-5/tab/click switch  ←→↑↓ select  enter its log  p pause  q quit
 ```
 
 The tree serves these on `127.0.0.1:7777`, on its own computer only. For a

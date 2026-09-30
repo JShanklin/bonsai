@@ -24,6 +24,10 @@ pub enum EdgeIn {
 pub enum Msg {
 }
 
+/// The wires, in bonsai.toml order (from, message, to): for `bonsai top`.
+const WIRES: &[crate::bonsai::stats::WireInfo] = &[
+];
+
 /// Every branch and edge, set up and waiting for events.
 pub struct Core {
     queue: VecDeque<Msg>,
@@ -31,6 +35,7 @@ pub struct Core {
 
 impl Core {
     pub fn new() -> Self {
+        crate::bonsai::stats::wires(WIRES);
         Core {
             queue: VecDeque::new(),
         }

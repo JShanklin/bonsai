@@ -565,44 +565,7 @@ pub fn edge_add(name: &str, args: &[String]) -> io::Result<()> {
         Some((kind, rest)) if !kind.starts_with('-') => (kind.as_str(), rest),
         _ => usage("usage: bonsai edge add <name> udp|tcp|serial [--key value …], or --custom"),
     };
-    let mut table = Table::new();
-    table.insert("kind", value(kind));
-    let mut i = 0;
-    while i < rest.len() {
-        let Some(key) = rest[i].strip_prefix("--") else {
-            usage(format!("expected --key, got {:?}", rest[i]));
-        };
-        let key = key.replace('-', "_");
-        match key.as_str() {
-            "reply" => {
-                table.insert("reply", value(true));
-                i += 1;
-            }
-            "join" => {
-                let Some(group) = rest.get(i + 1) else {
-                    usage("--join takes a group address");
-                };
-                let mut groups = table
-                    .get("join")
-                    .and_then(Item::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                groups.push(group.as_str());
-                table.insert("join", value(groups));
-                i += 2;
-            }
-            _ => {
-                let Some(v) = rest.get(i + 1) else {
-                    usage(format!("--{key} takes a value"));
-                };
-                match v.parse::<i64>() {
-                    Ok(n) if key == "baud" => table.insert(&key, value(n)),
-                    _ => table.insert(&key, value(v.as_str())),
-                };
-                i += 2;
-            }
-        }
-    }
+    let table = edge_table(kind, rest).unwrap_or_else(|e| usage(e));
     let mut doc = load_doc();
     tables(&mut doc, "edge").insert(name, Item::Table(table));
     save_checked(&doc)?;
@@ -620,9 +583,66 @@ pub fn edge_add(name: &str, args: &[String]) -> io::Result<()> {
         println!("added {kind} edge {name}");
     }
     println!(
-        "wire it with `bonsai wire {name} <branch>` (what it receives) and `bonsai wire <branch> {name}` (what it sends)"
+        "wire it one way or both: `bonsai wire {name} <branch>` (what it receives), `bonsai wire <branch> {name}` (what it sends)"
     );
     sync_tree()
+}
+
+/// An edge's `bonsai.toml` table from `edge add`'s `--key value` flags.
+fn edge_table(kind: &str, rest: &[String]) -> Result<Table, String> {
+    let mut table = Table::new();
+    table.insert("kind", value(kind));
+    let mut i = 0;
+    while i < rest.len() {
+        let Some(key) = rest[i].strip_prefix("--") else {
+            return Err(format!(
+                "expected --key, got {:?} (flags go --key value, e.g. --bind 0.0.0.0:6969)",
+                rest[i]
+            ));
+        };
+        let key = key.replace('-', "_");
+        if key == "reply" {
+            table.insert("reply", value(true));
+            i += 1;
+            continue;
+        }
+        let v = match rest.get(i + 1) {
+            Some(v) if !v.starts_with("--") => v,
+            got => {
+                let got = got.map_or("nothing".to_string(), |g| g.to_string());
+                return Err(format!("--{key} takes {}, got {got}", wants(&key)));
+            }
+        };
+        if key == "join" {
+            let mut groups = table
+                .get("join")
+                .and_then(Item::as_array)
+                .cloned()
+                .unwrap_or_default();
+            groups.push(v.as_str());
+            table.insert("join", value(groups));
+        } else {
+            match v.parse::<i64>() {
+                Ok(n) if key == "baud" => table.insert(&key, value(n)),
+                _ => table.insert(&key, value(v.as_str())),
+            };
+        }
+        i += 2;
+    }
+    Ok(table)
+}
+
+/// What an `edge add` flag takes, for its error.
+fn wants(key: &str) -> &'static str {
+    match key {
+        "bind" | "to" | "connect" | "listen" => "an address (like 0.0.0.0:6969)",
+        "join" => "a group address (like 239.2.3.1)",
+        "iface" => "an interface address (like 192.168.1.10)",
+        "device" => "a path (like /dev/serial0)",
+        "baud" => "a number (like 9600)",
+        "framing" => "raw or lines",
+        _ => "a value",
+    }
 }
 
 /// `bonsai edge remove <name>`: its table, its wires and the arms they fed,
@@ -1057,6 +1077,38 @@ pub fn with_macro_use(main_src: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn flags(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn edge_flags_take_values_and_refuse_a_missing_one() {
+        let err = edge_table("udp", &flags("--bind --to 0.0.0.0:14560")).unwrap_err();
+        assert_eq!(err, "--bind takes an address (like 0.0.0.0:6969), got --to");
+        let err = edge_table("udp", &flags("--bind")).unwrap_err();
+        assert_eq!(
+            err,
+            "--bind takes an address (like 0.0.0.0:6969), got nothing"
+        );
+        let err = edge_table("udp", &flags("0.0.0.0:6969")).unwrap_err();
+        assert!(
+            err.starts_with("expected --key, got \"0.0.0.0:6969\""),
+            "{err}"
+        );
+
+        let t = edge_table(
+            "udp",
+            &flags("--bind 0.0.0.0:14560 --reply --join 239.2.3.1 --join 239.2.3.2"),
+        )
+        .unwrap();
+        assert_eq!(
+            t.to_string(),
+            "kind = \"udp\"\nbind = \"0.0.0.0:14560\"\nreply = true\njoin = [\"239.2.3.1\", \"239.2.3.2\"]\n"
+        );
+        let t = edge_table("serial", &flags("--device /dev/serial0 --baud 9600")).unwrap();
+        assert_eq!(t.get("baud").and_then(Item::as_integer), Some(9600));
+    }
 
     #[test]
     fn units_are_imported_once_when_a_field_uses_one() {

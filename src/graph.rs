@@ -256,6 +256,15 @@ fn edge_kind(t: &Table) -> Result<EdgeKind, String> {
     let needed = |key: &str| -> Result<String, String> {
         text(key)?.ok_or_else(|| format!("a {kind} edge needs `{key}`"))
     };
+    let addr = |key: &str| -> Result<Option<String>, String> {
+        let a = text(key)?;
+        match &a {
+            Some(s) if !is_address(s) => Err(format!(
+                "{key} {s:?}: an address is HOST:PORT, like 0.0.0.0:6969"
+            )),
+            _ => Ok(a),
+        }
+    };
     let framing = || -> Result<Framing, String> {
         match text("framing")?.as_deref() {
             None | Some("raw") => Ok(Framing::Raw),
@@ -281,16 +290,30 @@ fn edge_kind(t: &Table) -> Result<EdgeKind, String> {
                 None => false,
                 Some(item) => item.as_bool().ok_or("reply is true or false")?,
             };
+            let (bind, to) = (addr("bind")?, addr("to")?);
+            if bind.is_none() {
+                if to.is_none() {
+                    return Err(
+                        "a udp edge takes `bind` (to receive), `to` (to send), or both".to_string(),
+                    );
+                }
+                if reply || !join.is_empty() {
+                    return Err(
+                        "`reply` and `join` need `bind`: the port it receives on".to_string()
+                    );
+                }
+            }
             EdgeKind::Udp {
-                bind: needed("bind")?,
-                to: text("to")?,
+                // Send only: any free port (replies to what it sends still come back).
+                bind: bind.unwrap_or_else(|| "0.0.0.0:0".to_string()),
+                to,
                 join,
                 iface: text("iface")?.unwrap_or_else(|| "0.0.0.0".to_string()),
                 reply,
             }
         }
         "tcp" => {
-            let (connect, listen) = (text("connect")?, text("listen")?);
+            let (connect, listen) = (addr("connect")?, addr("listen")?);
             if connect.is_some() == listen.is_some() {
                 return Err(
                     "a tcp edge takes one of `connect` (a client) or `listen` (a server)"
@@ -331,6 +354,21 @@ fn edge_kind(t: &Table) -> Result<EdgeKind, String> {
             EdgeKind::Custom { settings }
         }
     })
+}
+
+/// `HOST:PORT`: a host (a name, an IPv4 address or a bracketed IPv6 one)
+/// and a port. Names are resolved when the tree runs.
+fn is_address(s: &str) -> bool {
+    let Some((host, port)) = s.rsplit_once(':') else {
+        return false;
+    };
+    let host_ok = match host.strip_prefix('[') {
+        Some(v6) => v6
+            .strip_suffix(']')
+            .is_some_and(|v| v.parse::<std::net::Ipv6Addr>().is_ok()),
+        None => !host.is_empty() && !host.starts_with('-') && !host.contains(':'),
+    };
+    host_ok && port.parse::<u16>().is_ok()
 }
 
 fn setting(value: &Value) -> Result<Setting, String> {
@@ -1550,14 +1588,21 @@ to = ["link", "radio"]
     #[test]
     fn edge_tables_are_checked_when_read() {
         for (table, expect) in [
-            ("kind = \"udp\"\n", "needs `bind`"),
+            (
+                "kind = \"udp\"\n",
+                "`bind` (to receive), `to` (to send), or both",
+            ),
+            (
+                "kind = \"udp\"\nto = \"h:1\"\nreply = true\n",
+                "need `bind`",
+            ),
             (
                 "kind = \"udp\"\nbind = \"x\"\nport = 1\n",
                 "port: a udp edge takes",
             ),
             ("kind = \"tcp\"\n", "one of `connect`"),
             (
-                "kind = \"tcp\"\nconnect = \"a\"\nlisten = \"b\"\n",
+                "kind = \"tcp\"\nconnect = \"h:1\"\nlisten = \"h:2\"\n",
                 "one of `connect`",
             ),
             ("kind = \"serial\"\ndevice = \"/dev/x\"\n", "needs `baud`"),
@@ -1668,6 +1713,38 @@ to = ["b"]
             w.contains("pub fn drain_tak(&mut self) -> Vec<crate::bonsai::Packet> {"),
             "{w}"
         );
+    }
+
+    #[test]
+    fn addresses_are_host_and_port() {
+        for ok in [
+            "0.0.0.0:6969",
+            "pi.local:5760",
+            "[::1]:7000",
+            "[ff02::1]:14550",
+        ] {
+            assert!(is_address(ok), "{ok}");
+        }
+        for bad in [
+            "0.0.0.0",
+            "--to",
+            ":6969",
+            "host:port",
+            "host:70000",
+            "::1:7000",
+        ] {
+            assert!(!is_address(bad), "{bad}");
+        }
+        let err = parse("[edge.gcs]\nkind = \"udp\"\nbind = \"--to\"\n").unwrap_err();
+        assert!(
+            err.contains("bind \"--to\": an address is HOST:PORT"),
+            "{err}"
+        );
+        let err = parse("[edge.hub]\nkind = \"tcp\"\nlisten = \"7000\"\n").unwrap_err();
+        assert!(err.contains("listen \"7000\""), "{err}");
+        // Send only: no bind, any free port.
+        let cfg = parse("[edge.out]\nkind = \"udp\"\nto = \"h:1\"\n").unwrap();
+        assert!(matches!(&cfg.edges[0].kind, EdgeKind::Udp { bind, .. } if bind == "0.0.0.0:0"));
     }
 
     #[test]

@@ -113,3 +113,34 @@ fn a_setup_that_panics_at_startup_leaves_the_branch_failed_not_the_tree() {
     assert!(slot.process(1).0.is_empty());
     assert!(stats::branch("rt_stillborn").failed.load(Relaxed));
 }
+
+branch!(
+    Returns,
+    RETURNS_SETUPS,
+    RETURNS_SETUP_FAILS,
+    RETURNS_PROCESS_FAILS
+);
+
+#[test]
+fn a_failed_branch_comes_back_once_setup_works_again() {
+    RETURNS_SETUP_FAILS.store(true, Relaxed);
+    let mut slot = Slot::<Returns>::new("rt_returns");
+    for i in 0..5 {
+        assert!(slot.process(i).0.is_empty());
+    }
+    let s = stats::branch("rt_returns");
+    assert_eq!(
+        s.discarded.load(Relaxed),
+        5,
+        "every input it missed is counted"
+    );
+    RETURNS_SETUP_FAILS.store(false, Relaxed);
+    // Not before its retry is due...
+    assert!(slot.process(5).0.is_empty());
+    std::thread::sleep(crate::bonsai::SETUP_RETRY + std::time::Duration::from_millis(100));
+    // ...then set up again, and this input is processed.
+    assert_eq!(slot.process(6).0, [6]);
+    assert!(!s.failed.load(Relaxed));
+    assert_eq!(s.discarded.load(Relaxed), 6);
+    assert_eq!(slot.process(7).0, [7]);
+}

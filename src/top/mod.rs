@@ -27,6 +27,10 @@ pub struct Branch {
     pub panics: u64,
     pub busy_us: u64,
     pub max_us: u64,
+    /// Out of service: its setup panicked (false from an older tree).
+    pub failed: bool,
+    /// Inputs dropped while out of service.
+    pub discarded: u64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -140,6 +144,9 @@ pub fn parse(lines: &[String]) -> io::Result<Snapshot> {
                 panics: num(f.next())?,
                 busy_us: num(f.next())?,
                 max_us: num(f.next())?,
+                // Newer trees add these; older ones don't.
+                failed: f.next() == Some("1"),
+                discarded: f.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             }),
             Some("edge") => s.edges.push(Edge {
                 name: f.next().unwrap_or_default().to_string(),
@@ -410,8 +417,13 @@ fn print_once(dest: &Option<String>, port: u16, title: &str) -> io::Result<()> {
     for (i, br) in b.branches.iter().enumerate() {
         let before = a.branches.get(i).filter(|x| x.name == br.name);
         let (inputs, sent) = before.map_or((0, 0), |x| (x.inputs, x.sent));
+        let out = if br.failed {
+            format!("  out of service ({} inputs dropped)", br.discarded)
+        } else {
+            String::new()
+        };
         println!(
-            "{:<16} {:>9.1} {:>9.1} {:>9} {:>9} {:>7}",
+            "{:<16} {:>9.1} {:>9.1} {:>9} {:>9} {:>7}{out}",
             br.name,
             per_sec(inputs, br.inputs, ms),
             per_sec(sent, br.sent, ms),
@@ -478,7 +490,7 @@ mod tests {
     use super::*;
 
     const REPORT: &str = "bonsai-top 1\t1500\t3\t40\t0\n\
-         branch\tsensor\t3\t0\t0\t12\t5\n\
+         branch\tsensor\t3\t0\t0\t12\t5\t1\t4\n\
          edge\tnet\tretrying\t1\t2\t0\t1\tbind x\t3\t1\t0\n\
          log\t14:05:03.123Z  INFO sensor: 26.5 °C\n\
          end\n\
@@ -502,7 +514,9 @@ mod tests {
                 sent: 0,
                 panics: 0,
                 busy_us: 12,
-                max_us: 5
+                max_us: 5,
+                failed: true,
+                discarded: 4
             }]
         );
         assert_eq!(s.edges[0].state, "retrying");

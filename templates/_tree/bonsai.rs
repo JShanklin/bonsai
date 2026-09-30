@@ -79,7 +79,9 @@ pub trait Branch: Sized {
     /// Where it sends: `crate::links::<branch>::Out`.
     type Out: Default + Outbox;
 
-    /// Setup: the branch's starting state. Runs again after `process` panics.
+    /// Setup: the branch's starting state. Runs again after `process`
+    /// panics. If it panics itself, the branch is out of service (its
+    /// inputs dropped) until a later `setup` works: see `Slot`.
     fn setup() -> Self;
 
     /// Process: decide what to do with one input, and `out.send(..)` the
@@ -119,41 +121,103 @@ pub trait Tree {
     fn handle(&mut self, event: Event<Self::EdgeIn>);
 }
 
-/// One branch in the core, set up again if its `process` panics.
+/// How long a branch whose `setup` panicked waits before it's tried again;
+/// the wait doubles with each failure, up to `SETUP_RETRY_MAX`.
+pub const SETUP_RETRY: Duration = Duration::from_secs(1);
+pub const SETUP_RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// One branch in the core. When its `process` panics, what it sent for that
+/// input is dropped and it's set up again. When `setup` panics too (or at
+/// startup), the branch is out of service: its inputs are discarded (and
+/// counted), the rest of the tree carries on, and `setup` is tried again on
+/// an input after `SETUP_RETRY`, then twice as long each time it fails, up
+/// to `SETUP_RETRY_MAX`: never in a tight loop.
 pub struct Slot<B: Branch> {
     name: &'static str,
-    branch: B,
+    /// None while out of service.
+    branch: Option<B>,
+    /// Out of service: when to try `setup` again, and the wait after that.
+    retry: Option<(Instant, Duration)>,
     stats: Arc<stats::BranchStats>,
 }
 
 impl<B: Branch> Slot<B> {
     pub fn new(name: &'static str) -> Self {
-        Slot {
+        let mut slot = Slot {
             name,
-            branch: B::setup(),
+            branch: None,
+            retry: None,
             stats: stats::branch(name),
+        };
+        slot.set_up(SETUP_RETRY);
+        slot
+    }
+
+    /// Run `setup`, catching a panic: in service after it, or out of
+    /// service for `wait`.
+    fn set_up(&mut self, wait: Duration) -> bool {
+        let outer = log::enter(self.name);
+        let made = catch_unwind(B::setup);
+        log::enter(outer);
+        match made {
+            Ok(branch) => {
+                self.branch = Some(branch);
+                self.retry = None;
+                self.stats.failed.store(false, Relaxed);
+                true
+            }
+            Err(_) => {
+                self.branch = None;
+                self.retry = Some((Instant::now() + wait, wait));
+                self.stats.failed.store(true, Relaxed);
+                log::write(
+                    log::Level::Error,
+                    Some(self.name),
+                    format_args!(
+                        "setup panicked: out of service, its inputs dropped; trying again in {wait:?}"
+                    ),
+                );
+                false
+            }
         }
     }
 
-    /// Process one input; what it sent, or nothing if it panicked.
+    /// Process one input; what it sent, or nothing if it panicked or the
+    /// branch is out of service.
     pub fn process(&mut self, input: B::Input) -> B::Out {
+        if self.branch.is_none() {
+            let Some((at, wait)) = self.retry else {
+                return B::Out::default();
+            };
+            let back = Instant::now() >= at && self.set_up((wait * 2).min(SETUP_RETRY_MAX));
+            if !back {
+                self.stats.discarded.fetch_add(1, Relaxed);
+                return B::Out::default();
+            }
+            log::write(
+                log::Level::Info,
+                Some(self.name),
+                format_args!("set up again: back in service"),
+            );
+        }
+        let Some(branch) = self.branch.as_mut() else {
+            return B::Out::default();
+        };
         let mut out = B::Out::default();
-        let branch = &mut self.branch;
         let outer = log::enter(self.name);
         let started = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| branch.process(input, &mut out)));
         let took = started.elapsed();
-        if result.is_err() {
-            self.branch = B::setup();
-        }
         log::enter(outer);
         if result.is_err() {
             self.stats.record(took, 0, true);
-            log::write(
-                log::Level::Warn,
-                Some(self.name),
-                format_args!("set up again after a panic"),
-            );
+            if self.set_up(SETUP_RETRY) {
+                log::write(
+                    log::Level::Warn,
+                    Some(self.name),
+                    format_args!("set up again after a panic"),
+                );
+            }
             return B::Out::default();
         }
         self.stats.record(took, out.count(), false);
@@ -1635,7 +1699,7 @@ pub mod units {
 /// changes what a branch sends: it's only watched.
 pub mod stats {
     use std::sync::atomic::Ordering::Relaxed;
-    use std::sync::atomic::{AtomicU8, AtomicU64};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
@@ -1648,6 +1712,10 @@ pub mod stats {
         /// Time spent in `process`, in all and at most once.
         pub busy_ns: AtomicU64,
         pub max_ns: AtomicU64,
+        /// Out of service: its `setup` panicked.
+        pub failed: AtomicBool,
+        /// Inputs dropped while it was out of service.
+        pub discarded: AtomicU64,
     }
 
     impl BranchStats {
@@ -1756,8 +1824,8 @@ pub mod stats {
         pub events: u64,
         pub max_event_us: u64,
         pub inbox: u64,
-        /// name, inputs, sent, panics, busy µs, max µs
-        pub branches: Vec<(String, [u64; 5])>,
+        /// name, inputs, sent, panics, busy µs, max µs, failed (0/1), discarded
+        pub branches: Vec<(String, [u64; 7])>,
         /// name, state, [received, sent, dropped, restarts, accepted, failed,
         /// discarded], last error
         pub edges: Vec<(String, &'static str, [u64; 7], String)>,
@@ -1857,6 +1925,8 @@ pub mod stats {
                         s.panics.load(Relaxed),
                         s.busy_ns.load(Relaxed) / 1000,
                         s.max_ns.load(Relaxed) / 1000,
+                        u64::from(s.failed.load(Relaxed)),
+                        s.discarded.load(Relaxed),
                     ];
                     (name.to_string(), n)
                 })
@@ -1902,13 +1972,15 @@ pub mod stats {
         );
         for (name, n) in &s.branches {
             o += &format!(
-                "branch\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                "branch\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 clean(name),
                 n[0],
                 n[1],
                 n[2],
                 n[3],
-                n[4]
+                n[4],
+                n[5],
+                n[6]
             );
         }
         // New counts go after the error, so an older `bonsai top` (which
@@ -1958,7 +2030,7 @@ pub mod stats {
                 events: 3,
                 max_event_us: 40,
                 inbox: 0,
-                branches: vec![("sensor".into(), [3, 0, 0, 12, 5])],
+                branches: vec![("sensor".into(), [3, 0, 0, 12, 5, 1, 4])],
                 edges: vec![(
                     "net".into(),
                     "retrying",
@@ -1978,7 +2050,7 @@ pub mod stats {
             assert_eq!(
                 render(&s, &["a line".into()]),
                 "bonsai-top 1\t1500\t3\t40\t0\n\
-                 branch\tsensor\t3\t0\t0\t12\t5\n\
+                 branch\tsensor\t3\t0\t0\t12\t5\t1\t4\n\
                  edge\tnet\tretrying\t1\t2\t0\t1\tbind x\t3\t1\t0\n\
                  link\tsensor\tReading\tnet,log\t3\n\
                  sys\t2048\t30\t1\t12\t4000\t3000\n\

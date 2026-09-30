@@ -792,7 +792,12 @@ pub fn rate(branch: &str, hz: &str) -> io::Result<()> {
         } else {
             t.insert("rate", value(n));
         }
-        println!("{branch} ticks {hz} times a second: `Input::Tick` in its process");
+        let how_often = if n == 1.0 {
+            "once a second".to_string()
+        } else {
+            format!("{hz} times a second")
+        };
+        println!("{branch} ticks {how_often}: `Input::Tick` in its process");
     }
     let after = save_checked(&doc)?;
     reconcile_arms(&before, &after)?;

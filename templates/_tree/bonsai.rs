@@ -2424,6 +2424,12 @@ pub enum Framing {
 /// passes the limit, before it's buffered.
 pub const MAX_FRAME: usize = 1 << 20;
 
+/// The least a line still arriving (no `\n` yet) will measure: a last `\r`
+/// may be half of `\r\n`, so it doesn't count until what follows is known.
+pub fn frame_len(partial: &[u8]) -> usize {
+    partial.len() - usize::from(partial.last() == Some(&b'\r'))
+}
+
 /// A byte stream cut into packets.
 pub struct Framed<S> {
     io: S,
@@ -2457,21 +2463,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Framed<S> {
     }
 
     /// The next packet. Cancel-safe: nothing is kept between awaits but
-    /// `pending`, which is updated only once a read has finished. With lines
-    /// framing, a line longer than `max_frame` is an `InvalidData` error the
-    /// moment it passes the limit: `pending` never holds more than the limit
-    /// plus one read.
+    /// `pending`, which is updated only once a read has finished.
+    ///
+    /// With lines framing, a frame's length is its payload: the bytes before
+    /// its `\n`, not counting one `\r` just before it, so `abcd\n` and
+    /// `abcd\r\n` are both 4. Every frame longer than `max_frame` is an
+    /// `InvalidData` error, whether it arrived alone, among others in one
+    /// read, or split across several: a line still arriving is refused as
+    /// soon as it must be longer (a last `\r` may yet be half a `\r\n`, so
+    /// it isn't counted until what follows it is known). After an error the
+    /// rest of what was read is dropped: the stream is out of step. `pending`
+    /// never holds more than the limit plus one read.
     pub async fn recv(&mut self) -> io::Result<Vec<u8>> {
         loop {
-            if self.framing == Framing::Lines
-                && let Some(end) = self.pending.iter().position(|&b| b == b'\n')
-            {
-                let mut line: Vec<u8> = self.pending.drain(..=end).collect();
-                line.pop();
-                if line.last() == Some(&b'\r') {
+            if self.framing == Framing::Lines {
+                if let Some(end) = self.pending.iter().position(|&b| b == b'\n') {
+                    let mut line: Vec<u8> = self.pending.drain(..=end).collect();
                     line.pop();
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                    if line.len() > self.max_frame {
+                        return Err(self.too_long());
+                    }
+                    return Ok(line);
                 }
-                return Ok(line);
+                if frame_len(&self.pending) > self.max_frame {
+                    return Err(self.too_long());
+                }
             }
             let n = self.io.read(&mut self.buf).await?;
             if n == 0 {
@@ -2479,21 +2498,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Framed<S> {
             }
             match self.framing {
                 Framing::Raw => return Ok(self.buf[..n].to_vec()),
-                Framing::Lines => {
-                    // `pending` has no newline here: the line so far runs to
-                    // the first newline in what was just read, if any.
-                    let upto = self.buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
-                    if self.pending.len() + upto > self.max_frame {
-                        self.pending.clear();
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("a line longer than {} bytes", self.max_frame),
-                        ));
-                    }
-                    self.pending.extend_from_slice(&self.buf[..n]);
-                }
+                Framing::Lines => self.pending.extend_from_slice(&self.buf[..n]),
             }
         }
+    }
+
+    /// A frame past `max_frame`: what's buffered is dropped with it.
+    fn too_long(&mut self) -> io::Error {
+        self.pending.clear();
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a line longer than {} bytes", self.max_frame),
+        )
     }
 
     pub async fn send(&mut self, bytes: &[u8]) -> io::Result<()> {

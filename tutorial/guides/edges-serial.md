@@ -16,7 +16,7 @@ bonsai edge add <name> serial --device /dev/serial0 --baud 9600 [--framing lines
 | `device` | the port: `/dev/serial0` (a Pi's UART), `/dev/ttyUSB0` or `/dev/ttyACM0` (USB adapters and boards) |
 | `baud` | its speed, as the device expects it: 9600 for most GPS receivers, 57600 or 115200 for flight controllers |
 | `framing` | `raw` (the default): whatever each read returns, for protocols with their own framing; `lines`: one packet per line, without its `\r\n`, and a newline added to each packet sent |
-| `max_frame` | the longest line, in bytes, with `lines` framing (default 1 MiB). A longer one (a device sending garbage, or no newlines) is refused before it's buffered, and the edge reopens the port |
+| `max_frame` | the longest line, in bytes, with `lines` framing (default 1 MiB), not counting its `\n` or `\r\n`. Every line is held to it, however the port delivers the bytes; a longer one (a device sending garbage, or no newlines) is refused before it's buffered, and the edge reopens the port |
 
 A serial packet's `peer` is always `None`.
 

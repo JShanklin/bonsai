@@ -11,6 +11,7 @@
 mod support;
 
 mod edges;
+mod framing;
 mod record;
 mod slot;
 mod tcp;

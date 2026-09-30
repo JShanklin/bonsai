@@ -156,5 +156,12 @@ The hub, the relay and the clients carry on the whole time.
   its task ends. A client whose write fails is closed at once.
 - When a server edge restarts, every client's connection is closed and its
   tasks end with it; clients reconnect to the new one.
+- **Slow clients can't hold anyone up.** A server writes to each client
+  from its own task, through its own queue of 64 packets. A client that
+  stops reading misses what's sent while its queue is full, and once one
+  write to it has waited 5 s (`WRITE_TIMEOUT`) it's disconnected, without
+  re-sending what was half-written. Everyone else, and what the edge
+  receives, carries on meanwhile. What a client missed is counted as
+  **lost** in `bonsai top`.
 - For binary protocols, keep `framing = "raw"` and put the parsing in
   `process`; see the [binary messages](binary-messages.md) guide.

@@ -54,6 +54,7 @@ is fine: bonsai puts it back on its own line.
 | `WARN <edge>: … Permission denied …` (serial) | the user can't open the port | `sudo usermod -aG dialout $USER`, then log in again |
 | `WARN <edge>: isn't keeping up; dropping what's sent to it (counted in bonsai top)` | branches send the edge faster than it can go out, and its queue of 64 is full | send less often, or check the link; `bonsai top` counts the drops. Said once each time dropping starts |
 | `WARN <edge>: has stopped; dropping what's sent to it (counted in bonsai top)` | the edge's task is gone (the tree is shutting down) | nothing, while stopping |
+| `WARN <edge>: 10.0.0.7:5000: not reading: a write took over 5s; disconnecting it (12 discarded)` | a TCP server's client stopped reading (hung, or on a slow link) | nothing to do on the tree's side: the other clients weren't held up; the client reconnects when it's ready |
 | `WARN <edge>: 64 clients already; turning new ones away (max_clients)` | a TCP server is full of clients that are all still sending | raise `max_clients` in its `[edge.<name>]`, or find who's connecting |
 | `WARN <edge>: 10.0.0.7:5000: a line longer than 1048576 bytes; no longer reading from it` | a client sent a line past `max_frame` (or no newlines at all) | fix the client, or raise `max_frame`; a stream client or serial edge reconnects instead: `a line longer than …; retrying in …` |
 | `ERROR <branch>: panicked at …`, then `WARN <branch>: set up again after a panic` | a bug in `process`; the branch was reset | fix it; `RUST_BACKTRACE=1` shows the backtrace |

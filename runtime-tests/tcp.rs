@@ -216,7 +216,23 @@ async fn a_client_that_stops_reading_holds_up_no_one() {
             .is_ok(),
         "a stalled client held up the healthy one"
     );
-    drop(slow);
+    // The slow client: once a write to it has waited WRITE_TIMEOUT, it's
+    // disconnected and what couldn't reach it is counted.
+    tokio::time::sleep(crate::bonsai::WRITE_TIMEOUT + Duration::from_secs(1)).await;
+    let s = crate::bonsai::stats::edge("rt_slow");
+    let discarded = s.discarded.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(discarded > 0, "nothing counted as discarded");
+    let mut buf = vec![0u8; 1 << 20];
+    let closed = timeout(Duration::from_secs(10), async {
+        loop {
+            match slow.read(&mut buf).await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {} // what reached its socket before the cut
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the stalled client was never disconnected");
 }
 
 #[tokio::test]

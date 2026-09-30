@@ -287,10 +287,11 @@ down or running out of memory:
 |------|---------|---------|--------|
 | an edge's queue (what branches send it) | 64 | dropped and counted (**dropped** in `bonsai top`), one warning each time it starts | `EDGE_QUEUE` |
 | a line on a TCP or serial edge (`lines` framing) | 1 MiB | refused before it's buffered: a server closes that client, a client or serial edge reconnects | `max_frame` in `[edge.<name>]` |
-| a TCP server's clients | 64 | the one that stopped sending longest ago makes room, else the new one is closed | `max_clients` |
+| a TCP server's connections, closing ones included | 64 | the one draining longest, else the one that stopped sending longest ago, is cut off (**lost**); else the new one is closed | `max_clients` |
 | what a TCP server holds for one client | 64 packets | that client misses them (**lost**) | `CLIENT_QUEUE` |
 | one write to a TCP server's client | 5 s | that client is disconnected (**lost**) | `WRITE_TIMEOUT` |
 | a client that stopped sending | kept 2 s for replies | closed | `LINGER` |
+| sending what's queued for a closed client | 5 s in all | the rest is **lost**, the connection closed | `DRAIN_TIMEOUT` |
 | a branch whose `setup` panics | out of service, tried again after 1 s, doubling to 60 s | its inputs are dropped and counted | `SETUP_RETRY` |
 | run-log lines waiting for the disk | 1024 | dropped and counted, noted in the file and END | `record::QUEUE` |
 | a run-log line | 8 KiB | cut short with `…` | `record::MAX_LINE` |

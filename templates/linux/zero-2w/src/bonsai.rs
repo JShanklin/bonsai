@@ -58,13 +58,13 @@ use std::io;
 use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket, tcp::OwnedWriteHalf};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::MissedTickBehavior;
 
 // ---------------------------------------------------------------------------
@@ -2736,8 +2736,9 @@ impl Edge for Udp {
     }
 }
 
-/// A TCP server's most clients at once unless its `max_clients` says
-/// otherwise. A connection past it is closed straight away.
+/// A TCP server's most connections at once unless its `max_clients` says
+/// otherwise: clients, and closed clients still being sent what was queued
+/// for them. A connection past it is closed straight away.
 pub const MAX_CLIENTS: usize = 64;
 
 /// A TCP edge's settings: a client (`connect`) or a server (`listen`).
@@ -2748,7 +2749,7 @@ pub struct TcpConfig {
     pub framing: Framing,
     /// The longest line, with lines framing.
     pub max_frame: usize,
-    /// A server's most clients at once.
+    /// A server's most connections at once, closing ones included.
     pub max_clients: usize,
 }
 
@@ -2805,6 +2806,11 @@ pub const CLIENT_QUEUE: usize = 64;
 /// for it is discarded.
 pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long, in all, a closed client's writer has to send what was queued
+/// for it. Then the connection is closed anyway, and what's left is
+/// discarded (and counted).
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// What a client's tasks tell its server.
 enum FromClient {
     Packet(Packet),
@@ -2820,23 +2826,44 @@ struct Client {
     queue: mpsc::Sender<Arc<[u8]>>,
     reader: tokio::task::AbortHandle,
     writer: tokio::task::AbortHandle,
+    /// Copies queued for it or being written: what's lost if it's cut off.
+    outstanding: Arc<AtomicUsize>,
+    /// Tells its writer when, once closed, it must be done.
+    drain: oneshot::Sender<Instant>,
     /// When its reader ended: closed once `LINGER` has passed.
     read_ended: Option<Instant>,
 }
 
+/// A closed client whose writer is still sending what was queued for it,
+/// until `DRAIN_TIMEOUT` at most.
+struct Draining {
+    writer: tokio::task::AbortHandle,
+    outstanding: Arc<AtomicUsize>,
+}
+
+/// End a client's writer now; what it hadn't written is counted as
+/// discarded, unless its writer counted it already (it takes the count to 0).
+fn cut_off(stats: &stats::EdgeStats, writer: &tokio::task::AbortHandle, outstanding: &AtomicUsize) {
+    writer.abort();
+    let lost = outstanding.swap(0, Relaxed);
+    stats.discarded.fetch_add(lost as u64, Relaxed);
+}
+
 /// A TCP server edge: every client's packets come in with its address; a
 /// packet out goes to its `peer`, or to every client. It holds at most
-/// `max_clients`, and closes a client when its reader ends (after `LINGER`)
-/// or a write to it fails. Dropping it (the edge restarting) ends every
-/// client's task and closes every connection.
+/// `max_clients` connections, closed ones still draining included, and
+/// closes a client when its reader ends (after `LINGER`) or a write to it
+/// fails. Dropping it (the edge restarting) ends every client's task and
+/// closes every connection.
 pub struct Server {
     listener: TcpListener,
     framing: Framing,
     max_frame: usize,
     max_clients: usize,
     clients: HashMap<SocketAddr, Client>,
-    /// Writers of closed clients, still sending what was queued for them.
-    closing: Vec<tokio::task::AbortHandle>,
+    /// Closed clients still being sent what was queued for them, oldest
+    /// first.
+    closing: Vec<Draining>,
     from_clients: (mpsc::Sender<FromClient>, mpsc::Receiver<FromClient>),
     /// Turning connections away now: warned already.
     full: bool,
@@ -2886,21 +2913,33 @@ impl Server {
         }
     }
 
-    /// Take a new client. At `max_clients`, the client that stopped sending
-    /// longest ago makes room (its linger is cut short); when every client is
-    /// still sending, the new one is turned away.
+    /// Connections held: clients, and closed ones still draining.
+    fn held(&mut self) -> usize {
+        self.closing.retain(|d| !d.writer.is_finished());
+        self.clients.len() + self.closing.len()
+    }
+
+    /// Take a new client. At `max_clients` connections, one makes room: the
+    /// closed client that has been draining longest is cut off, else the
+    /// client that stopped sending longest ago (what's queued for either is
+    /// discarded). When every client is still sending, the new one is turned
+    /// away.
     fn admit(&mut self, stream: TcpStream, peer: SocketAddr) {
-        if self.clients.len() >= self.max_clients
-            && let Some(oldest) = self
+        if self.held() >= self.max_clients {
+            if !self.closing.is_empty() {
+                let oldest = self.closing.remove(0);
+                cut_off(&self.stats, &oldest.writer, &oldest.outstanding);
+            } else if let Some(oldest) = self
                 .clients
                 .iter()
                 .filter_map(|(p, c)| c.read_ended.map(|t| (t, *p)))
                 .min()
                 .map(|(_, p)| p)
-        {
-            self.close(oldest);
+            {
+                self.drop_client(oldest);
+            }
         }
-        if self.clients.len() >= self.max_clients {
+        if self.held() >= self.max_clients {
             drop(stream); // closed: the client sees its connection end
             if !self.full {
                 self.full = true;
@@ -2917,9 +2956,19 @@ impl Server {
         let mut framed = Framed::with_limit(ReadOnly(read), self.framing, self.max_frame);
         let edge = log::source();
         let (queue, pending) = mpsc::channel(CLIENT_QUEUE);
+        let outstanding = Arc::new(AtomicUsize::new(0));
+        let (drain, drain_by) = oneshot::channel();
         let writer = tokio::spawn(log::EDGE.scope(
             edge,
-            write_to(peer, write, pending, to_server.clone(), self.stats.clone()),
+            write_to(Writer {
+                peer,
+                write,
+                queue: pending,
+                drain_by,
+                outstanding: outstanding.clone(),
+                to_server: to_server.clone(),
+                stats: self.stats.clone(),
+            }),
         ));
         let reader = tokio::spawn(log::EDGE.scope(edge, async move {
             loop {
@@ -2949,28 +2998,34 @@ impl Server {
                 queue,
                 reader: reader.abort_handle(),
                 writer: writer.abort_handle(),
+                outstanding,
+                drain,
                 read_ended: None,
             },
         );
     }
 
     /// Close a client gracefully: its reader stops, and its writer sends
-    /// what's queued for it (each write under `WRITE_TIMEOUT`), then closes
-    /// the connection.
+    /// what's queued for it (each write under `WRITE_TIMEOUT`, all of it
+    /// under `DRAIN_TIMEOUT`), then closes the connection. It still counts
+    /// towards `max_clients` until then.
     fn close(&mut self, peer: SocketAddr) {
         if let Some(client) = self.clients.remove(&peer) {
             client.reader.abort();
-            self.closing.retain(|w| !w.is_finished());
-            self.closing.push(client.writer);
             // Dropping `client.queue` tells the writer nothing more is coming.
+            let _ = client.drain.send(Instant::now() + DRAIN_TIMEOUT);
+            self.closing.push(Draining {
+                writer: client.writer,
+                outstanding: client.outstanding,
+            });
         }
     }
 
-    /// Close a client now: its writer has already given up.
+    /// Close a client now: what's queued for it is discarded (and counted).
     fn drop_client(&mut self, peer: SocketAddr) {
         if let Some(client) = self.clients.remove(&peer) {
             client.reader.abort();
-            client.writer.abort();
+            cut_off(&self.stats, &client.writer, &client.outstanding);
         }
     }
 
@@ -3013,7 +3068,11 @@ impl Server {
             let Some(client) = self.clients.get(&peer) else {
                 continue; // gone already: nothing to deliver to
             };
-            if client.queue.try_send(bytes.clone()).is_err() {
+            // The core's thread runs its edges too, so the writer can't take
+            // this copy before it's counted as outstanding.
+            if client.queue.try_send(bytes.clone()).is_ok() {
+                client.outstanding.fetch_add(1, Relaxed);
+            } else {
                 self.stats.discarded.fetch_add(1, Relaxed);
             }
         }
@@ -3025,44 +3084,91 @@ impl Drop for Server {
     fn drop(&mut self) {
         for client in self.clients.values() {
             client.reader.abort();
-            client.writer.abort();
+            cut_off(&self.stats, &client.writer, &client.outstanding);
         }
-        for writer in &self.closing {
-            writer.abort();
+        for closed in &self.closing {
+            cut_off(&self.stats, &closed.writer, &closed.outstanding);
         }
     }
+}
+
+#[cfg(test)]
+impl Tcp {
+    /// A server's clients, and closed ones still draining.
+    pub fn connections(&mut self) -> (usize, usize) {
+        match self {
+            Tcp::Server(server) => {
+                let held = server.held();
+                (server.clients.len(), held - server.clients.len())
+            }
+            Tcp::Client(..) => (0, 0),
+        }
+    }
+}
+
+/// What a server client's writer works with.
+struct Writer {
+    peer: SocketAddr,
+    write: OwnedWriteHalf,
+    queue: mpsc::Receiver<Arc<[u8]>>,
+    /// When it's closed: the deadline for sending what's left.
+    drain_by: oneshot::Receiver<Instant>,
+    outstanding: Arc<AtomicUsize>,
+    to_server: mpsc::Sender<FromClient>,
+    stats: Arc<stats::EdgeStats>,
 }
 
 /// A server client's writer: what's queued for it, one write at a time,
 /// each within `WRITE_TIMEOUT`. When one fails or times out it gives up:
 /// the connection is closed (a half-written frame is never re-sent), what's
 /// left is discarded and counted, and the server is told. When the server
-/// closes the queue, it sends what's left and shuts the connection down.
-async fn write_to(
-    peer: SocketAddr,
-    mut write: OwnedWriteHalf,
-    mut queue: mpsc::Receiver<Arc<[u8]>>,
-    to_server: mpsc::Sender<FromClient>,
-    stats: Arc<stats::EdgeStats>,
-) {
-    while let Some(bytes) = queue.recv().await {
-        let why = match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(&bytes)).await {
-            Ok(Ok(())) => continue,
-            Ok(Err(e)) => e.to_string(),
-            Err(_) => format!("not reading: a write took over {WRITE_TIMEOUT:?}"),
+/// closes the client, it sends what's left, until `DRAIN_TIMEOUT` at most,
+/// and shuts the connection down.
+async fn write_to(mut w: Writer) {
+    let mut closed = false;
+    let gave_up = {
+        let sending = async {
+            while let Some(bytes) = w.queue.recv().await {
+                match tokio::time::timeout(WRITE_TIMEOUT, w.write.write_all(&bytes)).await {
+                    Ok(Ok(())) => {
+                        let _ = w
+                            .outstanding
+                            .fetch_update(Relaxed, Relaxed, |n| n.checked_sub(1));
+                    }
+                    Ok(Err(e)) => return Some(e.to_string()),
+                    Err(_) => {
+                        return Some(format!("not reading: a write took over {WRITE_TIMEOUT:?}"));
+                    }
+                }
+            }
+            let _ = tokio::time::timeout(WRITE_TIMEOUT, w.write.shutdown()).await;
+            None
         };
-        queue.close();
-        let mut lost = 1; // the one being written
-        while queue.try_recv().is_ok() {
-            lost += 1;
+        let deadline = async {
+            match (&mut w.drain_by).await {
+                Ok(by) => {
+                    closed = true;
+                    tokio::time::sleep_until(by.into()).await;
+                }
+                Err(_) => std::future::pending().await, // it's aborted instead
+            }
+        };
+        tokio::select! {
+            gave_up = sending => gave_up,
+            () = deadline => Some(format!("closed, and still sending after {DRAIN_TIMEOUT:?}")),
         }
-        stats.discarded.fetch_add(lost, Relaxed);
-        warn!("{peer}: {why}; disconnecting it ({lost} discarded)");
-        drop(write); // closed now: nothing more on this connection
-        let _ = to_server.send(FromClient::WriteFailed(peer)).await;
+    };
+    let Some(why) = gave_up else {
         return;
+    };
+    w.queue.close();
+    let lost = w.outstanding.swap(0, Relaxed);
+    w.stats.discarded.fetch_add(lost as u64, Relaxed);
+    warn!("{}: {why}; disconnecting it ({lost} discarded)", w.peer);
+    drop(w.write); // closed now: nothing more on this connection
+    if !closed {
+        let _ = w.to_server.send(FromClient::WriteFailed(w.peer)).await;
     }
-    let _ = tokio::time::timeout(WRITE_TIMEOUT, write.shutdown()).await;
 }
 
 /// The read half of a TCP stream, usable where `Framed` wants both halves

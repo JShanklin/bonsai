@@ -108,7 +108,7 @@ pub enum EdgeKind {
         framing: Framing,
         /// The longest line (lines framing); None: the runtime's MAX_FRAME.
         max_frame: Option<u64>,
-        /// A server's most clients at once; None: the runtime's MAX_CLIENTS.
+        /// A server's most connections at once, closing ones included; None: the runtime's MAX_CLIENTS.
         max_clients: Option<u64>,
     },
     Serial {

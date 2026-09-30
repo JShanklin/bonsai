@@ -9,7 +9,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
-use super::support::{free_port, open_fds};
+use super::support::{fds_to_myself, free_port, open_fds};
 use crate::bonsai::{EdgeOut, Event, Framed, Framing, Packet, Tcp, TcpConfig, spawn_edge};
 
 /// A TCP server edge on a free port: its address, where what it receives
@@ -150,6 +150,7 @@ async fn lines_still_arrive_whole_and_in_order() {
 
 #[tokio::test]
 async fn clients_that_come_and_go_leave_nothing_behind() {
+    let _turn = fds_to_myself().await;
     let (addr, mut inbox, _out) = server("rt_churn", Framing::Lines);
     // One client first, so the edge is up and the baseline counts it.
     let mut first = connect(addr).await;
@@ -344,4 +345,173 @@ async fn a_client_sending_an_endless_line_is_cut_off_alone() {
     // ...and the good one is untouched.
     good.write_all(b"still good\n").await.unwrap();
     assert_eq!(next(&mut inbox).await.bytes, b"still good");
+}
+
+/// What the churn test asks of the server's task.
+enum Ask {
+    Send(Packet),
+    Connections(tokio::sync::oneshot::Sender<(usize, usize)>),
+}
+
+/// Clients that ask for a lot, stop sending and read slowly, one after
+/// another: they can't take more than `max_clients` connections, each is
+/// gone by `LINGER` + `DRAIN_TIMEOUT` at most, every copy that never
+/// reached one is counted, and a healthy client is served throughout.
+#[tokio::test]
+async fn clients_that_ask_and_read_slowly_stay_within_the_limit() {
+    use crate::bonsai::{DRAIN_TIMEOUT, Edge, LINGER};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    const NAME: &str = "rt_drain";
+    const MAX: usize = 4;
+    const CHURN: usize = 16;
+    const COPIES: usize = 48; // within CLIENT_QUEUE: all of them are queued
+    const SIZE: usize = 128 * 1024; // each copy, its newline included
+    let _turn = fds_to_myself().await; // it opens many sockets
+
+    let addr: &'static str = Box::leak(format!("127.0.0.1:{}", free_port()).into_boxed_str());
+    let cfg = TcpConfig {
+        listen: Some(addr),
+        framing: Framing::Lines,
+        max_clients: MAX,
+        ..TcpConfig::DEFAULT
+    };
+    let addr: SocketAddr = addr.parse().unwrap();
+    let (asks, mut asked) = mpsc::channel::<Ask>(64);
+    let (got_tx, mut inbox) = mpsc::channel::<Packet>(1024);
+    // The edge's own task, as spawn_edge runs it, plus a way to ask how
+    // many connections it holds.
+    tokio::spawn(crate::bonsai::log::EDGE.scope(NAME, async move {
+        let mut edge = Tcp::setup(cfg).await.unwrap();
+        loop {
+            tokio::select! {
+                got = edge.recv() => {
+                    let _ = got_tx.send(got.unwrap()).await;
+                }
+                Some(ask) = asked.recv() => match ask {
+                    Ask::Send(p) => edge.execute(p).await.unwrap(),
+                    Ask::Connections(tell) => {
+                        let _ = tell.send(edge.connections());
+                    }
+                },
+            }
+        }
+    }));
+    async fn connections(asks: &mpsc::Sender<Ask>) -> (usize, usize) {
+        let (tell, told) = tokio::sync::oneshot::channel();
+        let _ = asks.send(Ask::Connections(tell)).await;
+        told.await.unwrap()
+    }
+    async fn expect(inbox: &mut mpsc::Receiver<Packet>, bytes: &[u8]) -> Packet {
+        loop {
+            match timeout(Duration::from_secs(3), inbox.recv()).await {
+                Ok(Some(p)) if p.bytes == bytes => return p,
+                Ok(Some(_)) => {}
+                other => panic!(
+                    "expected {:?}, got {other:?}",
+                    String::from_utf8_lossy(bytes)
+                ),
+            }
+        }
+    }
+    let tasks = || {
+        tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks()
+    };
+
+    let mut healthy = connect(addr).await;
+    healthy.write_all(b"hello\n").await.unwrap();
+    expect(&mut inbox, b"hello").await;
+    let baseline = tasks(); // the healthy client's two tasks included
+    let slow = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let readers_alive = Arc::new(AtomicUsize::new(0));
+    let mut readers = Vec::new();
+    for i in 0..CHURN {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let mut c = socket.connect(addr).await.unwrap();
+        let ask = format!("ask {i}");
+        c.write_all(format!("{ask}\n").as_bytes()).await.unwrap();
+        c.shutdown().await.unwrap(); // done sending; still reading
+        let asked = expect(&mut inbox, ask.as_bytes()).await;
+        for _ in 0..COPIES {
+            let copy = asked.reply(vec![b'x'; SIZE - 1]);
+            asks.send(Ask::Send(copy)).await.unwrap();
+        }
+        // Read slowly (a few KiB at a time), then, once told, to the end.
+        let (slow, alive) = (slow.clone(), readers_alive.clone());
+        alive.fetch_add(1, Relaxed);
+        readers.push(tokio::spawn(async move {
+            let mut buf = vec![0u8; 1 << 16];
+            let mut total = 0;
+            loop {
+                let want = if slow.load(Relaxed) { 4096 } else { buf.len() };
+                match c.read(&mut buf[..want]).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => total += n,
+                }
+                if slow.load(Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+            alive.fetch_sub(1, Relaxed);
+            total
+        }));
+        // The healthy client is still heard...
+        let ping = format!("ping {i}");
+        healthy
+            .write_all(format!("{ping}\n").as_bytes())
+            .await
+            .unwrap();
+        expect(&mut inbox, ping.as_bytes()).await;
+        // ...and the server never holds more than MAX connections, nor more
+        // than two tasks for each.
+        let (clients, draining) = connections(&asks).await;
+        assert!(
+            clients + draining <= MAX,
+            "{clients} clients and {draining} draining"
+        );
+        let server_tasks = tasks() - readers_alive.load(Relaxed);
+        assert!(
+            server_tasks <= baseline + 2 * (MAX - 1),
+            "{server_tasks} tasks, {baseline} to start with"
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    // Every slow client is let go by LINGER + DRAIN_TIMEOUT, however slowly
+    // it's still reading: only the healthy one is left.
+    tokio::time::sleep(LINGER + DRAIN_TIMEOUT + Duration::from_secs(1)).await;
+    assert_eq!(connections(&asks).await, (1, 0));
+    assert!(
+        tasks() - readers_alive.load(Relaxed) <= baseline,
+        "{} tasks, {baseline} to start with",
+        tasks() - readers_alive.load(Relaxed)
+    );
+    // The healthy client still gets a broadcast.
+    let mut saw_late = watch_for(healthy, b"late\n");
+    asks.send(Ask::Send(Packet::new(b"late".to_vec())))
+        .await
+        .unwrap();
+    if let Err(why) = wait_for(&mut saw_late, Duration::from_secs(3)).await {
+        panic!("the healthy client never got \"late\": {why}");
+    }
+    // Each copy either reached its client whole or was counted as discarded,
+    // once.
+    slow.store(false, Relaxed);
+    let mut delivered = 0;
+    for reader in readers {
+        let total = timeout(Duration::from_secs(20), reader)
+            .await
+            .expect("a slow client's connection never ended")
+            .unwrap();
+        delivered += total / SIZE;
+    }
+    let discarded = crate::bonsai::stats::edge(NAME).discarded.load(Relaxed) as usize;
+    assert!(discarded > 0, "the slow clients were never cut off");
+    assert_eq!(
+        discarded + delivered,
+        CHURN * COPIES,
+        "{discarded} discarded, {delivered} delivered"
+    );
 }

@@ -592,7 +592,7 @@ fn a_run_being_made_is_never_pruned_by_another_tree() {
 }
 
 #[test]
-fn without_the_folder_lock_nothing_is_pruned() {
+fn without_the_folder_lock_a_run_records_nothing_and_prunes_nothing() {
     let dir = scratch("no-dir-lock");
     let old = old_run(&dir, "2000-01-01_00-00-00", 10);
     // The lock file can't be opened: it's a folder.
@@ -606,17 +606,77 @@ fn without_the_folder_lock_nothing_is_pruned() {
         ],
         Duration::from_secs(10),
     );
-    assert!(ran.code == Some(0), "{ran:?}");
+    assert!(ran.code == Some(0), "the tree itself runs on: {ran:?}");
     assert!(old.is_dir(), "pruned without the folder's lock");
-    let text = read(runs(&dir).pop().unwrap().join("events.log"));
+    let made: Vec<PathBuf> = runs(&dir)
+        .into_iter()
+        .filter(|r| *r != old && !r.ends_with(".bonsai-record.lock"))
+        .collect();
+    assert!(made.is_empty(), "made without the folder's lock: {made:?}");
+    assert!(half_made(&dir).is_empty(), "{:?}", half_made(&dir));
     assert!(
-        text.contains("old runs not pruned this time: can't open"),
-        "{text}"
+        ran.stderr
+            .contains("bonsai: no run logs this time: can't open"),
+        "{}",
+        ran.stderr
     );
+}
+
+#[test]
+fn a_tree_that_waits_too_long_for_the_folder_makes_nothing_there() {
+    let dir = scratch("lock-timeout");
+    let sync = scratch("lock-timeout-sync");
+    let (a_at, b_at) = (sync.join("a"), sync.join("b"));
+    let olds: Vec<PathBuf> = (1..=3)
+        .map(|i| old_run(&dir, &format!("2000-01-0{i}_00-00-00"), 10 - i as u64))
+        .collect();
+    // A holds the folder's lock, paused after making its folder; it will
+    // prune down to 1 run.
+    let a = spawn(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("RT_KEEP_RUNS", "1"),
+            ("BONSAI_RT_PAUSE", a_at.to_str().unwrap()),
+        ],
+    );
+    await_file(&a_at.with_extension("paused"), Duration::from_secs(10));
+    // B waits for the lock longer than DIR_LOCK_WAIT. Were it to make a
+    // folder anyway, it would pause there too, for A to prune under it.
+    let b = spawn(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("BONSAI_RT_PAUSE", b_at.to_str().unwrap()),
+        ],
+    );
+    std::thread::sleep(crate::bonsai::record::DIR_LOCK_WAIT + Duration::from_millis(1500));
     assert!(
-        text.contains(" END SIGTERM"),
-        "the run itself is still recorded: {text}"
+        !b_at.with_extension("paused").exists(),
+        "B made a folder without the folder's lock"
     );
+    assert_eq!(half_made(&dir).len(), 1, "only A's: {:?}", half_made(&dir));
+    // A goes on and prunes; B, had it paused, is let go too.
+    std::fs::write(a_at.with_extension("go"), "").unwrap();
+    std::fs::write(b_at.with_extension("go"), "").unwrap();
+    std::thread::sleep(Duration::from_millis(1000));
+    b.signal(libc::SIGTERM);
+    let b = b.wait(Duration::from_secs(10));
+    a.signal(libc::SIGTERM);
+    let a = a.wait(Duration::from_secs(10));
+    assert!(a.code == Some(0) && b.code == Some(0), "{a:?}\n{b:?}");
+    assert!(
+        b.stderr
+            .contains("bonsai: no run logs this time: another tree held"),
+        "B says why it keeps nothing: {}",
+        b.stderr
+    );
+    assert!(olds.iter().all(|r| !r.exists()), "A pruned as asked");
+    assert!(half_made(&dir).is_empty(), "{:?}", half_made(&dir));
+    let left = runs(&dir);
+    assert_eq!(left.len(), 1, "A's run only: {left:?}");
+    let text = read(left[0].join("events.log"));
+    assert!(text.contains(" END SIGTERM"), "{text}");
 }
 
 #[test]

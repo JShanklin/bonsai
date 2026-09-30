@@ -205,7 +205,9 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   life marks it active; the folder is made as `.new-<pid>-<n>`, locked, then
   renamed to its run name (`new_run`, `rename_new`: renameat2 NOREPLACE), all
   under a flock on `dir/.bonsai-record.lock` (`DirLock`, `DIR_LOCK_WAIT` 5 s)
-  held through `prune`; without that lock nothing is pruned (a START note);
+  held through `prune`; without that lock (open error, or a timeout) the run
+  records nothing, with one stderr line, so `.new-*` folders are only ever
+  made and cleared under it;
   `prune` clears stale unlocked `.new-*` folders and deletes old run folders past `keep_runs`
   (`KEEP_RUNS` 100, this one counted) or `keep_days` (0: off), oldest
   first, never the current one, a `running` one, or one holding anything

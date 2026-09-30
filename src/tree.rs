@@ -703,7 +703,9 @@ fn edge_table(kind: &str, rest: &[String]) -> Result<Table, String> {
             table.insert("join", value(groups));
         } else {
             match v.parse::<i64>() {
-                Ok(n) if key == "baud" => table.insert(&key, value(n)),
+                Ok(n) if ["baud", "max_frame", "max_clients"].contains(&key.as_str()) => {
+                    table.insert(&key, value(n))
+                }
                 _ => table.insert(&key, value(v.as_str())),
             };
         }
@@ -720,6 +722,8 @@ fn wants(key: &str) -> &'static str {
         "iface" => "an interface address (like 192.168.1.10)",
         "device" => "a path (like /dev/serial0)",
         "baud" => "a number (like 9600)",
+        "max_frame" => "a size in bytes (like 65536)",
+        "max_clients" => "a number (like 64)",
         "framing" => "raw or lines",
         _ => "a value",
     }

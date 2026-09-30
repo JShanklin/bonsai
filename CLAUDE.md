@@ -122,9 +122,16 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   core's side (`try_send`, never waits: drops and counts when full; before
   `start_edges` it keeps what's sent, which `drain_<edge>()` returns for
   tests). Built-ins: `Udp` (bind, to, join on iface, reply-to-last),
-  `Tcp` (client, reconnect = restart; server with per-client reader tasks,
-  send to `peer` or all), `Framed<S>` (raw / lines) shared with `Serial`;
-  all carry `Packet { bytes, peer }`.
+  `Tcp` (client, reconnect = restart; server: `max_clients`, default
+  `MAX_CLIENTS` 64, evicting the longest-lingering client before refusing;
+  a reader task per client that reports `ReadEnded`; a client that stopped
+  sending lingers `LINGER` (2 s) for replies, broadcasts skip it; `Drop`
+  aborts every client task), `Framed<S>` (raw / lines, `max_frame`,
+  default `MAX_FRAME` 1 MiB: an over-long line is `InvalidData` before it's
+  buffered; `pending_len`) shared with `Serial`; all carry
+  `Packet { bytes, peer }`. `max_frame`/`max_clients` are optional keys in
+  `[edge.<name>]` (`graph::EdgeKind`), rendered as the runtime constants
+  when absent.
   Logs: `error!`/`warn!`/`info!`/`debug!` are `macro_rules!` at the top of
   the runtime, in scope everywhere through `#[macro_use] mod bonsai;` (first
   in `main.rs`; `sync` adds it to older trees, `tree::with_macro_use`).

@@ -191,7 +191,101 @@ pub fn sync() -> io::Result<()> {
 // ---------------------------------------------------------------------------
 
 fn save_doc(doc: &DocumentMut) -> io::Result<()> {
-    std::fs::write(CONFIG, doc.to_string())
+    std::fs::write(CONFIG, header_first(doc))
+}
+
+fn has_comment(text: &str) -> bool {
+    text.lines().any(|l| l.trim_start().starts_with('#'))
+}
+
+/// `doc` as text, with its comments above its tables when every table is new:
+/// in a bonsai.toml with no tables yet, toml_edit keeps all the comments
+/// after them.
+fn header_first(doc: &DocumentMut) -> String {
+    let text = doc.to_string();
+    let trailing = doc.trailing().as_str().unwrap_or_default();
+    let Some(body) = text.strip_suffix(trailing) else {
+        return text;
+    };
+    if body.trim().is_empty() || !has_comment(trailing) || has_comment(body) {
+        return text;
+    }
+    format!("{}\n\n{}", trailing.trim_end(), body.trim_start())
+}
+
+/// Where each table of `doc` is, in file order: (key, sub-key or index).
+fn table_paths(doc: &DocumentMut) -> Vec<(String, Option<String>, Option<usize>)> {
+    let mut found = Vec::new();
+    for (key, item) in doc.iter() {
+        match item {
+            Item::Table(t) if t.is_implicit() => {
+                for (sub, item) in t.iter() {
+                    if let Item::Table(t) = item {
+                        found.push((t.position(), key.to_string(), Some(sub.to_string()), None));
+                    }
+                }
+            }
+            Item::Table(t) => found.push((t.position(), key.to_string(), None, None)),
+            Item::ArrayOfTables(ts) => {
+                for (i, t) in ts.iter().enumerate() {
+                    found.push((t.position(), key.to_string(), None, Some(i)));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Tables not yet placed (new ones) come after the rest.
+    found.sort_by_key(|(pos, ..)| pos.unwrap_or(isize::MAX));
+    found
+        .into_iter()
+        .map(|(_, k, sub, i)| (k, sub, i))
+        .collect()
+}
+
+/// Keep the comments that were above a removed table: above whatever table
+/// now comes first, or at the end when none is left.
+fn keep_comments(doc: &mut DocumentMut, prefix: &str) {
+    if !has_comment(prefix) {
+        return;
+    }
+    let first = table_paths(doc).into_iter().next();
+    let table = match first {
+        Some((key, Some(sub), _)) => doc[&key][&sub].as_table_mut(),
+        Some((key, None, Some(i))) => doc[&key]
+            .as_array_of_tables_mut()
+            .and_then(|ts| ts.get_mut(i)),
+        Some((key, None, None)) => doc[&key].as_table_mut(),
+        None => None,
+    };
+    match table {
+        Some(t) => {
+            let old = t
+                .decor()
+                .prefix()
+                .and_then(|p| p.as_str())
+                .unwrap_or_default();
+            let new = format!("{prefix}{old}");
+            t.decor_mut().set_prefix(new);
+        }
+        None => {
+            let old = doc.trailing().as_str().unwrap_or_default();
+            let new = format!("{}\n{old}", prefix.trim_end());
+            doc.set_trailing(new);
+        }
+    }
+}
+
+/// The comments above a table, when it has any.
+fn prefix_of(item: &Item) -> String {
+    let t = match item {
+        Item::Table(t) => t,
+        _ => return String::new(),
+    };
+    t.decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// The `[<kind>]` super-table (`branch`, `edge`), created implicit so only
@@ -377,8 +471,11 @@ pub fn branch_add(name: &str) -> io::Result<()> {
 /// Remove a branch's or edge's table and every wire from it, and take it
 /// out of every `to` list; returns the new graph.
 fn remove_node(doc: &mut DocumentMut, kind: &str, name: &str) -> io::Result<Config> {
-    if let Some(t) = doc.get_mut(kind).and_then(Item::as_table_like_mut) {
-        t.remove(name);
+    let mut comments = String::new();
+    if let Some(t) = doc.get_mut(kind).and_then(Item::as_table_like_mut)
+        && let Some(item) = t.remove(name)
+    {
+        comments += &prefix_of(&item);
     }
     if let Some(ws) = doc.get_mut("wire").and_then(Item::as_array_of_tables_mut) {
         let mut i = 0;
@@ -397,12 +494,19 @@ fn remove_node(doc: &mut DocumentMut, kind: &str, name: &str) -> io::Result<Conf
                 false
             };
             if gone {
+                let w = ws.get(i).expect("index in range");
+                comments += w
+                    .decor()
+                    .prefix()
+                    .and_then(|p| p.as_str())
+                    .unwrap_or_default();
                 ws.remove(i);
             } else {
                 i += 1;
             }
         }
     }
+    keep_comments(doc, &comments);
     save_checked(doc)
 }
 
@@ -741,11 +845,18 @@ pub fn unwire(from: &str, args: &[String]) -> io::Result<()> {
         list.retain(|t| !to.contains(t));
         to.to_vec()
     };
+    let mut comments = String::new();
     if list.is_empty() {
+        comments += w
+            .decor()
+            .prefix()
+            .and_then(|p| p.as_str())
+            .unwrap_or_default();
         ws.remove(i);
     } else {
         set_to_list(w, &list);
     }
+    keep_comments(&mut doc, &comments);
     let after = save_checked(&doc)?;
     reconcile_arms(&before, &after)?;
     let sender_note = match message {
@@ -814,7 +925,11 @@ pub fn list() -> io::Result<()> {
         .unwrap_or_else(|| "unknown board".to_string());
     let cfg = load();
     println!("tree: {name}  ({board})");
-    println!("branches, in the order the core runs them:");
+    if cfg.branches.is_empty() {
+        println!("branches: none yet (`bonsai branch add <name>`)");
+    } else {
+        println!("branches, in the order the core runs them:");
+    }
     for b in &cfg.branches {
         let mut about = Vec::new();
         if let Some(hz) = b.rate {

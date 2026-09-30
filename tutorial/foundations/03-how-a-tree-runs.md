@@ -88,7 +88,6 @@ bonsai names the parts of your program after a tree:
 | **rate** | a branch's own clock: `Input::Tick`s per second | `rate` in its `[branch.<name>]` |
 | **settings** | a branch's values, as constants | other keys in `[branch.<name>]` → `src/settings.rs` |
 | **wiring** | the generated `Input`/`Out` types, the edges and the core | `src/wiring.rs` (never edit) |
-| **pulse** | a built-in heartbeat, proof the tree is alive | `src/branches/pulse.rs` |
 
 The `bonsai` command does the plumbing: it adds branches, messages and
 edges, wires them, and regenerates the wiring. You write what each branch

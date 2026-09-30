@@ -1,9 +1,5 @@
 # bonsai 🪴
 
-> ⚠️ **Work in progress.** bonsai 2 is being built in steps (see
-> [Status](#status)). Commands, templates and the generated code may still
-> change.
-
 **Grow a Linux application in Rust as a tree: a small trunk, and branches you
 add one at a time.**
 
@@ -71,7 +67,6 @@ bonsai list
 ```
 tree: greenhouse  (host (native))
 branches, in the order the core runs them:
-  pulse  (ticks 2/s)
   sensor  (ticks 4/s)
   display
 edges:
@@ -157,7 +152,6 @@ bonsai tools [<tool> …]                         build tools: sccache, mold, zi
 | **rate** | a branch's own clock: `Input::Tick`s per second | `rate` in its `[branch.<name>]` |
 | **settings** | a branch's values, as constants | other keys in `[branch.<name>]` → `src/settings.rs` |
 | **wiring** | the generated `Input`/`Out` types, the edges and the core | `src/wiring.rs` (never edit) |
-| **pulse** | a built-in heartbeat, proof the tree is alive | `src/branches/pulse.rs` |
 
 ## Edges
 
@@ -201,12 +195,13 @@ work like `println!`. Each line says when (UTC), how serious, and who wrote
 it, with nothing to pass in:
 
 ```
-14:05:03.123Z  INFO bonsai: running
-14:05:03.124Z  INFO tak: up
-14:05:03.125Z  INFO pulse: beat
-14:05:04.310Z ERROR sensor: panicked at src/branches/sensor.rs:31: index out of bounds
-14:05:04.310Z  WARN sensor: set up again after a panic
-14:05:05.002Z  WARN fc: connect 127.0.0.1:5760: Connection refused (os error 111); retrying in 100ms
+10:44:38.343Z  INFO bonsai: running
+10:44:38.343Z  INFO uplink: up
+10:44:38.344Z  INFO display: 26.5 °C, 55% humidity
+…
+10:44:43.344Z  WARN display: too hot: 34.0 °C
+10:44:43.344Z ERROR display: panicked at src/branches/display.rs:35: way too hot
+10:44:43.344Z  WARN display: set up again after a panic
 ```
 
 `BONSAI_LOG` picks what's shown: a level (`off`, `error`, `warn`, `info`,
@@ -221,33 +216,31 @@ is one line; set `RUST_BACKTRACE=1` for the backtrace too.
 branch in the order the core runs them (inputs and sends per second, time
 per input, panics), every edge (up or retrying, packets in and out, drops,
 restarts, the last error), and the log. `↑`/`↓` and `enter` show one
-branch's or edge's lines only. Here, a tree echoing UDP packets back
-uppercase, just after one packet made it panic:
+branch's or edge's lines only. Here, the tutorial's greenhouse, whose
+display was made to panic above 33 °C:
 
 ```
- logtree  up 4s  8 events/s  slowest event 125.0 ms  0 waiting
-┌ branches ────────────────────────────────────────────────────────────────┐
-│branch                      inputs/s    sent/s    avg µs    max µs  panics│
-│pulse                            2.0       0.0        21        32       0│
-│echo                             6.0       6.0         7        12       1│
-└──────────────────────────────────────────────────────────────────────────┘
-┌ edges ───────────────────────────────────────────────────────────────────┐
-│edge          state          in/s     out/s   dropped  restarts last error│
-│net           up              6.0       6.0         0         0           │
-│radio         up              0.0       0.0         0         0           │
-└──────────────────────────────────────────────────────────────────────────┘
-┌ log ─────────────────────────────────────────────────────────────────────┐
-│06:54:05.088Z  INFO pulse: beat                                           │
-│06:54:05.588Z  INFO pulse: beat                                           │
-│06:54:05.995Z ERROR echo: panicked at src/branches/echo.rs:30: asked to   │
-│06:54:06.120Z  WARN echo: set up again after a panic                      │
-│06:54:06.120Z  INFO pulse: beat                                           │
-│06:54:06.587Z  INFO pulse: beat                                           │
-│06:54:07.087Z  INFO pulse: beat                                           │
-│06:54:07.588Z  INFO pulse: beat                                           │
-│06:54:08.088Z  INFO pulse: beat                                           │
-│06:54:08.588Z  INFO pulse: beat                                           │
-└──────────────────────────────────────────────────────────────────────────┘
+ greenhouse  up 12s  1 events/s  slowest event 183 µs  0 waiting
+┌ branches ──────────────────────────────────────────────────────────────────┐
+│branch                        inputs/s    sent/s    avg µs    max µs  panics│
+│sensor                             1.0       1.0         3         4       0│
+│watchdog                           1.0       2.0         4        35       0│
+│display                            2.0       0.0        30       110       2│
+└────────────────────────────────────────────────────────────────────────────┘
+┌ edges ─────────────────────────────────────────────────────────────────────┐
+│edge            state          in/s     out/s   dropped  restarts last error│
+│uplink          up              0.0       1.0         0         0           │
+└────────────────────────────────────────────────────────────────────────────┘
+┌ log ───────────────────────────────────────────────────────────────────────┐
+│10:47:12.116Z  INFO display: 31.0 °C, 55% humidity                          │
+│10:47:12.116Z  WARN display: too hot: 31.0 °C                               │
+│10:47:13.116Z  INFO display: 32.5 °C, 55% humidity                          │
+│10:47:13.116Z  WARN display: too hot: 32.5 °C                               │
+│10:47:14.116Z  INFO display: 34.0 °C, 55% humidity                          │
+│10:47:14.116Z  WARN display: too hot: 34.0 °C                               │
+│10:47:14.116Z ERROR display: panicked at src/branches/display.rs:35: way too│
+│10:47:14.116Z  WARN display: set up again after a panic                     │
+└────────────────────────────────────────────────────────────────────────────┘
  ↑↓ select  enter show only its log  p pause  q quit
 ```
 
@@ -259,17 +252,7 @@ tables and exits. `BONSAI_TOP` moves a tree's server to another port
 (`BONSAI_TOP=7778`; `bonsai top --port 7778`) or turns it off (`off`).
 Counting what branches do never changes what they send.
 
-## Status
-
-bonsai 2 lands in steps:
-
-1. ✅ Linux only: Raspberry Pi boards and `host`.
-2. ✅ The deterministic core: branches, messages, wires, rates, settings.
-3. ✅ Edges: built-in UDP (with multicast), TCP (client and server) and
-   serial, configured in `bonsai.toml`, plus an `Edge` trait for your own.
-4. ✅ Logs tagged with the branch or edge that wrote them.
-5. ✅ Stats, and `bonsai top`: a live view of a running tree.
-6. ✅ The tutorial, rewritten.
+## Boards
 
 | board | chip | target | status |
 |-------|------|--------|--------|
@@ -278,10 +261,10 @@ bonsai 2 lands in steps:
 | `pi5` | BCM2712 | `aarch64-unknown-linux-gnu` | ✅ builds |
 | `host` | this computer | the computer's own | ✅ builds and runs |
 
-**Trees from bonsai 1** (Embassy, `src/sap.rs`, nutrients) aren't supported:
-the commands refuse them. Plant a new tree and move each branch's logic into a
-`process`. `bonsai regrow` resets one to a fresh bonsai 2 tree, which deletes
-its branches.
+**Coming from the old bonsai** (Embassy, `src/sap.rs`, nutrients)? Its
+trees aren't supported: the commands refuse them. Plant a new tree and move
+each branch's logic into a `process`. `bonsai regrow` resets an old tree to a
+fresh one, which deletes its branches.
 
 ## Contributing
 

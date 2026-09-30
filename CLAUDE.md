@@ -13,17 +13,14 @@ this distinction in mind: editing `src/main.rs` changes the CLI; editing
 `templates/**` changes what the CLI emits. Microcontroller support (Pico,
 ESP32, defmt, `bonsai ide`) was removed: bonsai is a Linux tool.
 
-Vocabulary (tree / trunk / branch / message / wire / rate / wiring / pulse) is
-defined in `README.md`'s Concepts table. This is **bonsai 2**: a deterministic
-core on tokio. bonsai 1's Embassy vocabulary (nutrient, sap, tap/release,
-feed/starve, graft/snip, roots, paths) is gone; `renamed()` in `main.rs` points
-old commands at their replacements.
-
-bonsai 2 lands as a series of PRs: 1 Linux only, 2 the deterministic core,
-3 edges (built-in UDP/TCP/serial bridges to the outside, in `bonsai.toml`,
-plus an `Edge` trait), 4 logs tagged by the branch or edge that wrote them,
-5 stats and `bonsai top` (a live TUI, over ssh for a Pi), 6 the tutorial
-rewrite — all done.
+Vocabulary (tree / trunk / branch / message / wire / edge / rate / wiring) is
+defined in `README.md`'s Concepts table. A tree is a deterministic core on
+tokio: branches decide, edges do the I/O. The old (Embassy) bonsai's
+vocabulary (nutrient, sap, tap/release, feed/starve, graft/snip, roots,
+paths) is gone; `renamed()` in `main.rs` points its commands at their
+replacements, and the commands refuse its trees. A new tree has no branches
+(there's no built-in heartbeat: it logs `INFO bonsai: running`, and any
+branch can have a `rate`).
 
 ## Commands
 
@@ -176,7 +173,12 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `// bonsai:message`; `message remove` (refused while wired) takes it with
   its attributes/docs (`without_struct`). toml_edit keeps `bonsai.toml`'s
   comments; the fs round-trip test checks every file comes back byte-identical.
-  `require_tree` refuses bonsai 1 trees (`src/sap.rs` or `embassy-executor`).
+  `require_tree` refuses the old bonsai's trees (`src/sap.rs` or
+  `embassy-executor`). Comments in `bonsai.toml` stay put: with no tables
+  yet, toml_edit keeps them all as trailing text, so `save_doc`
+  (`header_first`) puts them above the first new table; removing a table
+  moves the comments above it to the first table left, or the end
+  (`keep_comments`).
 - **Every template builds for its device by default** (`.cargo/config.toml`
   `[build] target`): the Pi boards hard-code theirs (`aarch64-unknown-linux-gnu`,
   Zero W `arm-unknown-linux-gnueabihf`) with an inline `sh -c` runner that scp's the
@@ -226,7 +228,7 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   (`parse_board`, then `chip_of` from `BOARDS`) and its name
   (`parse_package_name`), so it needs no args. Guardrails: refuses unless the dir
   has the bonsai signature (Cargo.toml stamp + `bonsai.toml` + the messages
-  marker + `src/wiring.rs`, or a bonsai 1 tree's equivalents, so an old tree
+  marker + `src/wiring.rs`, or an old bonsai tree's equivalents, so an old tree
   can be regrown into a new one) and is not `/` or `$HOME`; renders into a `.bonsai-regrow` staging dir
   and only wipes on success (a failed regen leaves the tree intact); preserves
   `.git/`. The pure helpers (`parse_board`, `parse_package_name`, `chip_of`)
@@ -258,8 +260,8 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
    after touching that template's `bonsai.toml`/`messages.rs`, or after
    changing `graph::render_*` or `templates/_tree/bonsai.rs`). They hold no
    Liquid. `template_wiring_matches_generator` fails if any board's copy is
-   stale, and checks `bonsai.toml`, `messages.rs` and `pulse.rs` are identical
-   across boards.
+   stale, and checks `bonsai.toml` and `messages.rs` are identical across
+   boards and that a new tree has no branches.
 
 ### Template resolution (`template_dir`)
 
@@ -300,7 +302,7 @@ graph commands work inside a tree where `templates/` isn't present.
 - **The board list** — `BOARDS` in `src/main.rs` (board, chip, description) —
   is the single place the CLI encodes supported hardware. Adding a board means
   editing it **and** adding `templates/linux/<board>/`; `bonsai.toml`,
-  `src/messages.rs` and `src/branches/pulse.rs` are the same on every board.
+  and `src/messages.rs` are the same on every board.
 - **Embedded-template completeness**: dotfiles like `.cargo/config.toml` are easy
   to drop from the `include_dir!` set, producing a project that can't build. The
   `embedded_template_includes_all_files` test guards this — extend it when a

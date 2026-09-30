@@ -6,8 +6,10 @@
 # One table per branch, in the order the core runs them. Its keys become
 # constants in src/settings.rs (`settings::<branch>::KEY`), except `rate`:
 # ticks per second, each an `Input::Tick` for the branch (`bonsai rate`).
-[branch.pulse]
-rate = 2
+# `bonsai branch add` writes one. For example:
+#   [branch.sensor]
+#   rate = 1          # an Input::Tick once a second
+#   limit_c10 = 300   # a setting: settings::sensor::LIMIT_C10
 
 # Wires: `from` sends `message` to every branch in `to`, in that order
 # (`bonsai wire <from> <Message> <to…>`). For example:

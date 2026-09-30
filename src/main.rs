@@ -956,6 +956,68 @@ mod tests {
     /// `cargo fmt` in a tree must leave the generated files it formats as
     /// they are (src/links.rs and src/settings.rs are `#[rustfmt::skip]`),
     /// or `cargo fmt --check` fails on a new tree and `bonsai sync` undoes it.
+    /// Render `templates/linux/host` into `dest` (as cargo-generate would:
+    /// its only variable is the project name), with `runtime-tests/` added as
+    /// the tree's `runtime_tests` test module.
+    fn render_runtime_test_tree(dest: &Path) -> io::Result<()> {
+        fn copy(from: &Path, to: &Path, name: &str) -> io::Result<()> {
+            std::fs::create_dir_all(to)?;
+            for entry in std::fs::read_dir(from)? {
+                let path = entry?.path();
+                let target = to.join(path.file_name().unwrap_or_default());
+                if path.is_dir() {
+                    copy(&path, &target, name)?;
+                } else {
+                    let text = std::fs::read_to_string(&path)?;
+                    std::fs::write(target, text.replace("{{project-name}}", name))?;
+                }
+            }
+            Ok(())
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let _ = std::fs::remove_dir_all(dest);
+        copy(
+            &repo.join("templates/linux/host"),
+            dest,
+            "runtime_test_tree",
+        )?;
+        copy(
+            &repo.join("runtime-tests"),
+            &dest.join("src/runtime_tests"),
+            "",
+        )?;
+        let main = dest.join("src/main.rs");
+        let text = std::fs::read_to_string(&main)?;
+        std::fs::write(main, text + "\n#[cfg(test)]\nmod runtime_tests;\n")
+    }
+
+    /// The runtime (templates/_tree/bonsai.rs, as every tree carries it) is
+    /// data to this crate, so its behaviour is tested in a rendered host tree:
+    /// `cargo test -- --ignored runtime`. `BONSAI_RUNTIME_TESTS` passes a
+    /// filter through (`BONSAI_RUNTIME_TESTS=tcp`).
+    #[test]
+    #[ignore = "builds a rendered host tree and runs its runtime tests; run with --ignored"]
+    fn runtime_regression_tests_pass_in_a_rendered_host_tree() {
+        let work = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/runtime-tests");
+        let tree = work.join("tree");
+        render_runtime_test_tree(&tree).unwrap();
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let mut cmd = Command::new(cargo);
+        cmd.arg("test")
+            .current_dir(&tree)
+            .env("CARGO_TARGET_DIR", work.join("target"))
+            .env_remove("RUSTFLAGS");
+        if let Ok(filter) = std::env::var("BONSAI_RUNTIME_TESTS") {
+            cmd.args(["--", &filter]);
+        }
+        let status = cmd.status().expect("run cargo test in the rendered tree");
+        assert!(
+            status.success(),
+            "the runtime's tests failed in {}",
+            tree.display()
+        );
+    }
+
     #[test]
     fn generated_files_are_rustfmt_clean() {
         use std::io::Write;

@@ -77,14 +77,14 @@ trusts its key, so ssh doesn't ask.
 
 **On Wi-Fi** the LAN link works differently. Access points drop traffic from
 any device address (MAC) but your computer's, so on Wi-Fi the board shares your
-computer's MAC (ipvlan) instead of having its own (macvlan, used on a link).
+computer's MAC (ipvlan) instead of having its own (macvlan, used on Ethernet).
 The script picks by itself and says so:
 
 ```
 virtual-pi5: wlan0 is Wi-Fi: the LAN link uses ipvlan
 ```
 
-Moving between Wi-Fi and a link? Run the install again; it rebuilds the LAN
+Moving between Wi-Fi and Ethernet? Run the install again; it rebuilds the LAN
 link for the new connection and restarts the boards on it. Guest networks and
 phone hotspots may still keep devices from reaching each other. To use another
 interface, LAN address or driver:
@@ -111,7 +111,7 @@ virtual-zero-w: relaying 239.2.3.2:6969 from wlan0 to the board
 
 Each group runs as a service (`systemctl status bonsai-relay@virtual-zero-w-1`),
 started at boot. Separate several groups with spaces. A later install keeps
-them; `VIRTUAL_PI_RELAY=` (empty) or an install on a link removes them. If
+them; `VIRTUAL_PI_RELAY=` (empty) or an install on Ethernet removes them. If
 `ufw` is on, let the port in: `sudo ufw allow 6969/udp`. Your program needs no
 change as long as its socket is bound to `0.0.0.0:<port>`; the relayed packets
 arrive on the host link. Only incoming multicast needs this: the board's own
@@ -211,6 +211,6 @@ To start your own program at boot (your tree, say), add a unit file under
 | `unable to find network with name or ID systemd-bonsai-host` (in `journalctl -u virtual-<board>`) | the shared network was deleted while its unit still counted as done: `sudo systemctl restart bonsai-host-network.service bonsai-lan-network.service`, then `sudo systemctl reset-failed virtual-<board>` and `sudo systemctl restart virtual-<board>`. `install.sh` does this itself now |
 | `the board didn't answer on 10.89.0.2` | `journalctl -u virtual-pi5` shows why it didn't start |
 | `tcpdump: can't get TPACKET_V3 header len` inside | tcpdump can't capture under emulation; run your computer's in the board's network: `sudo nsenter -t "$(sudo podman inspect -f '{{.State.Pid}}' virtual-pi5)" -n tcpdump -ni any udp port 14550` |
-| the phone can't see it | a guest network or hotspot keeping devices apart (see step 2), you changed between Wi-Fi and a link without installing again, or a firewall on your computer blocking the LAN address |
+| the phone can't see it | a guest network or hotspot keeping devices apart (see step 2), you changed between Wi-Fi and Ethernet without installing again, or a firewall on your computer blocking the LAN address |
 | on Wi-Fi, `tcpdump -ni wlan0` on your computer shows the phone's multicast but the board's `lan0` doesn't | the Wi-Fi driver drops it on the way to the board: relay the group (`VIRTUAL_PI_RELAY`, step 2) |
-| `netavark … has no ipvlan` while installing | Podman's network helper is older than 1.5: update podman and netavark, or use a link |
+| `netavark … has no ipvlan` while installing | Podman's network helper is older than 1.5: update podman and netavark, or use Ethernet |

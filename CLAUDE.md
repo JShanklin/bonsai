@@ -143,7 +143,7 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   or `off`; a bind failure is one WARN) as `stats::render` text every 500 ms:
   `bonsai-top 1\t…` then `branch`/`edge`/`link`/`sys`/`log` rows
   (tab-separated) and `end`. Links: the generated `Core::new` registers a
-  `WIRES` table (from, message or `""`, to…; `stats::links`, first call
+  `LINKS` table (from, message or `""`, to…; `stats::links`, first call
   wins) and `deliver`/`handle` bump `stats::link(i)` per message link,
   edge→branch event and branch→edge send (lock-free counters in a
   `OnceLock`). `sys`: `parse_sys` over /proc/self/status, /proc/self/stat,
@@ -250,7 +250,7 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   level, source filter from `enter` on a node) and System (gauges from the
   `sys` row). Rates are counter deltas over the tree's uptime (`per_sec`)
   across a `WINDOW_MS` (2 s) history of snapshots, so a 1 Hz branch doesn't
-  flicker. The graph: `graph::links`/`back_links` (a DFS from the edges
+  flicker. The graph: `graph::arrows`/`back_arrows` (a DFS from the edges
   that feed the tree, then unfed nodes) /`columns` (longest path over
   forward links; receive-only edges at least as far right as the last
   branch) place boxes (square branches, round edges, coloured by state: red
@@ -353,7 +353,7 @@ Not part of the CLI: shell + Podman Quadlet files that run a virtual Pi as a
 rootful container (`sudo containers/install.sh <board> [remove]`). One shared
 `Containerfile`, `board.container` template, and two shared networks
 (`bonsai-host` bridge 10.89.0.0/24 for the host, `bonsai-lan` for the LAN:
-macvlan on a link, ipvlan on Wi-Fi, since access points drop frames from other
+macvlan on Ethernet, ipvlan on Wi-Fi, since access points drop frames from other
 MACs; `install.sh` fills in `@DRIVER@`, falls back to macvlan when netavark is
 older than 1.5, and recreates the network, restarting its boards, when its
 driver/parent/subnet changed). On Wi-Fi, incoming multicast often never
@@ -361,7 +361,7 @@ reaches an ipvlan board (the driver drops it), so `VIRTUAL_PI_RELAY="group:port
 …"` makes one `bonsai-relay@<board>-<n>` host service each (socat joins the
 group on the Wi-Fi interface and sends every datagram to the board's host
 link; settings in `/etc/bonsai/relay-*.env`, kept across installs when the
-variable is unset, removed by an empty value, a linked install or `remove`); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
+variable is unset, removed by an empty value, an Ethernet install or `remove`); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
 named after the Pi boards in `BOARDS`. `install.sh` also adds the qemu `C`
 binfmt flag (sudo inside), builds with `--network host`, and writes the ssh
 config + known_hosts entry. Boards boot systemd (`CMD /sbin/init`): the

@@ -276,7 +276,17 @@ graph commands work inside a tree where `templates/` isn't present.
   commands insert. `insert_before_marker`/`insert_indented_before` match them
   as a **whole trimmed line**, so never remove them and never let a template's
   only occurrence be inside prose. A missing arm marker only prints a note
-  (the compiler still demands the arm).
+  (the compiler still demands the arm). `cargo fmt` pulls the arm marker up
+  behind the last arm (`} // bonsai:input-arm`: a comment after an arm with
+  no comma becomes its trailing comment), so `add_arm`/`remove_arm` first put
+  it back on its own line (`marker_on_own_line`; a line that is itself a
+  comment is prose and left alone).
+- **Generated files stay rustfmt-clean.** `cargo fmt` formats
+  `src/bonsai.rs`, `src/branches/mod.rs` and `src/edges/mod.rs` (only
+  `wiring`/`settings` are `#[rustfmt::skip]`), so the runtime is kept
+  formatted and `mod.rs` lists are sorted, or `cargo fmt --check` fails on a
+  new tree and `bonsai sync` undoes the formatting;
+  `generated_files_are_rustfmt_clean` checks it.
 - **Generated files are output, never input.** The sources of truth are
   `bonsai.toml` and `src/messages.rs`; branch files are scanned for nothing
   (the compiler checks them against the generated `Input`/`Out`). Arms are

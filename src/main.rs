@@ -930,7 +930,7 @@ mod tests {
             "src/bonsai.rs",
             "src/messages.rs",
             "src/settings.rs",
-            "src/wiring.rs",
+            "src/links.rs",
             "src/branches/mod.rs",
             "src/edges/mod.rs",
         ];
@@ -954,7 +954,7 @@ mod tests {
     // a fresh tree would change on its first command. The branch sources and
     // messages are the same on every board.
     /// `cargo fmt` in a tree must leave the generated files it formats as
-    /// they are (src/wiring.rs and src/settings.rs are `#[rustfmt::skip]`),
+    /// they are (src/links.rs and src/settings.rs are `#[rustfmt::skip]`),
     /// or `cargo fmt --check` fails on a new tree and `bonsai sync` undoes it.
     #[test]
     fn generated_files_are_rustfmt_clean() {
@@ -988,6 +988,18 @@ mod tests {
             ("branches/mod.rs", graph::render_mod(&cfg)),
             ("edges/mod.rs", graph::render_edges_mod(&cfg)),
             ("an empty edges/mod.rs", graph::render_edges_mod(&empty)),
+            (
+                "a new branch",
+                tree::BRANCH_TEMPLATE
+                    .replace("{{branch_name}}", "route_follow")
+                    .replace("{{BranchName}}", "RouteFollow"),
+            ),
+            (
+                "a new custom edge",
+                tree::EDGE_TEMPLATE
+                    .replace("{{edge_name}}", "cputemp")
+                    .replace("{{EdgeName}}", "Cputemp"),
+            ),
         ] {
             assert_eq!(
                 fmt(&src).as_deref(),
@@ -998,7 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn template_wiring_matches_generator() {
+    fn template_links_match_generator() {
         for &board in &board_names() {
             let file = |f: &str| template_file(board, f);
             let cfg = graph::parse(file("bonsai.toml")).unwrap();
@@ -1011,9 +1023,9 @@ mod tests {
                 stale("src/bonsai.rs")
             );
             assert!(
-                file("src/wiring.rs") == graph::render_wiring(&cfg),
+                file("src/links.rs") == graph::render_links(&cfg),
                 "{}",
-                stale("src/wiring.rs")
+                stale("src/links.rs")
             );
             assert!(
                 file("src/settings.rs") == graph::render_settings(&cfg),
@@ -1063,7 +1075,7 @@ mod tests {
         assert!(!src.contains("{{"), "{src}");
         assert!(src.contains("pub struct RadioLink {}"), "{src}");
         assert!(
-            src.contains("use crate::wiring::radio_link::{Input, Out};"),
+            src.contains("use crate::links::radio_link::{Input, Out};"),
             "{src}"
         );
         assert!(src.lines().any(|l| l.trim() == tree::INPUT_ARM), "{src}");
@@ -1245,7 +1257,7 @@ mod tests {
         let tracked = [
             "bonsai.toml",
             "src/messages.rs",
-            "src/wiring.rs",
+            "src/links.rs",
             "src/settings.rs",
             "src/bonsai.rs",
             "src/branches/mod.rs",
@@ -1283,8 +1295,8 @@ mod tests {
         ));
         assert!(read("src/branches/logger.rs").contains("Input::Reading(_reading) => {}"));
         assert!(read("src/branches/sensor.rs").contains("            Input::Tick => {}\n"));
-        let wiring = read("src/wiring.rs");
-        assert!(wiring.contains("impl Sends<Reading> for Out"), "{wiring}");
+        let links = read("src/links.rs");
+        assert!(links.contains("impl Sends<Reading> for Out"), "{links}");
         assert!(
             read("src/branches/mod.rs")
                 .contains("pub mod display;\npub mod logger;\npub mod sensor;\n")
@@ -1337,7 +1349,7 @@ mod tests {
         assert!(read("src/edges/serial.rs").contains("pub struct Serial"));
         assert!(read("src/edges/radio.rs").contains("impl Edge for Radio"));
         assert!(read("src/edges/mod.rs").contains("pub mod serial;"));
-        assert!(read("src/wiring.rs").contains("pub fn to_mesh(&mut self"));
+        assert!(read("src/links.rs").contains("pub fn to_mesh(&mut self"));
 
         tree::unlink("display", &args(&["radio"])).unwrap();
         tree::edge_remove("radio").unwrap();
@@ -2178,7 +2190,7 @@ fn regrow() -> io::Result<()> {
     }
 
     // Require an unambiguous bonsai tree before wiping anything: the Cargo.toml
-    // stamp, the graph, the messages and the generated wiring. A stray
+    // stamp, the graph, the messages and the generated links. A stray
     // directory can't match all of these. (An older, Embassy tree has the
     // stamp and its own trunk files instead.)
     let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
@@ -2186,7 +2198,9 @@ fn regrow() -> io::Result<()> {
         && root.join(tree::CONFIG).is_file()
         && (file_contains(&root.join(tree::MESSAGES), tree::MESSAGE_MARKER)
             || file_contains(&root.join("src/trunk.rs"), "// bonsai:nutrient"))
-        && (root.join("src/wiring.rs").is_file() || root.join("src/sap.rs").is_file());
+        && (root.join("src/links.rs").is_file()
+            || root.join("src/wiring.rs").is_file()
+            || root.join("src/sap.rs").is_file());
     if !is_tree {
         eprintln!(
             "not a bonsai tree: {} — refusing to wipe.\nrun regrow from inside a project bonsai grew.",
@@ -2313,7 +2327,7 @@ fn print_help() {
     println!("  bonsai link <from> <to> [<to> ...]   with an edge at one end (no message)");
     println!("  bonsai unlink <from> [<Message>] [<to> ...]   stop (all when none named)");
     println!("  bonsai rate <branch> <hz|off>   tick a branch this many times a second");
-    println!("  bonsai sync            regenerate the wiring after editing bonsai.toml");
+    println!("  bonsai sync            regenerate src/links.rs after editing bonsai.toml");
     println!("  bonsai list            the tree's branches and links, and any warnings");
     println!("  bonsai top [user@host|local] [--port N] [--once]");
     println!("                         watch a running tree: its branches, edges and log");

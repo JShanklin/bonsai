@@ -40,7 +40,7 @@ bonsai rate position 0.5
 ```
 added serial edge gps
 link it one way or both: `bonsai link gps <branch>` (what it receives), `bonsai link <branch> gps` (what it sends)
-updated src/wiring.rs, src/edges/mod.rs, src/edges/serial.rs, Cargo.toml (+tokio-serial)
+updated src/links.rs, src/edges/mod.rs, src/edges/serial.rs, Cargo.toml (+tokio-serial)
 …
 position ticks 0.5 times a second: `Input::Tick` in its process
 ```
@@ -122,4 +122,4 @@ reopens the port when it's back.
 - **Check the device first:** `ls -l /dev/serial0` shows which UART it is;
   `sudo cat /dev/serial0` shows whether anything is arriving at all.
 - **Binary protocols** (UBX, your own): keep `framing = "raw"` and parse in
-  `process`; see the [wire format guide](wire-format.md).
+  `process`; see the [binary messages guide](binary-messages.md).

@@ -34,10 +34,10 @@ templates/
       .cargo/config.toml   # the build target and runner (none for host)
       bonsai.toml          # the graph: branches, settings, rates, links
       src/
-        main.rs            # trunk: `bonsai::run(wiring::Core::new())`
+        main.rs            # trunk: `bonsai::run(links::Core::new())`
         messages.rs        # the message structs (has `// bonsai:message`), units in scope
         bonsai.rs          # GENERATED: the runtime (copy of _tree/bonsai.rs)
-        wiring.rs          # GENERATED: each branch's Input/Out, and the core
+        links.rs           # GENERATED: each branch's Input/Out, and the core
         settings.rs        # GENERATED: [branch.<name>] values as constants
         branches/
           mod.rs           # GENERATED: one `pub mod` per branch (none in a new tree)
@@ -59,8 +59,8 @@ A branch is a struct implementing `bonsai::Branch`:
 
 ```rust
 impl Branch for Display {
-    type Input = Input;   // crate::wiring::display::Input, generated
-    type Out = Out;       // crate::wiring::display::Out, generated
+    type Input = Input;   // crate::links::display::Input, generated
+    type Out = Out;       // crate::links::display::Out, generated
 
     fn setup() -> Self { … }                                 // starting state
     fn process(&mut self, input: Input, out: &mut Out) {     // no I/O, no waiting
@@ -96,13 +96,13 @@ mistaken for it), keep them intact:
 
 ## Generated files
 
-`src/bonsai.rs`, `src/wiring.rs`, `src/settings.rs`, `src/branches/mod.rs` and
+`src/bonsai.rs`, `src/links.rs`, `src/settings.rs`, `src/branches/mod.rs` and
 `src/edges/mod.rs` (plus `src/edges/serial.rs` while a tree has a serial edge)
 are written by `bonsai sync` (every graph command runs it). After changing a
 template's `bonsai.toml` or `src/messages.rs`, run `bonsai sync` inside
-`templates/linux/<board>/`. The `template_wiring_matches_generator` test fails
+`templates/linux/<board>/`. The `template_links_match_generator` test fails
 if a board's copy is stale. They contain no Liquid, so cargo-generate passes
-them through untouched. `main.rs` marks `settings` and `wiring` with
+them through untouched. `main.rs` marks `settings` and `links` with
 `#[rustfmt::skip]` so `cargo fmt` doesn't reformat them.
 
 ## Variables in a trunk template

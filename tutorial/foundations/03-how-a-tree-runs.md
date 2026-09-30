@@ -52,7 +52,7 @@ whom: `sensor` sends `Reading` to `watchdog` and `display`. Links live in
 `bonsai.toml`, one file for the whole tree, and bonsai generates the typed
 code that carries them.
 
-The compiler checks the wiring. Each branch gets an `Input` enum with exactly
+The compiler checks the links. Each branch gets an `Input` enum with exactly
 what's linked to it, so a new link doesn't build until the branch handles it.
 `out.send(m)` builds only for messages the branch is linked to send.
 
@@ -88,10 +88,10 @@ bonsai names the parts of your program after a tree:
 | **link** | who sends what to whom | a `[[link]]` in `bonsai.toml` |
 | **rate** | a branch's own clock: `Input::Tick`s per second | `rate` in its `[branch.<name>]` |
 | **settings** | a branch's values, as constants | other keys in `[branch.<name>]` → `src/settings.rs` |
-| **wiring** | the generated `Input`/`Out` types, the edges and the core | `src/wiring.rs` (never edit) |
+| **`src/links.rs`** | the generated `Input`/`Out` types, the edges and the core | written by bonsai (never edit) |
 
 The `bonsai` command does the plumbing: it adds branches, messages and
-edges, links them, and regenerates the wiring. You write what each branch
+edges, links them, and regenerates `src/links.rs`. You write what each branch
 decides.
 
 Next: [Your first tree](04-first-tree.md).

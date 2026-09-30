@@ -13,7 +13,7 @@ this distinction in mind: editing `src/main.rs` changes the CLI; editing
 `templates/**` changes what the CLI emits. Microcontroller support (Pico,
 ESP32, defmt, `bonsai ide`) was removed: bonsai is a Linux tool.
 
-Vocabulary (tree / trunk / branch / message / link / edge / rate / wiring) is
+Vocabulary (tree / trunk / branch / message / link / edge / rate / `src/links.rs`) is
 defined in `README.md`'s Concepts table. A tree is a deterministic core on
 tokio: branches decide, edges do the I/O. The old (Embassy) bonsai's
 vocabulary (nutrient, sap, tap/release, feed/starve, graft/snip, roots,
@@ -21,7 +21,7 @@ paths) is gone; `renamed()` in `main.rs` points its commands at their
 replacements, and the commands refuse its trees. Links were once called
 wires: `renamed()` maps `wire`/`unwire`, and `require_tree` renames an older
 tree's `[[wire]]` headers to `[[link]]` (`tree::with_links`); `graph::parse`
-refuses `[[wire]]`. "Wire format" (bytes on the wire) keeps its name. A new tree has no branches
+refuses `[[wire]]`. A new tree has no branches
 (there's no built-in heartbeat: it logs `INFO bonsai: running`, and any
 branch can have a `rate`).
 
@@ -44,7 +44,7 @@ cargo run -- link <from> <Message> <to> [<to> ...]  # branch → branches, a [[l
 cargo run -- link <from> <to> [<to> ...]  # an edge at one end: no message
 cargo run -- unlink <from> [<Message>] [<to> ...]   # all receivers when none named
 cargo run -- rate <branch> <hz|off>       # Input::Tick at that rate
-cargo run -- sync           # regenerate src/{bonsai,wiring,settings}.rs, branches/ and edges/mod.rs
+cargo run -- sync           # regenerate src/{bonsai,links,settings}.rs, branches/ and edges/mod.rs
 cargo run -- list           # branches, links, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
 cargo run -- top [user@host|local] [--port N] [--once]   # watch a running tree
@@ -92,7 +92,7 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `graph::parse` → `graph::check` (errors refuse generation: unknown
   names, self-link, duplicates, bad names, `Tick`, the link rules above, an
   edge whose CamelCase name is a message's; warnings: loops via `cycles`,
-  branches with no inputs and no rate, unlinked edges) → `render_wiring`,
+  branches with no inputs and no rate, unlinked edges) → `render_links`,
   `render_settings`, `render_mod`, `render_edges_mod`. `tree::sync_tree` writes
   those plus `src/bonsai.rs` (`tree::RUNTIME`, from
   `templates/_tree/bonsai.rs`), only when changed; while the tree has a serial
@@ -164,7 +164,8 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   each).
   Templates build with `flavor = "current_thread"` and **no**
   `panic = "abort"` (unwinding is what makes the reset possible).
-- **The generated wiring** (`src/wiring.rs`): `enum EdgeIn` (one variant per
+- **The generated links** (`src/links.rs`; `src/wiring.rs` in older trees,
+  which `sync_tree` moves across with `tree::with_links_module`): `enum EdgeIn` (one variant per
   edge, its CamelCase name), `enum Msg` (per message link `<FromCamel><Message>`,
   per branch → edge `<FromCamel>To<EdgeCamel>`), and per branch `mod <name> {
   enum Input (in `graph::input_variants` order: Tick if rated, then each linked
@@ -267,7 +268,8 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   (`parse_board`, then `chip_of` from `BOARDS`) and its name
   (`parse_package_name`), so it needs no args. Guardrails: refuses unless the dir
   has the bonsai signature (Cargo.toml stamp + `bonsai.toml` + the messages
-  marker + `src/wiring.rs`, or an old bonsai tree's equivalents, so an old tree
+  marker + `src/links.rs` (or an older tree's `src/wiring.rs`), or an old
+  bonsai tree's equivalents, so an old tree
   can be regrown into a new one) and is not `/` or `$HOME`; renders into a `.bonsai-regrow` staging dir
   and only wipes on success (a failed regen leaves the tree intact); preserves
   `.git/`. The pure helpers (`parse_board`, `parse_package_name`, `chip_of`)
@@ -293,12 +295,12 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
 2. **The branch scaffold** (`templates/_branch/branch.rs`) is **not** rendered
    by cargo-generate. The CLI does a plain `.replace` of `{{branch_name}}` and
    `{{BranchName}}`, a bonsai convention, not Liquid.
-3. **The generated files** (`src/bonsai.rs`, `src/wiring.rs`,
+3. **The generated files** (`src/bonsai.rs`, `src/links.rs`,
    `src/settings.rs`, `src/branches/mod.rs`) in each trunk template are
    *written by the CLI* (run `bonsai sync` inside `templates/linux/<board>/`
    after touching that template's `bonsai.toml`/`messages.rs`, or after
    changing `graph::render_*` or `templates/_tree/bonsai.rs`). They hold no
-   Liquid. `template_wiring_matches_generator` fails if any board's copy is
+   Liquid. `template_links_match_generator` fails if any board's copy is
    stale, and checks `bonsai.toml` and `messages.rs` are identical across
    boards and that a new tree has no branches.
 
@@ -325,10 +327,12 @@ graph commands work inside a tree where `templates/` isn't present.
   comment is prose and left alone).
 - **Generated files stay rustfmt-clean.** `cargo fmt` formats
   `src/bonsai.rs`, `src/branches/mod.rs` and `src/edges/mod.rs` (only
-  `wiring`/`settings` are `#[rustfmt::skip]`), so the runtime is kept
+  `links`/`settings` are `#[rustfmt::skip]`), so the runtime is kept
   formatted and `mod.rs` lists are sorted, or `cargo fmt --check` fails on a
   new tree and `bonsai sync` undoes the formatting;
-  `generated_files_are_rustfmt_clean` checks it.
+  `generated_files_are_rustfmt_clean` checks it, and the branch and edge
+  scaffolds as rendered (their `use` lines stay in rustfmt's order:
+  `crate::links::…` before `crate::messages::*`).
 - **Generated files are output, never input.** The sources of truth are
   `bonsai.toml` and `src/messages.rs`; branch files are scanned for nothing
   (the compiler checks them against the generated `Input`/`Out`). Arms are
@@ -381,7 +385,7 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
   it runs on a PC: sensor → watchdog → display with `Celsius`/`Percent`
   fields, a `limit` setting, a UDP `uplink` edge with a text protocol, tests,
   logs and `bonsai top`) and `guides/` (short self-contained recipes: edges
-  over UDP/TCP/serial and custom edges, units, wire format, testing, deploy, build tools, a virtual Pi
+  over UDP/TCP/serial and custom edges, units, binary messages, testing, deploy, build tools, a virtual Pi
   (arm64 Podman container, qemu, macvlan/ipvlan), CI, troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold

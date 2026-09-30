@@ -301,8 +301,8 @@ Code is split into files (modules). `use` brings names into scope:
 
 ```rust
 use crate::bonsai::Branch;           // `crate::` = this project
+use crate::links::sensor::{Input, Out};
 use crate::messages::*;              // `*`: everything in it
-use crate::wiring::sensor::{Input, Out};
 ```
 
 ## Tests

@@ -45,7 +45,7 @@ bonsai link relay hub station
 added tcp edge hub
 …
 relay --> hub, station: send from relay with `out.to_hub(..)`, `out.to_station(..)`
-updated src/wiring.rs
+updated src/links.rs
 ```
 
 `bonsai.toml`:
@@ -149,4 +149,4 @@ The hub, the relay and the clients carry on the whole time.
 - A client that disconnects from a server edge is simply forgotten; sends
   to it are skipped.
 - For binary protocols, keep `framing = "raw"` and put the parsing in
-  `process`; see the [wire format](wire-format.md) guide.
+  `process`; see the [binary messages](binary-messages.md) guide.

@@ -28,7 +28,7 @@ bonsai edge add uplink udp --bind 0.0.0.0:6969 --to 127.0.0.1:6970
 ```
 added udp edge uplink
 link it one way or both: `bonsai link uplink <branch>` (what it receives), `bonsai link <branch> uplink` (what it sends)
-updated src/wiring.rs
+updated src/links.rs
 warning: edge uplink isn't linked: `bonsai link uplink <branch>` to hear it, `bonsai link <branch> uplink` to send
 ```
 
@@ -55,9 +55,9 @@ bonsai list
 
 ```
 uplink --> watchdog: what uplink receives arrives as `Input::Uplink(..)`
-updated src/wiring.rs
+updated src/links.rs
 watchdog --> uplink: send from watchdog with `out.to_uplink(..)`
-updated src/wiring.rs
+updated src/links.rs
 tree: greenhouse  (zero-2w (bcm2710a1))
 branches, in the order the core runs them:
   sensor  (ticks 1/s)
@@ -81,7 +81,7 @@ The edge moves bytes; the watchdog decides what they mean. That keeps the
 decoding in `process`, where a test can reach it. Plain text is enough to
 start: the watchdog sends `alarm 31.0` when it's too hot, and takes `limit
 28` to set a new limit (in °C), answering the sender. (For compact binary
-messages, see the [wire format guide](../guides/wire-format.md).)
+messages, see the [binary messages guide](../guides/binary-messages.md).)
 
 In `src/branches/watchdog.rs`, bring `Packet` in:
 
@@ -243,7 +243,7 @@ of `src/main.rs`:
 #[cfg(test)]
 mod tests {
     use crate::bonsai::{Event, Packet, Tree};
-    use crate::wiring::{Core, EdgeIn};
+    use crate::links::{Core, EdgeIn};
 
     #[test]
     fn a_lower_limit_sets_off_an_alarm() {

@@ -3,7 +3,7 @@
 //! `bonsai.toml` holds the graph: the branches (with their settings and
 //! `rate`), the edges (the tree's bridges to the outside world) and the links
 //! between them. `src/messages.rs` holds the message types. From those,
-//! `bonsai sync` writes `src/wiring.rs` (the typed inputs, outputs and core),
+//! `bonsai sync` writes `src/links.rs` (the typed inputs, outputs and core),
 //! `src/settings.rs`, `src/branches/mod.rs` and `src/edges/mod.rs`.
 
 use std::str::FromStr;
@@ -758,10 +758,10 @@ const HEADER: &str = "//!\n\
 //! it: change those, then run `bonsai sync` (every bonsai command that changes\n\
 //! the graph runs it for you).\n";
 
-/// `src/wiring.rs`: each branch's `Input` and `Out`, the edges, and the core
+/// `src/links.rs`: each branch's `Input` and `Out`, the edges, and the core
 /// that delivers every message. Assumes `check` found no errors.
-pub fn render_wiring(cfg: &Config) -> String {
-    let mut o = format!("//! The wiring between branches and edges.\n{HEADER}");
+pub fn render_links(cfg: &Config) -> String {
+    let mut o = format!("//! The links between branches and edges.\n{HEADER}");
     o.push_str(
         "#![allow(dead_code, unused_imports, unused_variables)]
 #![allow(clippy::enum_variant_names, clippy::wrong_self_convention)]
@@ -1427,8 +1427,8 @@ to = ["pilot"]
     }
 
     #[test]
-    fn wiring_types_each_branch_and_delivers_in_order() {
-        let w = render_wiring(&parse(TREE).unwrap());
+    fn links_type_each_branch_and_delivers_in_order() {
+        let w = render_links(&parse(TREE).unwrap());
         // Inputs: the rate's Tick, then each linked message.
         assert!(w.contains("pub mod pulse {"), "{w}");
         assert!(w.contains("        Tick,\n    }"), "{w}");
@@ -1466,7 +1466,7 @@ to = ["pilot"]
 
     #[test]
     fn an_empty_tree_still_renders() {
-        let w = render_wiring(&Config::default());
+        let w = render_links(&Config::default());
         assert!(w.contains("pub enum Msg {\n}\n"), "{w}");
         assert!(w.contains("match message {\n        }"), "{w}");
         assert!(w.contains("vec![]"), "{w}");
@@ -1667,8 +1667,8 @@ to = ["b"]
     }
 
     #[test]
-    fn wiring_carries_edges_both_ways() {
-        let w = render_wiring(&parse(EDGES).unwrap());
+    fn links_carry_edges_both_ways() {
+        let w = render_links(&parse(EDGES).unwrap());
         // What edges receive, and the settings they're started with.
         assert!(
             w.contains("pub enum EdgeIn {\n    Beacon(crate::bonsai::Packet),\n"),

@@ -5,13 +5,13 @@
 mod bonsai;
 mod branches;
 mod edges;
+#[rustfmt::skip]
+mod links;
 mod messages;
 #[rustfmt::skip]
 mod settings;
-#[rustfmt::skip]
-mod wiring;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    bonsai::run(wiring::Core::new()).await;
+    bonsai::run(links::Core::new()).await;
 }

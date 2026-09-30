@@ -88,7 +88,7 @@ greenhouse/
     ├── edges/
     │   └── mod.rs    # GENERATED: your own edges, if any
     ├── bonsai.rs     # GENERATED: the runtime (the core, edges, logs)
-    ├── wiring.rs     # GENERATED: each branch's Input and Out, and the core
+    ├── links.rs      # GENERATED: each branch's Input and Out, and the core
     └── settings.rs   # GENERATED: branch settings as constants
 ```
 

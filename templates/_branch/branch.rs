@@ -2,9 +2,9 @@
 //! Grown by `bonsai branch add {{branch_name}}`.
 
 use crate::bonsai::Branch;
+use crate::links::{{branch_name}}::{Input, Out};
 #[allow(unused_imports)] // the messages it sends, and units
 use crate::messages::*;
-use crate::wiring::{{branch_name}}::{Input, Out};
 
 /// What {{branch_name}} keeps between inputs.
 pub struct {{BranchName}} {}

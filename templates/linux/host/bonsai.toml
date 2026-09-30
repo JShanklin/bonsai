@@ -1,5 +1,5 @@
 # The tree's graph, read by the `bonsai` CLI (not by cargo). `bonsai sync`
-# generates src/wiring.rs, src/settings.rs and src/branches/mod.rs from it and
+# generates src/links.rs, src/settings.rs and src/branches/mod.rs from it and
 # src/messages.rs. The bonsai commands edit it for you and keep its comments;
 # after editing it by hand, run `bonsai sync`.
 

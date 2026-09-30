@@ -1,6 +1,6 @@
 # Quadlet network: each virtual board's own address on your LAN. Shared by every
 # board; install.sh fills in your interface, network and router, and the driver:
-# macvlan on a wire (the board has its own MAC), ipvlan on Wi-Fi (it shares
+# macvlan on Ethernet (the board has its own MAC), ipvlan on Wi-Fi (it shares
 # yours, since access points drop frames from other MACs).
 [Network]
 Driver=@DRIVER@

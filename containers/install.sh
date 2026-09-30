@@ -4,7 +4,7 @@
 #   sudo ./install.sh <board> remove   stop it and delete everything it made
 # Boards are the files in boards/: pi5, zero-2w, zero-w.
 # Overrides: VIRTUAL_PI_LAN_DEV (network interface), VIRTUAL_PI_LAN_IP (its LAN address),
-# VIRTUAL_PI_LAN_DRIVER (macvlan or ipvlan; default: ipvlan on Wi-Fi, macvlan on a wire),
+# VIRTUAL_PI_LAN_DRIVER (macvlan or ipvlan; default: ipvlan on Wi-Fi, macvlan on Ethernet),
 # VIRTUAL_PI_RELAY (on Wi-Fi: multicast groups to relay to the board, "239.2.3.2:6969 …";
 # kept across installs, empty to remove).
 set -euo pipefail
@@ -91,7 +91,7 @@ fi
 lan_ip="$VIRTUAL_PI_LAN_IP"
 # Wi-Fi access points drop frames from any MAC but the one that joined, so on
 # Wi-Fi the board shares your computer's MAC (ipvlan) instead of having its own
-# (macvlan, better on a wire). VIRTUAL_PI_LAN_DRIVER picks one by hand.
+# (macvlan, better on Ethernet). VIRTUAL_PI_LAN_DRIVER picks one by hand.
 if [ -e "/sys/class/net/$dev/wireless" ]; then
     driver="${VIRTUAL_PI_LAN_DRIVER:-ipvlan}"
     say "$dev is Wi-Fi: the LAN link uses $driver"
@@ -130,7 +130,7 @@ sed -e "s|@BOARD@|$board|g" -e "s|@HOST_IP@|$HOST_IP|" -e "s|@LAN_IP@|$lan_ip|" 
     "$here/board.container" > "$units/$name.container"
 systemctl daemon-reload
 # The LAN network made by an earlier install may no longer fit: another driver
-# (moved between Wi-Fi and a wire), interface or subnet. Podman can't change a
+# (moved between Wi-Fi and Ethernet), interface or subnet. Podman can't change a
 # network in place, so stop the boards on it, delete it, and let the loop below
 # make it again; the boards restart at the end.
 restart_boards=""
@@ -163,7 +163,7 @@ done
 # driver drops it on the way into ipvlan. So this computer joins each group in
 # VIRTUAL_PI_RELAY itself and forwards every packet to the board's host link,
 # where the board's socket (bound to 0.0.0.0:<port>) receives it. Rebuilt on
-# every install; installing on a wire, or with VIRTUAL_PI_RELAY= (empty),
+# every install; installing on Ethernet, or with VIRTUAL_PI_RELAY= (empty),
 # removes them.
 # Unset keeps the groups from the last install; set (even empty) replaces them.
 previous=""

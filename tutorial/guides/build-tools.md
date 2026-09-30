@@ -63,10 +63,11 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 Unpicking a tool in `bonsai tools` takes its settings out again. With none
 picked, `.cargo/config.toml` is exactly as the template made it.
 
-## Microcontroller trees
+## Trees for this computer
 
-Pico and ESP32 trees are offered sccache and bacon only. Their builds link
-with the chip's own linker, so mold and zig don't apply.
+A `host` tree is offered sccache, mold and bacon. It builds for the computer
+it's on, so there's nothing for zig to cross-link, and mold links every build
+it makes.
 
 ## If something fails
 

@@ -1,12 +1,13 @@
 # bonsai 🪴
 
-> ⚠️ **Work in progress.** Commands, templates and the generated firmware may
+> ⚠️ **Work in progress.** Commands, templates and the generated code may
 > still change, and not every board is equally tested. See [Status](#status).
 
-**Grow embedded Rust firmware as a tree: a small trunk, and branches you add
-one at a time.**
+**Grow a Linux application in Rust as a tree: a small trunk, and branches you
+add one at a time.**
 
-bonsai is a command-line tool for building firmware out of independent parts.
+bonsai is a command-line tool for building Linux applications (a drone's
+companion computer, a robot, a sensor hub) out of independent parts.
 You describe the parts and how they talk, and bonsai writes and maintains the
 structure. You write what each part does.
 
@@ -18,12 +19,12 @@ structure. You write what each part does.
 - **The sap** is the plumbing between them: one channel per nutrient, generated
   from your wiring and regenerated every time it changes. You never edit it.
 
-The same model runs on microcontrollers (Raspberry Pi Pico, ESP32-S3) and on
-Linux (Raspberry Pi Zero and Pi 5), on top of [Embassy].
+Trees run on Linux: a Raspberry Pi (Zero W, Zero 2 W, Pi 5) or the computer
+you're on, on top of [Embassy]'s async executor.
 
 ## Why
 
-Firmware that does several things at once tends to fail the same ways. A task
+Programs that do several things at once tend to fail the same ways. A task
 blocks and everything freezes. One busy data stream crowds out a critical
 command. Two parts wait on each other forever. Queues get sized by guesswork.
 And adding a feature means threading new plumbing through code that already
@@ -43,9 +44,8 @@ bonsai is built to prevent those:
   the moment you create them, not in the field.
 - **Loss is never silent.** A reader that falls behind loses the oldest
   messages, and every loss is counted and reported.
-- **Small by default.** Each channel is sized for its own message, generated
-  code avoids linking formatting machinery, and release profiles are tuned. A
-  fresh Pico tree is ~10 KB of flash and under 1 KB of RAM (~5.5 KB lean).
+- **Small by default.** Each channel is sized for its own message, and release
+  profiles are tuned for the Pi (size-optimised, stripped, LTO).
 
 ## A look
 
@@ -106,10 +106,8 @@ cargo install --path .
 
 The templates are built into the binary, so `bonsai` works from any directory.
 
-The wizard asks for the MCU, chip and board, then where to plant the tree.
-For an ESP32 it also asks whether the tree joins WiFi: yes adds `src/wifi.rs`,
-which connects at startup and hands branches a network stack (UDP, TCP, DNS).
-Then it offers [build tools](tutorial/guides/build-tools.md) (sccache, mold,
+The wizard asks for the board (a Raspberry Pi, or `host` for this computer),
+then where to plant the tree. Then it offers [build tools](tutorial/guides/build-tools.md) (sccache, mold,
 zigbuild, bacon), installing any you pick that are missing.
 
 ## Commands
@@ -127,21 +125,20 @@ bonsai list                                     flow graph, branches, warnings
 bonsai sync                                     regenerate the sap after hand edits
 bonsai update                                   refresh template crates and Cargo.lock
 bonsai regrow                                   reset the tree to a fresh template
-bonsai retarget <board>                         move the tree to another board of its family
-bonsai ide                                      Zed rust-analyzer setup (ESP32)
+bonsai retarget <board>                         move the tree to another board
 bonsai tools [<tool> …]                         build tools: sccache, mold, zigbuild, bacon
 ```
 
 Branch kinds: none (receives), `--produces` (sends), `--duplex` (both),
-`--roots` (Linux only: bridges blocking I/O such as sockets and serial ports
-into the tree).
+`--roots` (bridges blocking I/O such as sockets and serial ports into the
+tree).
 
 ## Concepts
 
 | term | is | in a tree |
 |------|----|-----------|
-| **tree** | a firmware project | the folder |
-| **trunk** | startup: brings up hardware, starts every branch | `src/main.rs`, `src/trunk.rs` |
+| **tree** | an application project | the folder |
+| **trunk** | startup: hands out devices, starts every branch | `src/main.rs`, `src/trunk.rs` |
 | **branch** | a subsystem (one or more tasks) | `src/branches/<name>.rs` |
 | **nutrient** | a message type | a `Nutrient` variant in `src/trunk.rs` |
 | **sap** | the generated channels | `src/sap.rs` (never edit) |
@@ -160,15 +157,15 @@ one shared bus instead.
 
 ## Status
 
-| family | chips | boards | runs via | status |
-|--------|-------|--------|----------|--------|
-| `pico` | RP2040, RP2350 | Pico, Pico W, Pico 2, Pico 2 W | probe-rs | ✅ generates and builds |
-| `esp32` | ESP32-S3 | DevKitC-1, XIAO | espflash | 🧪 experimental (Xtensa toolchain); optional WiFi |
-| `rpi` | BCM2835 | Zero W | Linux program | builds; hardware untested |
-| `rpi` | BCM2710A1 | Zero 2 W | Linux program | ✅ builds and runs on a host; hardware untested |
-| `rpi` | BCM2712 | Pi 5 | Linux program | ✅ builds and runs on a host; hardware untested |
+| board | chip | target | status |
+|-------|------|--------|--------|
+| `zero-w` | BCM2835 | `arm-unknown-linux-gnueabihf` (ARMv6) | ✅ builds (zigbuild); runs on a virtual Pi |
+| `zero-2w` | BCM2710A1 | `aarch64-unknown-linux-gnu` | ✅ builds and runs on a host |
+| `pi5` | BCM2712 | `aarch64-unknown-linux-gnu` | ✅ builds and runs on a host |
+| `host` | this computer | the computer's own | ✅ builds and runs |
 
-Not there yet: more MCU families (nRF, STM32), validation on every board, and
+Microcontrollers (Pico, ESP32) were supported by earlier versions and have been
+dropped: bonsai is a Linux tool now. Not there yet: validation on every Pi, and
 a crates.io release (install from source for now).
 
 **Older trees.** Trees grown before per-nutrient paths (no `src/sap.rs`) are no
@@ -183,11 +180,11 @@ copy `bonsai.toml`, `src/sap.rs`, `src/pulse.rs` and the non-`Nutrient` parts of
 
 - **The code:** `src/main.rs` is the CLI (commands, TUIs, file edits), and
   `src/flow.rs` generates the sap from the wiring graph. It's pure and
-  unit-tested. Per-board templates live in `templates/<mcu>/<board>/` and are
+  unit-tested. Per-board templates live in `templates/linux/<board>/` and are
   rendered by cargo-generate; branch scaffolds in `templates/_branch/` are
   built into the binary.
-- **Adding a board:** add it to `MCUS` / `chips()` / `boards()` in
-  `src/main.rs`, and add `templates/<mcu>/<board>/` (copy a similar board;
+- **Adding a board:** add it to `BOARDS` in `src/main.rs`, and add
+  `templates/linux/<board>/` (copy a similar board;
   `trunk.rs`, `bonsai.toml` and `branches/` are portable). Then run
   `bonsai sync` inside the new template to generate its `src/sap.rs`. See
   [templates/README.md](templates/README.md).

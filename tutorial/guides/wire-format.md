@@ -7,8 +7,9 @@ Turn messages into compact bytes and back, with no hand-written parsing.
 embedded) + COBS framing (built into postcard: each frame ends in a `0` byte
 and contains no other).
 
-Why this combination: a `Reading` is 5 bytes on the wire, encoding needs no
-allocation on an MCU, and a corrupted frame is simply skipped. The next frame
+Why this combination: a `Reading` is 5 bytes on the wire, the same format
+works on a microcontroller at the other end of a serial link, and a corrupted
+frame is simply skipped. The next frame
 starts after the next `0`.
 
 ## `Wire` vs `Nutrient`
@@ -43,18 +44,9 @@ commit.
 
 ## Add the crates
 
-Pi / PC trees (std):
-
 ```sh
 cargo add serde --no-default-features --features derive
 cargo add postcard --no-default-features --features use-std
-```
-
-Pico / ESP32 trees (no_std), without `use-std`:
-
-```sh
-cargo add serde --no-default-features --features derive
-cargo add postcard --no-default-features
 ```
 
 ## `src/wire.rs`
@@ -85,7 +77,8 @@ pub fn decode(frame: &mut [u8]) -> Option<Wire> {
 
 Add `mod wire;` next to `mod trunk;` in `src/main.rs`.
 
-On an MCU, where there's no `Vec`, encode into a buffer instead:
+A program without `Vec` (a microcontroller on the other end) encodes into a
+buffer instead:
 
 ```rust
 let mut buf = [0u8; 32];

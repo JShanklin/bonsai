@@ -1,0 +1,2 @@
+# This tree builds for the computer it's on: `cargo run` runs it here. To move it
+# to a Raspberry Pi, run `bonsai retarget <board>` (pi5, zero-2w, zero-w).

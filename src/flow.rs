@@ -494,22 +494,14 @@ pub struct Path {
     pub tappers: Vec<String>,
 }
 
-/// How `sap.rs` reports a lagging tapper — the tree's own logger.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Logger {
-    Defmt,
-    Std,
-}
-
 pub struct Graph {
     pub layout: Layout,
     pub paths: Vec<Path>,
     pub nodes: Vec<Node>,
-    pub logger: Logger,
 }
 
 impl Graph {
-    pub fn build(variants: &[Variant], cfg: &Config, nodes: Vec<Node>, logger: Logger) -> Graph {
+    pub fn build(variants: &[Variant], cfg: &Config, nodes: Vec<Node>) -> Graph {
         let who = |f: &dyn Fn(&Node) -> &Vec<String>, n: &str| -> Vec<String> {
             nodes
                 .iter()
@@ -532,7 +524,6 @@ impl Graph {
             layout: cfg.layout,
             paths,
             nodes,
-            logger,
         }
     }
 
@@ -818,7 +809,7 @@ use crate::trunk::Nutrient;
         Layout::Paths => render_paths(g, &mut o),
         Layout::Trunk => render_trunk(g, &mut o),
     }
-    render_common(g, &mut o);
+    render_common(&mut o);
     o
 }
 
@@ -1288,7 +1279,7 @@ impl Future for Release {{
     );
 }
 
-fn render_common(g: &Graph, o: &mut String) {
+fn render_common(o: &mut String) {
     o.push_str(
         "
 // ── plumbing ───────────────────────────────────────────────────────────────
@@ -1308,17 +1299,12 @@ const BURST: u8 = 32;
 fn note_lag(who: &'static str, path: &'static str, missed: u64) {
 ",
     );
-    match g.logger {
-        Logger::Defmt => o.push_str(
-            "    defmt::debug!(\"sap: {=str} lagged on {=str}, {=u64} lost\", who, path, missed);\n",
-        ),
-        Logger::Std => o.push_str(
-            "    // Opt-in (a flood can lag thousands of times): run with BONSAI_SAP_DEBUG set.\n\
-             \x20   static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();\n\
-             \x20   if *ON.get_or_init(|| std::env::var_os(\"BONSAI_SAP_DEBUG\").is_some()) {\n\
-             \x20       eprintln!(\"sap: {who} lagged on {path}, {missed} lost\");\n    }\n",
-        ),
-    }
+    o.push_str(
+        "    // Opt-in (a flood can lag thousands of times): run with BONSAI_SAP_DEBUG set.\n\
+         \x20   static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();\n\
+         \x20   if *ON.get_or_init(|| std::env::var_os(\"BONSAI_SAP_DEBUG\").is_some()) {\n\
+         \x20       eprintln!(\"sap: {who} lagged on {path}, {missed} lost\");\n    }\n",
+    );
     o.push_str(
         "}
 
@@ -1452,7 +1438,7 @@ mod tests {
         let variants = parse_variants(
             "pub enum Nutrient {\n    Beat,\n    Cmd { code: u8, arg: i32 },\n    Ack,\n    Armed(bool),\n}\n",
         );
-        Graph::build(&variants, &Config::parse(cfg).unwrap(), nodes, Logger::Std)
+        Graph::build(&variants, &Config::parse(cfg).unwrap(), nodes)
     }
 
     const SHAPED: &str = "[nutrients.Cmd]\nshape = \"directed\"\ncap = 8\n[nutrients.Ack]\nshape = \"directed\"\n[nutrients.Armed]\nshape = \"state\"\n";

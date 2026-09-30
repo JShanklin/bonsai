@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`src/main.rs` contains the host-side `bonsai` CLI, interactive wizard, file-editing commands, and unit tests; `src/flow.rs` is the pure generator for each tree's `src/sap.rs` (per-nutrient paths from `bonsai.toml` + the wiring). Generated projects live under `templates/<mcu>/<board>/`; Pico and ESP32 templates emit firmware, while the `rpi/*` boards (Zero W, Zero 2 W, Pi 5) emit a Linux application. These files are template data, not part of the host crate's build. `templates/_branch/` holds embedded branch scaffolds. Read `templates/README.md` before changing board templates or adding hardware support.
+`src/main.rs` contains the host-side `bonsai` CLI, interactive wizard, file-editing commands, and unit tests; `src/flow.rs` is the pure generator for each tree's `src/sap.rs` (per-nutrient paths from `bonsai.toml` + the wiring). Generated projects live under `templates/linux/<board>/`: the Raspberry Pi boards (Zero W, Zero 2 W, Pi 5) and `host` (this computer), each a Linux application. These files are template data, not part of the host crate's build. `templates/_branch/` holds embedded branch scaffolds. Read `templates/README.md` before changing board templates or adding hardware support.
 
 ## Build, Test, and Development Commands
 
@@ -18,11 +18,11 @@ Set `BONSAI_TEMPLATES=/path/to/templates` to try local template edits without re
 
 ## Coding Style & Naming Conventions
 
-Use Rust 2024 conventions and `cargo fmt` formatting (four-space indentation). Use `snake_case` for modules, files, functions, and branch names; use `PascalCase` for types and `Nutrient` variants. Keep generated-project marker lines such as `// bonsai:mod`, `// bonsai:start`, and `// bonsai:nutrient-arm` intact: CLI commands insert code at those markers. When adding a board, update both the hardware cascade in `src/main.rs` and its `templates/<mcu>/<board>/` directory.
+Use Rust 2024 conventions and `cargo fmt` formatting (four-space indentation). Use `snake_case` for modules, files, functions, and branch names; use `PascalCase` for types and `Nutrient` variants. Keep generated-project marker lines such as `// bonsai:mod`, `// bonsai:start`, and `// bonsai:nutrient-arm` intact: CLI commands insert code at those markers. When adding a board, update both `BOARDS` in `src/main.rs` and its `templates/linux/<board>/` directory.
 
 ## Testing Guidelines
 
-Add focused `#[test]` cases to the existing test module in `src/main.rs`, using descriptive `snake_case` names. Run `rtk cargo test` after CLI or template changes. Template files are not compiled by the host crate, so also build a generated project when changing firmware code or target configuration. Extend the embedded-template completeness test when a board needs new files.
+Add focused `#[test]` cases to the existing test module in `src/main.rs`, using descriptive `snake_case` names. Run `rtk cargo test` after CLI or template changes. Template files are not compiled by the host crate, so also build a generated project when changing template code or target configuration. Extend the embedded-template completeness test when a board needs new files.
 
 ## Commit & Pull Request Guidelines
 

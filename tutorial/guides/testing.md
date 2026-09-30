@@ -44,44 +44,6 @@ test branches::watchdog::tests::above_the_limit_is_too_hot ... ok
 test branches::watchdog::tests::at_the_limit_is_fine ... ok
 ```
 
-## Pico / ESP32 trees: a small logic crate
-
-Firmware builds for the chip, so its tests can't run on your computer. Put
-the logic in a `no_std` library next to it, which builds for either:
-
-```sh
-cargo new --lib logic
-cargo add --path logic
-```
-
-```rust
-// logic/src/lib.rs
-#![no_std]
-
-/// Accept a press only if the last one was at least `gap_ms` ago.
-pub fn accept_press(now_ms: u64, last_ms: u64, gap_ms: u64) -> bool {
-    now_ms.saturating_sub(last_ms) >= gap_ms
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_bounce_is_ignored() {
-        assert!(!accept_press(1_010, 1_000, 50));
-    }
-}
-```
-
-Branches call `logic::accept_press(..)`. Run its tests for your computer's
-target (the tree's `.cargo/config.toml` would otherwise build for the chip):
-
-```sh
-cd logic
-cargo test --target host-tuple
-```
-
 ## What to test
 
 - **Decisions:** thresholds, state machines, debouncing, rate limits.
@@ -90,5 +52,5 @@ cargo test --target host-tuple
 - **Parsing:** anything that turns bytes into values.
 
 Wiring and timing are best checked by running the tree. Use
-`BONSAI_SAP_DEBUG=1` or `DEFMT_LOG=debug` to see lag (see
+`BONSAI_SAP_DEBUG=1` to see lag (see
 [Paths](../foundations/06-paths.md#watching-the-paths)).

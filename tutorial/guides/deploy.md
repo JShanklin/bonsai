@@ -60,8 +60,8 @@ differ between boards: check the ones your branches open.
 ```
 
 It swaps the build target, linker, runner and release profile for the new
-board's. Branches, nutrients and `BONSAI_PI` stay. It moves between boards of
-one family only: Pi to Pi, Pico to Pico, ESP32 to ESP32.
+board's. Branches, nutrients and `BONSAI_PI` stay. `bonsai retarget host`
+moves the tree to your own computer (plain `cargo run`), and back again later.
 
 **On the Pi itself,** `cargo build --release` and `cargo run --release` work as
 they are, and `cargo run` runs the program in place instead of copying it.
@@ -97,39 +97,10 @@ journalctl -u greenhouse -f      # its output
 `Restart=always` matters: with `panic = "abort"`, a panic in any thread ends
 the program, and systemd starts it again.
 
-## Raspberry Pi Pico
-
-With a debug probe connected:
-
-```sh
-cargo run --release     # build, flash, and stream defmt logs
-```
-
-**Smaller images:** panic messages take about half of a small tree's flash.
-Leave them out for production:
-
-```sh
-cargo build --release --no-default-features
-```
-
-A panic still halts, and `probe-rs` still prints where it happened.
-
-**Without a probe (RP2040):** hold BOOTSEL while plugging in the USB cable, and the
-Pico appears as a drive. Convert the build with
-[elf2uf2-rs](https://crates.io/crates/elf2uf2-rs)
-(`elf2uf2-rs target/thumbv6m-none-eabi/release/<name>`) and copy the `.uf2`
-file onto it. (You won't see logs this way.)
-
-## ESP32-S3
-
-```sh
-cargo run --release     # espflash flashes over USB and shows the logs
-```
-
 ## Before you ship
 
 - `cargo build --release` with no warnings, and `cargo clippy` clean.
 - `bonsai list` shows no wiring warnings.
-- Queue caps sized from a real run (`BONSAI_SAP_DEBUG=1` / `DEFMT_LOG=debug`).
+- Queue caps sized from a real run (`BONSAI_SAP_DEBUG=1`).
 - No `.unwrap()` on anything that can fail at runtime (input, I/O, parsing).
 

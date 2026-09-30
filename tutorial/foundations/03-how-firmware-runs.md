@@ -35,18 +35,20 @@ calls these **nutrients** and generates the channels they flow through (the
 it. That keeps each part independent: add, remove or rewrite one without
 touching the others.
 
-## 4. Microcontroller or Linux
+## 4. On Linux
 
-| | microcontroller (Pico, ESP32) | Raspberry Pi (Linux) |
-|---|---|---|
-| operating system | none; your program *is* the system | Linux |
-| Rust mode | `no_std`: no files, threads or heap by default | `std`: the full standard library |
-| hardware access | a HAL crate hands you pins and peripherals | Linux devices (`/dev/…`) and crates |
-| running it | flashed onto the chip with a debug probe or USB | an ordinary program |
-| logging | `defmt`, printed on your computer through the probe | `println!` |
+A bonsai tree is an ordinary Linux program, on a Raspberry Pi or on your own
+computer:
 
-bonsai trees look the same on both. Only the setup in `main.rs` and how you
-flash or run it differ.
+| | a bonsai tree |
+|---|---|
+| Rust mode | `std`: the full standard library (files, threads, the network) |
+| hardware access | Linux devices (`/dev/…`) and crates |
+| running it | `cargo run`; on a Pi, copied over ssh and run there |
+| logging | `println!` / `eprintln!` |
+
+The same tree runs on every board. Only the build target, and how it gets to
+the Pi, differ.
 
 ## 5. The tree
 
@@ -55,7 +57,7 @@ bonsai names the parts of your program after a tree:
 | term | what it is | where it lives |
 |------|-----------|----------------|
 | **tree** | your project | the whole folder |
-| **trunk** | startup: brings up hardware, starts every branch | `src/main.rs`, `src/trunk.rs` |
+| **trunk** | startup: hands out devices, starts every branch | `src/main.rs`, `src/trunk.rs` |
 | **branch** | one subsystem, one or more tasks | `src/branches/<name>.rs` |
 | **nutrient** | a message type | a variant of `Nutrient` in `src/trunk.rs` |
 | **sap** | the generated channels nutrients flow through | `src/sap.rs` (never edit it) |

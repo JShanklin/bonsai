@@ -13,58 +13,39 @@ use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 // ---------------------------------------------------------------------------
-// The cascade. This is the only thing you edit when adding hardware.
+// The boards. This is the only thing you edit when adding hardware (plus its
+// template in templates/linux/<board>/).
 // ---------------------------------------------------------------------------
 
-const MCUS: &[&str] = &["pico", "esp32", "rpi"];
+/// Every board bonsai grows trees for: its name, its chip (stamped into the
+/// tree's Cargo.toml) and what it is.
+const BOARDS: &[(&str, &str, &str)] = &[
+    ("pi5", "bcm2712", "Raspberry Pi 5 (64-bit)"),
+    ("zero-2w", "bcm2710a1", "Raspberry Pi Zero 2 W (64-bit)"),
+    ("zero-w", "bcm2835", "Raspberry Pi Zero W (32-bit ARMv6)"),
+    ("host", "native", "this computer (a native build)"),
+];
 
-fn chips(mcu: &str) -> &'static [&'static str] {
-    match mcu {
-        "pico" => &["rp2040", "rp2350"],
-        "esp32" => &["s3"],
-        "rpi" => &["bcm2835", "bcm2710a1", "bcm2712"],
-        _ => &[],
-    }
+/// The chip of a known board. Used by `regrow` and `retarget` to recover a
+/// tree's device from its board alone.
+fn chip_of(board: &str) -> Option<&'static str> {
+    BOARDS
+        .iter()
+        .find(|(name, ..)| *name == board)
+        .map(|(_, chip, _)| *chip)
 }
 
-fn boards(chip: &str) -> &'static [&'static str] {
-    match chip {
-        "rp2040" => &["pico", "pico-w"],
-        "rp2350" => &["pico-2", "pico-2w"],
-        "s3" => &["devkitc-1", "xiao"],
-        "bcm2835" => &["zero-w"],
-        "bcm2710a1" => &["zero-2w"],
-        "bcm2712" => &["pi5"],
-        _ => &[],
-    }
+/// The board names, for messages.
+fn board_names() -> Vec<&'static str> {
+    BOARDS.iter().map(|(name, ..)| *name).collect()
 }
 
-/// MCUs whose trees can join a WiFi network. The wizard asks only for these.
-fn has_wifi(mcu: &str) -> bool {
-    mcu == "esp32"
-}
-
-/// Reverse the cascade: a board belongs to exactly one chip and MCU. Used by
-/// `regrow` to recover a tree's device from its board alone.
-fn device_from_board(board: &str) -> Option<(&'static str, &'static str)> {
-    for &mcu in MCUS {
-        for &chip in chips(mcu) {
-            if boards(chip).contains(&board) {
-                return Some((mcu, chip));
-            }
-        }
-    }
-    None
-}
-
-const LABELS: [&str; 3] = ["MCU", "Chip", "Board"];
-/// After the board, for a board that has it: with or without WiFi.
-const WIFI_STEP: usize = 3;
-/// Then the build tools the tree uses (`src/tools.rs`).
-const TOOLS_STEP: usize = 4;
-/// Then: plant here (the cwd) or in a new folder.
-const WHERE_STEP: usize = 5;
-const NAME_STEP: usize = 6;
+/// The wizard's steps: the board, then the build tools the tree uses
+/// (`src/tools.rs`), then plant here (the cwd) or in a new folder, then the name.
+const BOARD_STEP: usize = 0;
+const TOOLS_STEP: usize = 1;
+const WHERE_STEP: usize = 2;
+const NAME_STEP: usize = 3;
 
 // The whole templates/ tree is baked into the binary, so an installed `bonsai`
 // carries its templates and works from any directory.
@@ -125,15 +106,16 @@ impl BranchMode {
     }
 }
 
-/// Locate the trunk template for `<mcu>/<board>`. Returns its path and whether
-/// that path is a temp dir we extracted (and should delete afterwards).
+/// Locate the trunk template for `board`. Returns its path and whether that
+/// path is a temp dir we extracted (and should delete afterwards).
 /// Resolution order:
-///   1. `$BONSAI_TEMPLATES/<mcu>/<board>` — dev/override, edit without rebuilding
-///   2. `./templates/<mcu>/<board>`       — running from the repo
+///   1. `$BONSAI_TEMPLATES/linux/<board>` — dev/override, edit without rebuilding
+///   2. `./templates/linux/<board>`       — running from the repo
 ///   3. the copy embedded in this binary  — installed, run from anywhere
-fn template_dir(mcu: &str, board: &str) -> io::Result<(PathBuf, bool)> {
+fn template_dir(board: &str) -> io::Result<(PathBuf, bool)> {
+    let sub = format!("linux/{board}");
     if let Some(root) = std::env::var_os("BONSAI_TEMPLATES") {
-        let p = Path::new(&root).join(mcu).join(board);
+        let p = Path::new(&root).join(&sub);
         if p.is_dir() {
             return Ok((p, false));
         }
@@ -144,12 +126,11 @@ fn template_dir(mcu: &str, board: &str) -> io::Result<(PathBuf, bool)> {
         std::process::exit(1);
     }
 
-    let local = Path::new("templates").join(mcu).join(board);
+    let local = Path::new("templates").join(&sub);
     if local.is_dir() {
         return Ok((local, false));
     }
 
-    let sub = format!("{mcu}/{board}");
     let Some(dir) = TEMPLATES.get_dir(&sub) else {
         eprintln!("no template for {sub}");
         std::process::exit(1);
@@ -200,14 +181,12 @@ fn subdirs(root: &Path) -> std::collections::HashSet<std::ffi::OsString> {
 
 #[derive(Default)]
 struct Wizard {
-    /// 0..=2 are the three menus (MCU/Chip/Board), 3 is WiFi (skipped for
-    /// MCUs without it), 4 build tools, 5 where to plant, 6 the project name.
+    /// BOARD_STEP, TOOLS_STEP and WHERE_STEP are menus; NAME_STEP is the name.
     step: usize,
     /// Cursor position per menu step, remembered so going back restores it.
-    cursor: [usize; 6],
-    picks: [String; 3],
-    /// Grow the tree with WiFi (`src/wifi.rs`).
-    wifi: bool,
+    cursor: [usize; 3],
+    /// The picked board.
+    board: String,
     /// The build tools checklist.
     tools: ToolPicker,
     name: String,
@@ -239,29 +218,13 @@ impl Wizard {
         }
     }
 
-    /// What each menu line shows. Chips name their boards, since a chip's
-    /// name alone rarely says which board it's on.
+    /// What each menu line shows.
     fn options(&self) -> Vec<String> {
         match self.step {
-            1 => chips(&self.picks[0])
+            BOARD_STEP => BOARDS
                 .iter()
-                .map(|chip| format!("{chip} ({})", boards(chip).join(", ")))
+                .map(|(name, _, about)| format!("{name:<8} {about}"))
                 .collect(),
-            _ => self.values(),
-        }
-    }
-
-    /// What picking each menu line selects: the plain name, without labels.
-    fn values(&self) -> Vec<String> {
-        let owned = |v: &[&str]| v.iter().map(|s| s.to_string()).collect();
-        match self.step {
-            0 => owned(MCUS),
-            1 => owned(chips(&self.picks[0])),
-            2 => owned(boards(&self.picks[1])),
-            WIFI_STEP => vec![
-                "no WiFi".to_string(),
-                "WiFi: join a network at startup".to_string(),
-            ],
             TOOLS_STEP => self.tools.labels(),
             WHERE_STEP => vec![
                 format!("here: in this folder ({}/)", self.folder),
@@ -271,21 +234,11 @@ impl Wizard {
         }
     }
 
-    /// Move on from the board: to the WiFi menu if the MCU has WiFi.
+    /// Move on from the board: to the build tools, offered for this board.
+    /// Tools already installed start out picked.
     fn after_board(&mut self) {
-        if has_wifi(&self.picks[0]) {
-            self.step = WIFI_STEP;
-        } else {
-            self.wifi = false;
-            self.after_wifi();
-        }
-    }
-
-    /// Move on from WiFi: to the build tools, offered for this MCU. Tools
-    /// already installed start out picked.
-    fn after_wifi(&mut self) {
-        if self.tools.mcu != self.picks[0] {
-            self.tools = ToolPicker::new(&self.picks[0], tools::Tool::installed);
+        if self.tools.board != self.board {
+            self.tools = ToolPicker::new(&self.board, tools::Tool::installed);
             self.cursor[TOOLS_STEP] = 0;
         }
         self.step = TOOLS_STEP;
@@ -312,24 +265,10 @@ impl Wizard {
     /// Back out of the name entry.
     fn leave_name(&mut self) {
         self.step = if self.here_only {
-            self.before_where()
+            TOOLS_STEP
         } else {
             WHERE_STEP
         };
-    }
-
-    /// The step before Where: the build tools.
-    fn before_where(&self) -> usize {
-        TOOLS_STEP
-    }
-
-    /// The step before the tools: WiFi, or the board when the MCU has no WiFi.
-    fn before_tools(&self) -> usize {
-        if has_wifi(&self.picks[0]) {
-            WIFI_STEP
-        } else {
-            WIFI_STEP - 1
-        }
     }
 
     fn on_key(&mut self, key: KeyCode) {
@@ -365,40 +304,20 @@ impl Wizard {
             KeyCode::Down | KeyCode::Char('j') if len > 0 => {
                 self.cursor[self.step] = (cur + 1) % len;
             }
-            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right if len > 0 => {
-                if self.step == WIFI_STEP {
-                    self.wifi = cur == 1;
-                    self.after_wifi();
-                    return;
+            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right if len > 0 => match self.step {
+                BOARD_STEP => {
+                    self.board = BOARDS[cur].0.to_string();
+                    self.after_board();
                 }
-                if self.step == TOOLS_STEP {
-                    self.after_tools();
-                    return;
-                }
-                if self.step == WHERE_STEP {
+                TOOLS_STEP => self.after_tools(),
+                _ => {
                     self.here = cur == 0;
                     self.enter_name();
-                    return;
                 }
-                self.picks[self.step] = self.values()[cur].clone();
-                // Descending invalidates the cursor of the step below, since
-                // the option list it pointed into is about to change.
-                if self.step + 1 < LABELS.len() {
-                    self.cursor[self.step + 1] = 0;
-                }
-                if self.step + 1 == LABELS.len() {
-                    self.after_board();
-                } else {
-                    self.step += 1;
-                }
-            }
+            },
             KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('h') | KeyCode::Left => {
-                if self.step == 0 {
+                if self.step == BOARD_STEP {
                     self.aborted = true;
-                } else if self.step == WHERE_STEP {
-                    self.step = self.before_where();
-                } else if self.step == TOOLS_STEP {
-                    self.step = self.before_tools();
                 } else {
                     self.step -= 1;
                 }
@@ -416,39 +335,27 @@ impl Wizard {
         .areas(frame.area());
 
         // --- breadcrumb -----------------------------------------------------
+        let picked = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
         let mut crumbs: Vec<Span> = Vec::new();
-        for (i, (label, pick)) in LABELS.iter().zip(&self.picks).enumerate() {
-            if !pick.is_empty() && i < self.step {
-                crumbs.push(Span::raw(format!("{label}: ")));
-                crumbs.push(Span::styled(
-                    pick.clone(),
-                    Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
-                ));
-                crumbs.push(Span::raw("   "));
-            }
-        }
-        if self.step > WIFI_STEP && has_wifi(&self.picks[0]) {
-            crumbs.push(Span::raw("WiFi: "));
-            crumbs.push(Span::styled(
-                if self.wifi { "yes" } else { "no" },
-                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ));
+        if self.step > BOARD_STEP {
+            crumbs.push(Span::raw("Board: "));
+            crumbs.push(Span::styled(self.board.clone(), picked));
             crumbs.push(Span::raw("   "));
         }
         if self.step > TOOLS_STEP {
-            let picked = self.tools.picked();
+            let tools = self.tools.picked();
             crumbs.push(Span::raw("Tools: "));
             crumbs.push(Span::styled(
-                if picked.is_empty() {
+                if tools.is_empty() {
                     "none".to_string()
                 } else {
-                    picked
+                    tools
                         .iter()
                         .map(|t| t.name())
                         .collect::<Vec<_>>()
                         .join(", ")
                 },
-                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
+                picked,
             ));
             crumbs.push(Span::raw("   "));
         }
@@ -459,10 +366,7 @@ impl Wizard {
             } else {
                 "new folder".to_string()
             };
-            crumbs.push(Span::styled(
-                place,
-                Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ));
+            crumbs.push(Span::styled(place, picked));
         }
         if crumbs.is_empty() {
             crumbs.push(Span::styled(
@@ -486,10 +390,9 @@ impl Wizard {
             let opts = self.options();
             let items: Vec<ListItem> = opts.iter().map(|o| ListItem::new(o.as_str())).collect();
             let title = match self.step {
-                WIFI_STEP => " WiFi ".to_string(),
-                TOOLS_STEP => " Build tools: missing ones install once ".to_string(),
-                WHERE_STEP => " Where to plant it ".to_string(),
-                step => format!(" Select {} ", LABELS[step]),
+                BOARD_STEP => " Select the board it runs on ",
+                TOOLS_STEP => " Build tools: missing ones install once ",
+                _ => " Where to plant it ",
             };
             let list = List::new(items)
                 .block(Block::bordered().title(title))
@@ -524,21 +427,21 @@ impl Wizard {
 /// tools step and `bonsai tools` both use it.
 #[derive(Default)]
 struct ToolPicker {
-    /// The MCU the rows were made for.
-    mcu: String,
-    /// Each tool that fits the MCU: picked, and already installed.
+    /// The board the rows were made for.
+    board: String,
+    /// Each tool that fits the board: picked, and already installed.
     rows: Vec<(tools::Tool, bool, bool)>,
 }
 
 impl ToolPicker {
-    fn new(mcu: &str, picked: impl Fn(tools::Tool) -> bool) -> Self {
+    fn new(board: &str, picked: impl Fn(tools::Tool) -> bool) -> Self {
         let rows = tools::Tool::ALL
             .into_iter()
-            .filter(|t| t.fits(mcu))
+            .filter(|t| t.fits(board))
             .map(|t| (t, picked(t), t.installed()))
             .collect();
         ToolPicker {
-            mcu: mcu.to_string(),
+            board: board.to_string(),
             rows,
         }
     }
@@ -609,8 +512,7 @@ fn create_device(here_only: bool) -> io::Result<()> {
         tools::install(&picked)
     };
 
-    // picks: [mcu, chip, board]. The trunk template lives per-board.
-    let (template_path, is_temp) = template_dir(&wiz.picks[0], &wiz.picks[2])?;
+    let (template_path, is_temp) = template_dir(&wiz.board)?;
     let cleanup = || {
         if is_temp {
             let _ = std::fs::remove_dir_all(&template_path);
@@ -647,12 +549,7 @@ fn create_device(here_only: bool) -> io::Result<()> {
         // No subfolder, and no `git init` (keep the folder's own repo, if any).
         args.push("--init".to_string());
     }
-    args.extend(template_defines(
-        &wiz.picks[0],
-        &wiz.picks[1],
-        &wiz.picks[2],
-        wiz.wifi,
-    ));
+    args.extend(template_defines(&wiz.board));
 
     // Snapshot cwd's folders so we can find the one cargo-generate creates —
     // it may sanitize `wiz.name` (case, punctuation) into a different folder name.
@@ -685,38 +582,16 @@ fn create_device(here_only: bool) -> io::Result<()> {
     if !usable.is_empty() {
         apply_tools(&project, &usable)?;
     }
-
-    // esp/Xtensa trees need a rust-analyzer shim for intellisense — offer it now
-    // rather than leaving the user to discover the breakage in their editor.
-    if wiz.picks[0] == "esp32" && confirm("set up Zed rust-analyzer for Xtensa in this tree?")? {
-        setup_ide(&project)?;
-    }
     Ok(())
 }
 
-/// The `-d key=value` pairs a trunk template renders from. `wifi` is passed
-/// only to MCUs that have it (the other templates don't declare it).
-fn template_defines(mcu: &str, chip: &str, board: &str, wifi: bool) -> Vec<String> {
-    let mut defines = vec![
-        format!("mcu={mcu}"),
-        format!("chip={chip}"),
-        format!("board={board}"),
-    ];
-    if has_wifi(mcu) {
-        defines.push(format!("wifi={wifi}"));
-    }
-    defines
+/// The `-d key=value` pairs a trunk template renders from: the board and its chip.
+fn template_defines(board: &str) -> Vec<String> {
+    let chip = chip_of(board).unwrap_or("native");
+    [format!("chip={chip}"), format!("board={board}")]
         .into_iter()
         .flat_map(|d| ["-d".to_string(), d])
         .collect()
-}
-
-/// Whether a tree was grown with WiFi: its Cargo.toml depends on esp-radio.
-/// `regrow` and `update` render the template the same way.
-fn tree_has_wifi(cargo_toml: &str) -> bool {
-    cargo_toml
-        .lines()
-        .any(|l| l.trim_start().starts_with("esp-radio"))
 }
 
 /// Switch the tree in `dir` to `picked` build tools, and say what changed.
@@ -738,10 +613,7 @@ fn apply_tools(dir: &Path, picked: &[tools::Tool]) -> io::Result<()> {
 fn tools_command(names: &[String]) -> io::Result<()> {
     let root = std::env::current_dir()?;
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
-    let Some((mcu, _)) = parse_board(&manifest)
-        .as_deref()
-        .and_then(device_from_board)
-    else {
+    let Some(board) = parse_board(&manifest).filter(|b| chip_of(b).is_some()) else {
         eprintln!("not a bonsai tree — run `bonsai tools` inside a generated project.");
         std::process::exit(1);
     };
@@ -750,7 +622,7 @@ fn tools_command(names: &[String]) -> io::Result<()> {
 
     let picked = if names.is_empty() {
         // Bacon has no settings, so it shows as on whenever it's installed.
-        let mut picker = ToolPicker::new(mcu, |t| {
+        let mut picker = ToolPicker::new(&board, |t| {
             current.contains(&t) || (t == tools::Tool::Bacon && t.installed())
         });
         let mut term = ratatui::init();
@@ -765,9 +637,9 @@ fn tools_command(names: &[String]) -> io::Result<()> {
         let mut picked = Vec::new();
         for name in names {
             match tools::Tool::parse(name) {
-                Some(t) if t.fits(mcu) => picked.push(t),
+                Some(t) if t.fits(&board) => picked.push(t),
                 Some(_) => {
-                    eprintln!("{name} is for Raspberry Pi trees, and this is a {mcu} tree.");
+                    eprintln!("{name} is for Raspberry Pi trees, and this is a {board} tree.");
                     std::process::exit(2);
                 }
                 None => {
@@ -864,7 +736,7 @@ fn plant_here_conflicts(dir: &Path, template: &Path) -> Vec<PathBuf> {
     walk(template, template, &mut files);
     let mut taken: Vec<PathBuf> = files
         .into_iter()
-        .filter(|rel| !matches!(rel.to_str(), Some("cargo-generate.toml" | "pre.rhai")))
+        .filter(|rel| !matches!(rel.to_str(), Some("cargo-generate.toml")))
         .filter(|rel| dir.join(rel).exists())
         .collect();
     taken.sort();
@@ -1198,8 +1070,7 @@ mod tests {
 
     // Guards against the embedded template silently dropping dotfiles — a
     // missing .cargo/config.toml would produce a project that can't build.
-    // Walks the whole cascade so every board is covered, with the per-MCU file
-    // set (pico has memory.x/build.rs; esp32 has rust-toolchain.toml instead).
+    // Walks every board, so a board added to BOARDS without its template fails.
     #[test]
     fn embedded_template_includes_all_files() {
         const COMMON: &[&str] = &[
@@ -1212,35 +1083,20 @@ mod tests {
             "src/branches/mod.rs",
             "src/sap.rs",
             "bonsai.toml",
+            ".cargo/config.toml",
         ];
-        for &mcu in MCUS {
-            let extra: &[&str] = match mcu {
-                "pico" => &[".cargo/config.toml", "pre.rhai", "memory.x", "build.rs"],
-                "esp32" => &[
-                    ".cargo/config.toml",
-                    "pre.rhai",
-                    "rust-toolchain.toml",
-                    "src/wifi.rs",
-                ],
-                "rpi" => &[".cargo/config.toml"],
-                other => panic!("no expected file list for new MCU {other} — extend this test"),
-            };
-            for &chip in chips(mcu) {
-                for &board in boards(chip) {
-                    let sub = format!("{mcu}/{board}");
-                    let dir = TEMPLATES
-                        .get_dir(&sub)
-                        .unwrap_or_else(|| panic!("{sub} embedded in the binary"));
-                    let dest =
-                        std::env::temp_dir().join(format!("bonsai-test-extract-{mcu}-{board}"));
-                    let _ = std::fs::remove_dir_all(&dest);
-                    extract_dir(dir, dir.path(), &dest).unwrap();
-                    for f in COMMON.iter().chain(extra) {
-                        assert!(dest.join(f).is_file(), "embedded {sub} is missing {f}");
-                    }
-                    let _ = std::fs::remove_dir_all(&dest);
-                }
+        for &board in &board_names() {
+            let sub = format!("linux/{board}");
+            let dir = TEMPLATES
+                .get_dir(&sub)
+                .unwrap_or_else(|| panic!("{sub} embedded in the binary"));
+            let dest = std::env::temp_dir().join(format!("bonsai-test-extract-{board}"));
+            let _ = std::fs::remove_dir_all(&dest);
+            extract_dir(dir, dir.path(), &dest).unwrap();
+            for f in COMMON {
+                assert!(dest.join(f).is_file(), "embedded {sub} is missing {f}");
             }
+            let _ = std::fs::remove_dir_all(&dest);
         }
     }
 
@@ -1307,24 +1163,37 @@ mod tests {
         assert!(remove_line(src, |l| l.trim() == "pub mod imu;").is_none());
     }
 
-    // regrow recovers the device from the board alone via the cascade.
+    // regrow recovers the chip from the board alone.
     #[test]
-    fn regrow_device_from_board() {
-        assert_eq!(device_from_board("pico-2"), Some(("pico", "rp2350")));
-        assert_eq!(device_from_board("xiao"), Some(("esp32", "s3")));
-        assert_eq!(device_from_board("zero-2w"), Some(("rpi", "bcm2710a1")));
-        assert_eq!(device_from_board("zero-w"), Some(("rpi", "bcm2835")));
-        assert_eq!(device_from_board("pi5"), Some(("rpi", "bcm2712")));
-        assert_eq!(device_from_board("nope"), None);
+    fn regrow_chip_from_board() {
+        assert_eq!(chip_of("zero-2w"), Some("bcm2710a1"));
+        assert_eq!(chip_of("zero-w"), Some("bcm2835"));
+        assert_eq!(chip_of("pi5"), Some("bcm2712"));
+        assert_eq!(chip_of("host"), Some("native"));
+        assert_eq!(chip_of("pico"), None);
+    }
+
+    // Every board's template stamps its own board and chip into Cargo.toml.
+    #[test]
+    fn templates_stamp_their_board_and_chip() {
+        for &(board, chip, _) in BOARDS {
+            let dir = TEMPLATES.get_dir(format!("linux/{board}")).unwrap();
+            let manifest = dir
+                .get_file(format!("linux/{board}/Cargo.toml"))
+                .unwrap()
+                .contents_utf8()
+                .unwrap();
+            assert_eq!(parse_board(manifest).as_deref(), Some(board));
+            assert!(
+                manifest.contains(&format!("for {board} ({chip})")),
+                "{board}: stamp names another chip"
+            );
+        }
     }
 
     // regrow reads the board back out of the Cargo.toml stamp (both HAL styles).
     #[test]
     fn regrow_parse_board_from_stamp() {
-        let pico = "# Generated by bonsai for pico-w (rp2040) — Embassy trunk + branches.\n";
-        assert_eq!(parse_board(pico).as_deref(), Some("pico-w"));
-        let esp = "# Generated by bonsai for devkitc-1 (esp32-s3) — Embassy trunk + branches.\n";
-        assert_eq!(parse_board(esp).as_deref(), Some("devkitc-1"));
         let rpi = "# Generated by bonsai for zero-2w (bcm2710a1) — Linux trunk + branches.\n";
         assert_eq!(parse_board(rpi).as_deref(), Some("zero-2w"));
         let pi5 = "# Generated by bonsai for pi5 (bcm2712) — Linux trunk + branches.\n";
@@ -1340,19 +1209,18 @@ mod tests {
         assert!(parse_package_name("name = \"{{project-name}}\"\n").is_none());
     }
 
-    // `ide` reads the target from .cargo/config.toml to gate on Xtensa and to fill
-    // settings.json. It must take the [build] target, not the [target.<t>] header,
-    // and ignore an unrendered template.
+    // The build tools read the target from .cargo/config.toml. It must take the
+    // [build] target, not the [target.<t>] header, and ignore an unrendered
+    // template; a host tree has none.
     #[test]
-    fn ide_parse_target_from_cargo_config() {
-        let esp = "[build]\ntarget = \"xtensa-esp32s3-none-elf\"\n\n\
-                   [target.xtensa-esp32s3-none-elf]\nrunner = \"espflash flash\"\n";
+    fn parse_target_from_cargo_config() {
+        let pi = "[build]\ntarget = \"aarch64-unknown-linux-gnu\"\n\n\
+                  [target.aarch64-unknown-linux-gnu]\nlinker = \"aarch64-linux-gnu-gcc\"\n";
         assert_eq!(
-            parse_target(esp).as_deref(),
-            Some("xtensa-esp32s3-none-elf")
+            parse_target(pi).as_deref(),
+            Some("aarch64-unknown-linux-gnu")
         );
-        let pico = "[build]\ntarget = \"thumbv6m-none-eabi\"\n";
-        assert_eq!(parse_target(pico).as_deref(), Some("thumbv6m-none-eabi"));
+        assert!(parse_target(include_str!("../templates/linux/host/.cargo/config.toml")).is_none());
         assert!(parse_target("target = \"{{target}}\"\n").is_none());
         assert!(parse_target("[build]\n").is_none());
     }
@@ -1568,47 +1436,38 @@ mod tests {
     // freshly planted tree would rewrite it on its first wiring command.
     #[test]
     fn template_sap_matches_generator() {
-        for &mcu in MCUS {
-            for &chip in chips(mcu) {
-                for &board in boards(chip) {
-                    let sub = format!("{mcu}/{board}");
-                    let file = |f: &str| {
-                        let path = format!("{sub}/{f}");
-                        TEMPLATES
-                            .get_file(&path)
-                            .and_then(|f| f.contents_utf8())
-                            .unwrap_or_else(|| panic!("{path} embedded"))
-                    };
-                    let variants = flow::parse_variants(file("src/trunk.rs"));
-                    let nutrients: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-                    let pulse = flow::Node::scan("pulse", file("src/pulse.rs"), &nutrients);
-                    assert_eq!(pulse.taps, vec!["Beat"], "{sub}: pulse taps Beat");
-                    assert_eq!(pulse.releases, vec!["Beat"], "{sub}: pulse releases Beat");
-                    let logger = if file("Cargo.toml").contains("defmt") {
-                        flow::Logger::Defmt
-                    } else {
-                        flow::Logger::Std
-                    };
-                    let cfg = flow::Config::parse(file("bonsai.toml")).unwrap();
-                    let g = flow::Graph::build(&variants, &cfg, vec![pulse], logger);
-                    assert!(
-                        flow::render(&g) == file("src/sap.rs"),
-                        "{sub}/src/sap.rs is stale — run `bonsai sync` in templates/{sub}"
-                    );
-                    assert!(g.warnings().is_empty(), "{sub}: {:?}", g.warnings());
-                    // The sap lives under the trunk, exactly as `migrate_sap_module`
-                    // places it in older trees.
-                    assert!(
-                        file("src/trunk.rs").contains(SAP_MOD_IN_TRUNK),
-                        "{sub}: trunk.rs declares the sap as SAP_MOD_IN_TRUNK does"
-                    );
-                    assert!(
-                        file("src/main.rs").contains("use trunk::sap;")
-                            && !file("src/main.rs").contains("mod sap;"),
-                        "{sub}: main.rs reaches the sap through the trunk"
-                    );
-                }
-            }
+        for &board in &board_names() {
+            let sub = format!("linux/{board}");
+            let file = |f: &str| {
+                let path = format!("{sub}/{f}");
+                TEMPLATES
+                    .get_file(&path)
+                    .and_then(|f| f.contents_utf8())
+                    .unwrap_or_else(|| panic!("{path} embedded"))
+            };
+            let variants = flow::parse_variants(file("src/trunk.rs"));
+            let nutrients: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+            let pulse = flow::Node::scan("pulse", file("src/pulse.rs"), &nutrients);
+            assert_eq!(pulse.taps, vec!["Beat"], "{sub}: pulse taps Beat");
+            assert_eq!(pulse.releases, vec!["Beat"], "{sub}: pulse releases Beat");
+            let cfg = flow::Config::parse(file("bonsai.toml")).unwrap();
+            let g = flow::Graph::build(&variants, &cfg, vec![pulse]);
+            assert!(
+                flow::render(&g) == file("src/sap.rs"),
+                "{sub}/src/sap.rs is stale — run `bonsai sync` in templates/{sub}"
+            );
+            assert!(g.warnings().is_empty(), "{sub}: {:?}", g.warnings());
+            // The sap lives under the trunk, exactly as `migrate_sap_module`
+            // places it in older trees.
+            assert!(
+                file("src/trunk.rs").contains(SAP_MOD_IN_TRUNK),
+                "{sub}: trunk.rs declares the sap as SAP_MOD_IN_TRUNK does"
+            );
+            assert!(
+                file("src/main.rs").contains("use trunk::sap;")
+                    && !file("src/main.rs").contains("mod sap;"),
+                "{sub}: main.rs reaches the sap through the trunk"
+            );
         }
     }
 
@@ -1667,7 +1526,7 @@ mod tests {
     fn fs_round_trip_graft_wire_snip_starve() {
         let root = std::env::temp_dir().join("bonsai-test-roundtrip");
         let _ = std::fs::remove_dir_all(&root);
-        let tmpl = TEMPLATES.get_dir("rpi/zero-w").unwrap();
+        let tmpl = TEMPLATES.get_dir("linux/zero-w").unwrap();
         extract_dir(tmpl, tmpl.path(), &root).unwrap();
         let fresh: Vec<(&str, String)> = [
             "src/main.rs",
@@ -1723,7 +1582,7 @@ mod tests {
         // and unwinding it restores every file byte for byte.
         let root = std::env::temp_dir().join("bonsai-test-roundtrip-sap");
         let _ = std::fs::remove_dir_all(&root);
-        let tmpl = TEMPLATES.get_dir("rpi/zero-w").unwrap();
+        let tmpl = TEMPLATES.get_dir("linux/zero-w").unwrap();
         extract_dir(tmpl, tmpl.path(), &root).unwrap();
         let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap();
         let fresh: Vec<(&str, String)> = [
@@ -1853,15 +1712,6 @@ fn add_branch(name: &str, mode: BranchMode) -> io::Result<()> {
     }
 
     require_managed("branch");
-    // Roots bridge OS threads into the executor — std trees only.
-    if mode == BranchMode::Roots && !file_contains(Path::new("Cargo.toml"), "platform-std") {
-        eprintln!(
-            "--roots needs a std tree (an OS with threads, e.g. rpi). On an MCU, do I/O in an\n\
-             ordinary branch that owns the peripheral (async UART/USB drivers are already non-blocking)."
-        );
-        std::process::exit(1);
-    }
-
     // Register the module in branches/mod.rs, and start it in the trunk
     // (main.rs) where the hardware is handed out. Compute both edits first so a
     // missing marker aborts before we write anything (no half-grafted tree).
@@ -2223,7 +2073,6 @@ fn size_hint(trunk: &str, name: &str) {
     if size < LARGE {
         return;
     }
-    let std_tree = file_contains(Path::new("Cargo.toml"), "platform-std");
     let g = tree_graph();
     let msg = match g.layout {
         // Paths layout: each path's slots hold only its own payload, so the cost
@@ -2262,13 +2111,7 @@ fn size_hint(trunk: &str, name: &str) {
         }
     };
     println!(
-        "{msg}.\n{}",
-        if std_tree {
-            "      Consider boxing the payload (`Box<[u8; N]>`) so a slot holds a pointer, or a lower cap."
-        } else {
-            "      Consider passing a handle instead of the bytes — an index into a static buffer\n      \
-             pool, or a `&'static` reference — so a slot holds a word, or a lower cap."
-        }
+        "{msg}.\n      Consider boxing the payload (`Box<[u8; N]>`) so a slot holds a pointer, or a lower cap."
     );
 }
 
@@ -2282,7 +2125,8 @@ fn total_slots(g: &flow::Graph) -> usize {
 }
 
 /// The target's pointer width, for size estimates: 8 on a 64-bit target triple,
-/// else 4 (every MCU here, and 32-bit Raspberry Pi OS).
+/// else 4 (32-bit Raspberry Pi OS). A tree with no target builds for this
+/// computer, so it has this computer's width.
 fn target_ptr_width() -> usize {
     let config = std::fs::read_to_string(".cargo/config.toml").unwrap_or_default();
     match parse_target(&config) {
@@ -2291,7 +2135,8 @@ fn target_ptr_width() -> usize {
         {
             8
         }
-        _ => 4,
+        Some(_) => 4,
+        None => size_of::<usize>(),
     }
 }
 
@@ -2707,11 +2552,11 @@ mod retarget_tests {
         file.replace("{{project-name}}", "orb")
     }
 
-    const ZERO_W_TOML: &str = include_str!("../templates/rpi/zero-w/Cargo.toml");
-    const ZERO_2W_TOML: &str = include_str!("../templates/rpi/zero-2w/Cargo.toml");
-    const PI5_TOML: &str = include_str!("../templates/rpi/pi5/Cargo.toml");
-    const ZERO_W_CONFIG: &str = include_str!("../templates/rpi/zero-w/.cargo/config.toml");
-    const PI5_CONFIG: &str = include_str!("../templates/rpi/pi5/.cargo/config.toml");
+    const ZERO_W_TOML: &str = include_str!("../templates/linux/zero-w/Cargo.toml");
+    const ZERO_2W_TOML: &str = include_str!("../templates/linux/zero-2w/Cargo.toml");
+    const PI5_TOML: &str = include_str!("../templates/linux/pi5/Cargo.toml");
+    const ZERO_W_CONFIG: &str = include_str!("../templates/linux/zero-w/.cargo/config.toml");
+    const PI5_CONFIG: &str = include_str!("../templates/linux/pi5/.cargo/config.toml");
 
     #[test]
     fn manifest_takes_the_new_boards_stamp_and_profile() {
@@ -2730,9 +2575,11 @@ mod retarget_tests {
     }
 
     #[test]
-    fn manifest_round_trips_across_every_pi() {
-        for from in [ZERO_W_TOML, ZERO_2W_TOML, PI5_TOML] {
-            for to in [ZERO_W_TOML, ZERO_2W_TOML, PI5_TOML] {
+    fn manifest_round_trips_across_every_board() {
+        const HOST_TOML: &str = include_str!("../templates/linux/host/Cargo.toml");
+        let all = [ZERO_W_TOML, ZERO_2W_TOML, PI5_TOML, HOST_TOML];
+        for from in all {
+            for to in all {
                 let moved = retargeted_manifest(&rendered(from), &rendered(to)).unwrap();
                 assert_eq!(moved, rendered(to));
             }
@@ -2761,9 +2608,36 @@ mod retarget_tests {
     }
 
     #[test]
+    fn config_moves_between_a_pi_and_this_computer() {
+        const HOST_CONFIG: &str = include_str!("../templates/linux/host/.cargo/config.toml");
+        // Pi → host: the build target and runner go, the Pi's address stays
+        // (under the host template's comment) for moving back.
+        let tree = PI5_CONFIG.replace("pi@raspberrypi.local", "orb@orb.local");
+        let host = retargeted_config(&tree, HOST_CONFIG).unwrap();
+        assert!(parse_target(&host).is_none(), "{host}");
+        assert!(
+            host.starts_with("# This tree builds for the computer it's on"),
+            "{host}"
+        );
+        assert!(host.contains("BONSAI_PI = \"orb@orb.local\""), "{host}");
+        // … and back to a Pi keeps it.
+        let back = retargeted_config(&host, PI5_CONFIG).unwrap();
+        assert_eq!(back, tree);
+        // An untouched host tree lands exactly on each template, both ways.
+        assert_eq!(
+            retargeted_config(HOST_CONFIG, PI5_CONFIG).unwrap(),
+            PI5_CONFIG
+        );
+        assert_eq!(
+            retargeted_config(HOST_CONFIG, HOST_CONFIG).unwrap(),
+            HOST_CONFIG
+        );
+    }
+
+    #[test]
     fn main_header_changes_only_while_generated() {
-        let pi5 = rendered(include_str!("../templates/rpi/pi5/src/main.rs"));
-        let zero = rendered(include_str!("../templates/rpi/zero-2w/src/main.rs"));
+        let pi5 = rendered(include_str!("../templates/linux/pi5/src/main.rs"));
+        let zero = rendered(include_str!("../templates/linux/zero-2w/src/main.rs"));
         let moved = retargeted_main(&zero, &pi5).unwrap();
         assert!(moved.starts_with("//! orb — Raspberry Pi 5 Linux application."));
         assert_eq!(moved.lines().count(), zero.lines().count());
@@ -2800,7 +2674,7 @@ mod plant_here_tests {
         let empty = scratch("empty");
         assert!(only_dotfiles(&empty));
         let _ = std::fs::remove_dir_all(&empty);
-        let template = Path::new("templates/rpi/zero-2w");
+        let template = Path::new("templates/linux/zero-2w");
         assert!(plant_here_conflicts(&dir, template).is_empty());
         assert!(!only_dotfiles(&dir));
 
@@ -2817,16 +2691,15 @@ mod plant_here_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn pick_board(wiz: &mut Wizard, board: &str) {
+        wiz.cursor[BOARD_STEP] = BOARDS.iter().position(|b| b.0 == board).unwrap();
+        wiz.on_key(KeyCode::Enter);
+        assert_eq!(wiz.board, board);
+        assert_eq!(wiz.step, TOOLS_STEP);
+    }
+
     fn pick_rpi(wiz: &mut Wizard) {
-        for _ in 0..3 {
-            wiz.cursor[wiz.step] = wiz
-                .options()
-                .iter()
-                .position(|o| o.starts_with("rpi") || o.starts_with("bcm2710a1") || o == "zero-2w")
-                .unwrap_or(0);
-            wiz.on_key(KeyCode::Enter);
-        }
-        assert_eq!(wiz.step, TOOLS_STEP); // rpi has no WiFi step
+        pick_board(wiz, "zero-2w");
         wiz.on_key(KeyCode::Enter); // keep the tools as offered
     }
 
@@ -2861,7 +2734,22 @@ mod plant_here_tests {
         wiz.on_key(KeyCode::Esc);
         assert_eq!(wiz.step, TOOLS_STEP);
         wiz.on_key(KeyCode::Esc);
-        assert_eq!(wiz.step, WIFI_STEP - 1); // back to the board menu: rpi has no WiFi
+        assert_eq!(wiz.step, BOARD_STEP);
+        wiz.on_key(KeyCode::Esc);
+        assert!(wiz.aborted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn back_from_where_lands_on_the_tools() {
+        let dir = scratch("back");
+        let mut wiz = Wizard::new(false, &dir);
+        pick_rpi(&mut wiz);
+        assert_eq!(wiz.step, WHERE_STEP);
+        wiz.on_key(KeyCode::Esc);
+        assert_eq!(wiz.step, TOOLS_STEP);
+        wiz.on_key(KeyCode::Esc);
+        assert_eq!(wiz.step, BOARD_STEP);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2869,11 +2757,7 @@ mod plant_here_tests {
     fn tools_step_picks_with_space() {
         let dir = scratch("tools");
         let mut wiz = Wizard::new(false, &dir);
-        wiz.cursor[0] = MCUS.iter().position(|&m| m == "rpi").unwrap();
-        for _ in 0..3 {
-            wiz.on_key(KeyCode::Enter);
-        }
-        assert_eq!(wiz.step, TOOLS_STEP);
+        pick_board(&mut wiz, "pi5");
         let offered: Vec<&str> = wiz.tools.rows.iter().map(|r| r.0.name()).collect();
         assert_eq!(offered, ["sccache", "mold", "zigbuild", "bacon"]);
         for row in &mut wiz.tools.rows {
@@ -2894,83 +2778,30 @@ mod plant_here_tests {
         wiz.on_key(KeyCode::Enter);
         assert_eq!(wiz.tools.picked(), [tools::Tool::Zigbuild]);
 
-        // A Pico is offered only the tools that help MCU builds.
+        // A tree for this computer isn't offered zigbuild: nothing to cross-link.
         let mut wiz = Wizard::new(false, &dir);
-        for _ in 0..3 {
-            wiz.on_key(KeyCode::Enter);
-        }
+        pick_board(&mut wiz, "host");
         let offered: Vec<&str> = wiz.tools.rows.iter().map(|r| r.0.name()).collect();
-        assert_eq!(offered, ["sccache", "bacon"]);
+        assert_eq!(offered, ["sccache", "mold", "bacon"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn chip_menu_names_its_boards() {
-        let mut wiz = Wizard::new(false, Path::new("/tmp/greenhouse"));
-        wiz.cursor[0] = MCUS.iter().position(|&m| m == "rpi").unwrap();
-        wiz.on_key(KeyCode::Enter);
-        assert_eq!(
-            wiz.options(),
-            ["bcm2835 (zero-w)", "bcm2710a1 (zero-2w)", "bcm2712 (pi5)"]
-        );
-        wiz.on_key(KeyCode::Enter);
-        assert_eq!(wiz.picks[1], "bcm2835"); // the plain chip is what's picked
-        assert_eq!(wiz.options(), ["zero-w"]);
-    }
-
-    fn pick_esp32(wiz: &mut Wizard) {
-        for _ in 0..3 {
-            wiz.on_key(KeyCode::Enter); // esp32 → s3 → devkitc-1: each the only or first option
-        }
+    fn board_menu_lists_every_board_with_what_it_is() {
+        let wiz = Wizard::new(false, Path::new("/tmp/greenhouse"));
+        let options = wiz.options();
+        assert_eq!(options.len(), BOARDS.len());
+        assert!(options[0].starts_with("pi5") && options[0].contains("Raspberry Pi 5"));
+        assert!(options.iter().any(|o| o.starts_with("host")));
     }
 
     #[test]
-    fn esp32_asks_about_wifi() {
-        let dir = scratch("wifi");
-        let mut wiz = Wizard::new(false, &dir);
-        wiz.cursor[0] = MCUS.iter().position(|&m| m == "esp32").unwrap();
-        pick_esp32(&mut wiz);
-        assert_eq!(wiz.step, WIFI_STEP);
-        assert_eq!(wiz.cursor[WIFI_STEP], 0); // no WiFi by default
-        wiz.on_key(KeyCode::Down);
-        wiz.on_key(KeyCode::Enter);
-        assert!(wiz.wifi);
-        assert_eq!(wiz.step, TOOLS_STEP);
-        wiz.on_key(KeyCode::Enter);
-        assert_eq!(wiz.step, WHERE_STEP);
-        wiz.on_key(KeyCode::Esc);
-        assert_eq!(wiz.step, TOOLS_STEP); // back from Where lands on the tools
-        wiz.on_key(KeyCode::Esc);
-        assert_eq!(wiz.step, WIFI_STEP); // then WiFi
-        wiz.on_key(KeyCode::Esc);
-        assert_eq!(wiz.step, WIFI_STEP - 1); // then the board
-
-        // `bonsai init` skips Where, so the name's back key returns to the tools.
-        let mut wiz = Wizard::new(true, &dir);
-        wiz.cursor[0] = MCUS.iter().position(|&m| m == "esp32").unwrap();
-        pick_esp32(&mut wiz);
-        wiz.on_key(KeyCode::Enter); // no WiFi
-        assert!(!wiz.wifi);
-        wiz.on_key(KeyCode::Enter); // tools as offered
-        assert_eq!(wiz.step, NAME_STEP);
-        wiz.on_key(KeyCode::Esc);
-        assert_eq!(wiz.step, TOOLS_STEP);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn wifi_is_read_back_from_the_manifest() {
-        assert!(tree_has_wifi(
-            "[dependencies]\nesp-radio = { version = \"=1.0.0-beta.1\" }\n"
-        ));
-        assert!(!tree_has_wifi(
-            "[dependencies]\nesp-hal = \"1.2.2\"\n# esp-radio is optional\n"
-        ));
+    fn defines_name_the_board_and_its_chip() {
         assert_eq!(
-            template_defines("esp32", "s3", "xiao", true)[6..],
-            ["-d".to_string(), "wifi=true".to_string()]
+            template_defines("pi5"),
+            ["-d", "chip=bcm2712", "-d", "board=pi5"]
         );
-        assert_eq!(template_defines("rpi", "bcm2712", "pi5", false).len(), 6);
+        assert_eq!(template_defines("host")[1], "chip=native");
     }
 }
 
@@ -3023,12 +2854,12 @@ fn update() -> io::Result<()> {
     }
     let board = parse_board(&old_manifest)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing board stamp"))?;
-    let (mcu, chip) = device_from_board(&board)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown board"))?;
+    if chip_of(&board).is_none() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown board"));
+    }
     let name = parse_package_name(&old_manifest)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing package name"))?;
-    let wifi = tree_has_wifi(&old_manifest);
-    let (template_path, extracted) = template_dir(mcu, &board)?;
+    let (template_path, extracted) = template_dir(&board)?;
     let staging = std::env::temp_dir().join(format!("bonsai-update-{}", std::process::id()));
     std::fs::create_dir_all(&staging)?;
     let result = (|| -> io::Result<()> {
@@ -3038,7 +2869,7 @@ fn update() -> io::Result<()> {
             .args(["--name", &name, "--destination"])
             .arg(&staging)
             .args(["--vcs", "none"])
-            .args(template_defines(mcu, chip, &board, wifi))
+            .args(template_defines(&board))
             .status()?;
         if !status.success() {
             return Err(io::Error::other("cargo generate failed"));
@@ -3077,10 +2908,6 @@ fn update() -> io::Result<()> {
     result
 }
 
-/// Files a board template owns outright (linker layout, toolchain), copied from
-/// the new board's render when it has them.
-const BOARD_FILES: [&str; 3] = ["build.rs", "memory.x", "rust-toolchain.toml"];
-
 /// `current` Cargo.toml moved to the board `template` was rendered for: its
 /// board stamp, template dependencies and `[profile]` come from the template;
 /// branch dependencies and every other entry stay.
@@ -3111,7 +2938,7 @@ fn retargeted_manifest(current: &str, template: &str) -> io::Result<String> {
 }
 
 /// The template's `.cargo/config.toml`, keeping the `[env]` values the tree set
-/// (the Pi's ssh host, WiFi network). Build tools are reapplied afterwards.
+/// (the Pi's ssh host). Build tools are reapplied afterwards.
 fn retargeted_config(current: &str, template: &str) -> io::Result<String> {
     use std::str::FromStr;
     use toml_edit::DocumentMut;
@@ -3122,7 +2949,15 @@ fn retargeted_config(current: &str, template: &str) -> io::Result<String> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     if let Some(env) = current.get("env").and_then(|e| e.as_table()) {
         if !doc.contains_table("env") {
-            doc["env"] = toml_edit::table();
+            // A template with no tables (host) is only a comment, which
+            // toml_edit keeps as trailing text: keep it above the new table.
+            let mut table = toml_edit::Table::new();
+            if doc.as_table().is_empty() {
+                let comment = doc.trailing().as_str().unwrap_or_default().to_string();
+                table.decor_mut().set_prefix(comment);
+                doc.set_trailing("");
+            }
+            doc["env"] = toml_edit::Item::Table(table);
         }
         let new_env = doc["env"]
             .as_table_mut()
@@ -3163,51 +2998,39 @@ fn retargeted_main(current: &str, template: &str) -> Option<String> {
     Some(current.replacen(old, new, 1))
 }
 
-/// `bonsai retarget <board>`: move the tree in the cwd to another board of the
-/// same family. Its code stays; the build settings (target, linker, runner,
+/// `bonsai retarget <board>`: move the tree in the cwd to another board. Its
+/// code stays; the build settings (target, linker, runner,
 /// release profile, board crates) become the new board's.
 fn retarget(new_board: &str) -> io::Result<()> {
     require_managed("retarget");
     let root = std::env::current_dir()?;
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
-    let Some((board, (mcu, _))) =
-        parse_board(&manifest).and_then(|b| device_from_board(&b).map(|d| (b, d)))
-    else {
+    let Some(board) = parse_board(&manifest).filter(|b| chip_of(b).is_some()) else {
         eprintln!(
             "couldn't read this tree's board from Cargo.toml's `Generated by bonsai for` line"
         );
         std::process::exit(1);
     };
-    let family: Vec<&str> = chips(mcu).iter().flat_map(|c| boards(c).to_vec()).collect();
-    let Some((new_mcu, new_chip)) = device_from_board(new_board) else {
+    if chip_of(new_board).is_none() {
         eprintln!(
-            "no board `{new_board}`; this {mcu} tree can move to: {}",
-            family.join(", ")
+            "no board `{new_board}`; one of: {}",
+            board_names().join(", ")
         );
         std::process::exit(2);
-    };
+    }
     if new_board == board {
         println!("already a {board} tree");
         return Ok(());
-    }
-    if new_mcu != mcu {
-        eprintln!(
-            "{board} is a {mcu} board and {new_board} is {new_mcu}: retarget moves between boards of\n\
-             one family ({}). For another family, plant a new tree and copy src/branches/ over.",
-            family.join(", ")
-        );
-        std::process::exit(2);
     }
     let Some(name) = parse_package_name(&manifest) else {
         eprintln!("couldn't read the crate name from [package] in Cargo.toml");
         std::process::exit(1);
     };
-    let wifi = tree_has_wifi(&manifest);
     let config_path = root.join(".cargo/config.toml");
     let config = std::fs::read_to_string(&config_path).unwrap_or_default();
     let kept_tools = tools::configured(&config);
 
-    let (template_path, extracted) = template_dir(mcu, new_board)?;
+    let (template_path, extracted) = template_dir(new_board)?;
     let staging = std::env::temp_dir().join(format!("bonsai-retarget-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?;
@@ -3218,7 +3041,7 @@ fn retarget(new_board: &str) -> io::Result<()> {
             .args(["--name", &name, "--destination"])
             .arg(&staging)
             .args(["--vcs", "none"])
-            .args(template_defines(mcu, new_chip, new_board, wifi))
+            .args(template_defines(new_board))
             .status()?;
         if !status.success() {
             return Err(io::Error::other("cargo generate failed"));
@@ -3235,11 +3058,6 @@ fn retarget(new_board: &str) -> io::Result<()> {
                 retargeted_config(&config, &read(".cargo/config.toml")?)?,
             ),
         ];
-        for file in BOARD_FILES {
-            if let Ok(content) = read(file) {
-                edits.push((PathBuf::from(file), content));
-            }
-        }
         let main = std::fs::read_to_string(root.join("src/main.rs")).unwrap_or_default();
         if let Some(main) = retargeted_main(&main, &read("src/main.rs")?) {
             edits.push((PathBuf::from("src/main.rs"), main));
@@ -3331,7 +3149,7 @@ fn regrow() -> io::Result<()> {
         eprintln!("couldn't find the `Generated by bonsai for <board>` line in Cargo.toml");
         std::process::exit(1);
     };
-    let Some((mcu, chip)) = device_from_board(&board) else {
+    let Some(chip) = chip_of(&board) else {
         eprintln!("unknown board `{board}` — was it removed from bonsai's hardware list?");
         std::process::exit(1);
     };
@@ -3340,14 +3158,12 @@ fn regrow() -> io::Result<()> {
         std::process::exit(1);
     };
 
-    let wifi = tree_has_wifi(&cargo_toml);
     let kept_tools = tools::configured(
         &std::fs::read_to_string(root.join(".cargo/config.toml")).unwrap_or_default(),
     );
     println!("regrow will wipe this tree back to a fresh template:");
     println!("  dir:    {}", root.display());
-    let with_wifi = if wifi { " + WiFi" } else { "" };
-    println!("  device: {mcu} / {chip} / {board}{with_wifi}  (project `{name}`)");
+    println!("  board:  {board} ({chip})  (project `{name}`)");
     println!("  keeps .git/ — removes everything else (all branches and edits)");
     if !confirm("continue?")? {
         println!("cancelled");
@@ -3357,7 +3173,7 @@ fn regrow() -> io::Result<()> {
     // Render the fresh template into a staging dir *inside* the tree — same
     // filesystem, so the move afterwards is a rename — and only wipe once it
     // succeeds. A failed generate must leave the tree untouched.
-    let (template_path, is_temp) = template_dir(mcu, &board)?;
+    let (template_path, is_temp) = template_dir(&board)?;
     let staging = root.join(".bonsai-regrow");
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging)?; // cargo-generate requires the destination to exist
@@ -3372,7 +3188,7 @@ fn regrow() -> io::Result<()> {
         "--vcs".to_string(),
         "none".to_string(), // don't init a nested .git in the fresh tree
     ];
-    args.extend(template_defines(mcu, chip, &board, wifi));
+    args.extend(template_defines(&board));
     println!("cargo {}", args.join(" "));
     let status = Command::new("cargo").args(&args).status()?;
     if is_temp {
@@ -3422,220 +3238,7 @@ fn regrow() -> io::Result<()> {
     if !kept_tools.is_empty() {
         apply_tools(&root, &kept_tools)?;
     }
-
-    // The wipe took `.zed/` with it, so an esp/Xtensa tree just lost its
-    // rust-analyzer shim. Re-offer it the same way the wizard does after planting.
-    if mcu == "esp32" && confirm("re-run Zed rust-analyzer setup for this Xtensa tree?")? {
-        setup_ide(&root)?;
-    }
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// `ide`: generate project-local Zed rust-analyzer setup for esp/Xtensa trees.
-//
-// Xtensa isn't in mainline Rust, and Zed's rust-analyzer calls
-// `cargo metadata --lockfile-path`, which the esp Rust fork's cargo rejects — so
-// RA can't read the crate graph and intellisense is dead. We generate two shell
-// shims + a `.zed/settings.json` into the tree that route RA at the esp toolchain
-// through a flag-stripping cargo wrapper. Everything is project-local: nothing is
-// written outside the tree. Pico (mainline-Rust) trees need none of this.
-// ---------------------------------------------------------------------------
-
-// Strips rust-analyzer's `--lockfile-path` and forwards to the esp cargo (its
-// absolute path is baked in at `@ESP_CARGO@`).
-const IDE_CARGO_SHIM: &str = r#"#!/usr/bin/env bash
-# Generated by bonsai. rust-analyzer runs `cargo metadata --lockfile-path <p>`,
-# which the esp Rust fork's cargo rejects. Drop that flag (+ its value); forward
-# the rest to the esp toolchain's cargo.
-args=()
-skip=0
-for a in "$@"; do
-  if [ "$skip" = 1 ]; then skip=0; continue; fi
-  case "$a" in
-    --lockfile-path)   skip=1 ;;
-    --lockfile-path=*) ;;
-    *) args+=("$a") ;;
-  esac
-done
-exec "@ESP_CARGO@" "${args[@]}"
-"#;
-
-// Launches Zed's bundled rust-analyzer with CARGO pointed at the shim beside it.
-// RA takes its cargo from the CARGO env, not from cargo.extraEnv, so we must set
-// it on RA's own process — hence this launcher. Self-locating, so moving the tree
-// only invalidates settings.json's binary.path (rerun `bonsai ide` to fix).
-const IDE_RA_WRAPPER: &str = r#"#!/usr/bin/env bash
-# Generated by bonsai. Launch Zed's rust-analyzer, forcing it to use the
-# flag-stripping cargo shim beside this script.
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export CARGO="$DIR/cargo-esp-lockfile-shim"
-export RUSTUP_TOOLCHAIN="esp"   # RA's rustc/proc-macro lookups hit the esp toolchain
-# Zed's own download first. Zed stops fetching it once settings.json points
-# here, so fall back to rustup's copy.
-ra="$(ls -1 "$HOME"/.local/share/zed/languages/rust-analyzer/rust-analyzer-* 2>/dev/null \
-      | grep -v '\.metadata$' | sort -V | tail -1)"
-[ -n "$ra" ] || ra="$(rustup which --toolchain stable rust-analyzer 2>/dev/null)"
-if [ -z "$ra" ]; then
-  echo "zed-ra-esp: no rust-analyzer found; run: rustup component add rust-analyzer --toolchain stable" >&2
-  exit 1
-fi
-exec "$ra" "$@"
-"#;
-
-const IDE_ZED_SETTINGS: &str = r#"// Generated by bonsai — Zed rust-analyzer setup for this esp/Xtensa tree.
-// Routes RA at the esp toolchain through a flag-stripping cargo shim
-// (.zed/zed-ra-esp). Project-local: only affects this folder.
-{
-  "lsp": {
-    "rust-analyzer": {
-      "binary": { "path": "@WRAPPER@" },
-      "initialization_options": {
-        "cargo": { "extraEnv": { "RUSTUP_TOOLCHAIN": "esp" }, "target": "@TARGET@" },
-        "procMacro": { "server": "@PROC_MACRO@" },
-        "check": { "allTargets": false }
-      }
-    }
-  }
-}
-"#;
-
-/// The esp toolchain's cargo. Prefer rustup's own answer; fall back to the
-/// conventional path so this still works if `rustup which` misbehaves.
-fn esp_cargo_path() -> Option<PathBuf> {
-    if let Ok(out) = Command::new("rustup")
-        .args(["which", "--toolchain", "esp", "cargo"])
-        .output()
-        && out.status.success()
-    {
-        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !p.is_empty() {
-            return Some(PathBuf::from(p));
-        }
-    }
-    // Conventional-path fallback: honor RUSTUP_HOME before assuming ~/.rustup.
-    let rustup_home = std::env::var_os("RUSTUP_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".rustup")))?;
-    let p = rustup_home.join("toolchains/esp/bin/cargo");
-    p.is_file().then_some(p)
-}
-
-fn write_script(path: &Path, content: &str) -> io::Result<()> {
-    std::fs::write(path, content)?;
-    // The exec bit only exists on unix; elsewhere the shims are inert anyway
-    // (they're bash scripts), so just writing the file is the best we can do.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms)?;
-    }
-    Ok(())
-}
-
-/// Write the Zed/Xtensa rust-analyzer setup into `project_dir`. No-op (with a
-/// note) for non-Xtensa targets. Writes only under `project_dir/.zed/`.
-fn setup_ide(project_dir: &Path) -> io::Result<()> {
-    let manifest = std::fs::read_to_string(project_dir.join("Cargo.toml")).unwrap_or_default();
-    let board = parse_board(&manifest);
-    if board
-        .as_deref()
-        .and_then(device_from_board)
-        .is_some_and(|(mcu, _)| mcu == "rpi")
-    {
-        println!("Raspberry Pi trees use standard Rust tooling; nothing to set up.");
-        return Ok(());
-    }
-    let config =
-        std::fs::read_to_string(project_dir.join(".cargo/config.toml")).unwrap_or_default();
-    let Some(target) = parse_target(&config) else {
-        eprintln!(
-            "couldn't read the target from {}/.cargo/config.toml",
-            project_dir.display()
-        );
-        std::process::exit(1);
-    };
-    if !target.starts_with("xtensa") {
-        println!(
-            "intellisense works out of the box for {target} — only Xtensa/esp trees\n\
-             need the shim. nothing to do."
-        );
-        return Ok(());
-    }
-
-    let Some(esp_cargo) = esp_cargo_path() else {
-        eprintln!(
-            "esp Rust toolchain not found — install it with `espup install`, then\n\
-             rerun `bonsai ide`."
-        );
-        std::process::exit(1);
-    };
-    // <toolchain>/bin/cargo → <toolchain>/libexec/rust-analyzer-proc-macro-srv
-    let proc_macro = esp_cargo
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|root| root.join("libexec/rust-analyzer-proc-macro-srv"))
-        .unwrap_or_default();
-
-    // The wrapper launches Zed's own rust-analyzer, else rustup's. Zed never
-    // fetches its own once settings.json points at the wrapper, so warn now if
-    // neither exists.
-    let zed_ra = std::env::var_os("HOME").is_some_and(|home| {
-        Path::new(&home)
-            .join(".local/share/zed/languages/rust-analyzer")
-            .is_dir()
-    });
-    let rustup_ra = Command::new("rustup")
-        .args(["which", "--toolchain", "stable", "rust-analyzer"])
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if !zed_ra && !rustup_ra {
-        eprintln!(
-            "note: no rust-analyzer found for the wrapper to launch. Install one with\n\
-             `rustup component add rust-analyzer --toolchain stable`."
-        );
-    }
-
-    let zed = project_dir.join(".zed");
-    std::fs::create_dir_all(&zed)?;
-
-    let settings = zed.join("settings.json");
-    if settings.is_file() && !confirm(&format!("overwrite {}?", settings.display()))? {
-        println!("kept existing settings.json — writing the shims only.");
-    } else {
-        let content = IDE_ZED_SETTINGS
-            .replace("@WRAPPER@", &zed.join("zed-ra-esp").display().to_string())
-            .replace("@TARGET@", &target)
-            .replace("@PROC_MACRO@", &proc_macro.display().to_string());
-        std::fs::write(&settings, content)?;
-    }
-    write_script(
-        &zed.join("cargo-esp-lockfile-shim"),
-        &IDE_CARGO_SHIM.replace("@ESP_CARGO@", &esp_cargo.display().to_string()),
-    )?;
-    write_script(&zed.join("zed-ra-esp"), IDE_RA_WRAPPER)?;
-
-    println!("set up Zed rust-analyzer for {target}:");
-    println!("  .zed/settings.json           points rust-analyzer at the shim");
-    println!("  .zed/cargo-esp-lockfile-shim strips --lockfile-path → esp cargo");
-    println!("  .zed/zed-ra-esp              launches Zed's RA with the shim");
-    println!("restart it in Zed (command palette: `editor: restart language server`).");
-    Ok(())
-}
-
-fn ide() -> io::Result<()> {
-    let root = std::env::current_dir()?;
-    // Light tree check so we never scribble .zed/ into an unrelated directory.
-    if !file_contains(&root.join("Cargo.toml"), "Generated by bonsai for") {
-        eprintln!(
-            "not a bonsai tree: {} — run `bonsai ide` from inside a project bonsai grew.",
-            root.display()
-        );
-        std::process::exit(1);
-    }
-    setup_ide(&root)
 }
 
 // ---------------------------------------------------------------------------
@@ -3662,9 +3265,8 @@ fn list() -> io::Result<()> {
 
     let name = parse_package_name(&cargo_toml).unwrap_or_else(|| "?".to_string());
     let device = parse_board(&cargo_toml)
-        .and_then(|board| device_from_board(&board).map(|(mcu, chip)| (mcu, chip, board)))
-        .map(|(mcu, chip, board)| format!("{mcu} / {chip} / {board}"))
-        .unwrap_or_else(|| "unknown device".to_string());
+        .and_then(|board| chip_of(&board).map(|chip| format!("{board} ({chip})")))
+        .unwrap_or_else(|| "unknown board".to_string());
     let target = parse_target(&std::fs::read_to_string(".cargo/config.toml").unwrap_or_default());
 
     let branches: Vec<String> = nutrient_arm_files()
@@ -3796,13 +3398,7 @@ fn tree_graph() -> flow::Graph {
             Some(flow::Node::scan(&name, &src, &nutrients))
         })
         .collect();
-    // sap.rs reports lag through the tree's own logger.
-    let logger = if file_contains(Path::new("Cargo.toml"), "defmt") {
-        flow::Logger::Defmt
-    } else {
-        flow::Logger::Std
-    };
-    flow::Graph::build(&variants, &load_config(), nodes, logger)
+    flow::Graph::build(&variants, &load_config(), nodes)
 }
 
 /// Regenerate `src/sap.rs` from the wiring, and print any hazards the wiring
@@ -3979,7 +3575,7 @@ fn path(nutrient: &str, args: &[String]) -> io::Result<()> {
 }
 
 fn print_help() {
-    println!("bonsai — grow embedded firmware as a tree: a trunk, and branches you add");
+    println!("bonsai — grow a Linux application as a tree: a trunk, and branches you add");
     println!();
     println!("usage:");
     println!("  bonsai                 plant a new tree (interactive wizard)");
@@ -4000,8 +3596,9 @@ fn print_help() {
     println!("  bonsai list            summarize the tree (device, flow graph, branches)");
     println!("  bonsai update          refresh template crates and Cargo.lock");
     println!("  bonsai regrow          reset the tree in the cwd to a fresh template");
-    println!("  bonsai retarget <board>  move the tree to another board of its family");
-    println!("  bonsai ide             set up Zed rust-analyzer (esp/Xtensa trees)");
+    println!(
+        "  bonsai retarget <board>  move the tree to another board (pi5, zero-2w, zero-w, host)"
+    );
     println!("  bonsai tools [<tool> ...]  pick build tools: sccache, mold, zigbuild, bacon");
     println!("                         (no names → interactive; missing ones install once)");
     println!("  bonsai help            show this help");
@@ -4054,7 +3651,6 @@ fn main() -> io::Result<()> {
         [cmd] if cmd == "regrow" => regrow(),
         [cmd] if cmd == "update" => update(),
         [cmd, board] if cmd == "retarget" => retarget(board),
-        [cmd] if cmd == "ide" => ide(),
         [cmd, names @ ..] if cmd == "tools" => tools_command(names),
         _ => {
             eprintln!("unrecognised arguments: {}", args.join(" "));

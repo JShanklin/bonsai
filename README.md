@@ -286,7 +286,7 @@ down or running out of memory:
 | what | default | past it | set it |
 |------|---------|---------|--------|
 | an edge's queue (what branches send it) | 64 | dropped and counted (**dropped** in `bonsai top`), one warning each time it starts | `EDGE_QUEUE` |
-| a line on a TCP or serial edge (`lines` framing) | 1 MiB | refused before it's buffered: a server closes that client, a client or serial edge reconnects | `max_frame` in `[edge.<name>]` |
+| a line on a TCP or serial edge (`lines` framing; its `\n` or `\r\n` not counted) | 1 MiB | refused before it's buffered: a server closes that client, a client or serial edge reconnects | `max_frame` in `[edge.<name>]` |
 | a TCP server's connections, closing ones included | 64 | the one draining longest, else the one that stopped sending longest ago, is cut off (**lost**); else the new one is closed | `max_clients` |
 | what a TCP server holds for one client | 64 packets | that client misses them (**lost**) | `CLIENT_QUEUE` |
 | one write to a TCP server's client | 5 s | that client is disconnected (**lost**) | `WRITE_TIMEOUT` |

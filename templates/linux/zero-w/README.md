@@ -19,7 +19,9 @@ cargo local-test        # tests on this computer
 Set your Pi's address once in `.cargo/config.toml` (`BONSAI_PI =
 "user@host"`), or for one run: `BONSAI_PI=me@mypi.local cargo run --release`.
 On the Pi itself, `cargo run` runs in place. The built-in pulse logs
-`INFO pulse: beat` twice per second. Stop it with Ctrl-C.
+`INFO pulse: beat` twice per second. Stop it with Ctrl-C. While it runs,
+`bonsai top` in this folder shows it live: each branch and edge, and the log
+(over ssh, from `BONSAI_PI`).
 
 From another computer, run `bonsai tools` and pick zigbuild: zig links for the
 Zero W's ARMv6 CPU, so the usual cargo commands build for it. (Debian/Ubuntu's

@@ -15,6 +15,7 @@ cargo build --release   # → target/release/{{project-name}}
 ```
 
 The built-in pulse logs `INFO pulse: beat` twice per second. Stop it with Ctrl-C.
+While it runs, `bonsai top` shows it live: each branch and edge, and the log.
 
 To move the tree to a Raspberry Pi, run `bonsai retarget <board>` (`pi5`,
 `zero-2w` or `zero-w`): it switches the build target and adds the runner that

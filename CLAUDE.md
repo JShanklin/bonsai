@@ -21,9 +21,9 @@ old commands at their replacements.
 
 bonsai 2 lands as a series of PRs: 1 Linux only, 2 the deterministic core,
 3 edges (built-in UDP/TCP/serial bridges to the outside, in `bonsai.toml`,
-plus an `Edge` trait), 4 logs tagged by the branch or edge that wrote them —
-all done — then 5 stats and `bonsai top` (a live TUI over ssh), 6 the
-tutorial rewrite.
+plus an `Edge` trait), 4 logs tagged by the branch or edge that wrote them,
+5 stats and `bonsai top` (a live TUI, over ssh for a Pi) — all done — then
+6 the tutorial rewrite.
 
 ## Commands
 
@@ -47,7 +47,8 @@ cargo run -- rate <branch> <hz|off>       # Input::Tick at that rate
 cargo run -- sync           # regenerate src/{bonsai,wiring,settings}.rs, branches/ and edges/mod.rs
 cargo run -- list           # branches, wires, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
-cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs)
+cargo run -- top [user@host|local] [--port N] [--once]   # watch a running tree
+cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs, top.rs)
 cargo test marker_matches_whole_line_not_substring   # run a single test by name
 cargo install --path .      # put `bonsai` on PATH (embeds templates/ into the binary)
 ```
@@ -61,8 +62,8 @@ edit templates and generate without rebuilding.
 
 The CLI is `src/main.rs` (the wizard, TUIs, `tools`/`regrow`/`retarget`/
 `update`, shared text helpers, tests), `src/tree.rs` (the commands that grow a
-tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out) and
-`src/tools.rs`. Entry points are dispatched in `main()`:
+tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
+`src/tools.rs` and `src/top.rs`. Entry points are dispatched in `main()`:
 
 - **Wizard** (`create_device` / `Wizard` / `run_wizard`): a ratatui TUI that
   walks `Board → Tools → Where → project name` (`BOARD_STEP`…`NAME_STEP`), then
@@ -129,6 +130,18 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out) and
   default `info`) is read once. The last `KEEP` lines stay for `recent()`
   (for `bonsai top`). `run()` installs a panic hook: one `ERROR` line, and
   the backtrace only when `RUST_BACKTRACE` asks.
+  Stats (`mod stats`): atomics in a registry keyed by name (the same name
+  gets the same counts), registered by `Slot::new` and `EdgeOut::new`, so in
+  bonsai.toml order: per branch inputs/sent/panics/busy/max (`Slot::process`
+  times `process`; a panicked input isn't timed; sent comes from `Outbox::count`,
+  which the generated `Out` implements, bound on `Branch::Out`), per edge
+  state/received/sent/dropped/restarts/last error (`spawn_edge`, `attempt`,
+  `EdgeOut::send`), and the core's events/slowest/inbox (`run`). `mod top`:
+  `run()` serves them on `BONSAI_TOP` (default `127.0.0.1:7777`, a bare port,
+  or `off`; a bind failure is one WARN) as `stats::render` text every 500 ms:
+  `bonsai-top 1\t…` then `branch`/`edge`/`log` rows (tab-separated) and `end`;
+  new log lines come from `log::since(n)` (the ring counts every line).
+  Observation only: it never changes what a branch sends.
   Templates build with `flavor = "current_thread"` and **no**
   `panic = "abort"` (unwinding is what makes the reset possible).
 - **The generated wiring** (`src/wiring.rs`): `enum EdgeIn` (one variant per
@@ -194,6 +207,19 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out) and
   `codegen-units = 1`, `strip`, `opt-level = "s"`; `3` on pi5 and host), and
   in tokio's trimmed features (`rt`, `macros`, `time`, `sync`, `signal`).
   No proc macros: the glue is generated source.
+- **`bonsai top`** (`src/top.rs`): reads a tree's top server. Where
+  (`destination`): an arg (`local` = this computer), else `$BONSAI_PI`, else
+  a Pi-targeting tree's `[env] BONSAI_PI` (`parse_target`/`parse_scoped_key`),
+  else 127.0.0.1. Remote goes through `ssh -o BatchMode=yes -W
+  127.0.0.1:<port> <host>` (stdio forwarding: nothing on the Pi but sshd;
+  ssh's last stderr line becomes the error). A reader thread parses snapshots
+  (`read_snapshot`/`parse`, pure; version in the first field, unknown row
+  kinds skipped) and reconnects every second; the ratatui view shows the core,
+  branches and edges tables (rates from counter deltas over the snapshots'
+  uptime, `per_sec`) and the log tail, filterable by source (`source`).
+  `--once` prints two snapshots' worth as plain tables. The format must match
+  `templates/_tree/bonsai.rs`'s `stats::render` (both sides are unit-tested
+  against the same text).
 - **`regrow`** (`regrow`): wipes the cwd back to a fresh template (destructive,
   y/N confirmed). Recovers the device from the tree's own `Cargo.toml` stamp
   (`parse_board`, then `chip_of` from `BOARDS`) and its name

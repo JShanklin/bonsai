@@ -22,7 +22,7 @@ Use Rust 2024 conventions and `cargo fmt` formatting (four-space indentation). U
 
 ## Testing Guidelines
 
-Add focused `#[test]` cases to the existing test module in `src/main.rs`, using descriptive `snake_case` names. Run `rtk cargo test` after CLI or template changes. Template files are not compiled by the host crate, so also build a generated project when changing template code or target configuration. Extend the embedded-template completeness test when a board needs new files.
+Add focused `#[test]` cases to the existing test module in `src/main.rs`, using descriptive `snake_case` names. Run `rtk cargo test` after CLI or template changes. Template files are not compiled by the host crate, so also build a generated project when changing template code or target configuration: `cargo test -- --ignored runtime` runs the runtime's regression tests (`runtime-tests/`) in a rendered host tree, `scripts/sync-templates.sh` regenerates every board after a runtime or generator change, and `scripts/check-boards.sh` compiles a representative tree on every board for its own target. Extend the embedded-template completeness test when a board needs new files.
 
 ## Commit & Pull Request Guidelines
 

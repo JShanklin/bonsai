@@ -1,6 +1,6 @@
 [template]
 cargo_generate_version = ">=0.18.0"
-description = "Linux app for this computer — Embassy trunk + branches"
+description = "Linux app for this computer — a deterministic core + branches"
 
 [placeholders.chip]
 type = "string"

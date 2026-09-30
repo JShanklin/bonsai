@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`src/main.rs` contains the host-side `bonsai` CLI, interactive wizard, file-editing commands, and unit tests; `src/flow.rs` is the pure generator for each tree's `src/sap.rs` (per-nutrient paths from `bonsai.toml` + the wiring). Generated projects live under `templates/linux/<board>/`: the Raspberry Pi boards (Zero W, Zero 2 W, Pi 5) and `host` (this computer), each a Linux application. These files are template data, not part of the host crate's build. `templates/_branch/` holds embedded branch scaffolds. Read `templates/README.md` before changing board templates or adding hardware support.
+`src/main.rs` contains the host-side `bonsai` CLI (the wizard, `tools`, `regrow`, `retarget`, `update`) and its unit tests; `src/tree.rs` holds the commands that grow a tree (branches, messages, wires, rates, `sync`, `list`); `src/graph.rs` is the pure generator that turns a tree's `bonsai.toml` and `src/messages.rs` into its `src/wiring.rs`, `src/settings.rs` and `src/branches/mod.rs`. Generated projects live under `templates/linux/<board>/`: the Raspberry Pi boards (Zero W, Zero 2 W, Pi 5) and `host` (this computer), each a Linux application. These files are template data, not part of the host crate's build. `templates/_branch/` holds the embedded branch scaffold, and `templates/_tree/bonsai.rs` the runtime every tree carries as `src/bonsai.rs`. Read `templates/README.md` before changing board templates or adding hardware support.
 
 ## Build, Test, and Development Commands
 
@@ -10,7 +10,7 @@ Run commands from the repository root. Prefix shell commands with `rtk`, as requ
 
 - `rtk cargo build` builds the CLI.
 - `rtk cargo run` launches the device and project wizard; it needs `cargo-generate` installed to create a project.
-- `rtk cargo test` runs the unit tests in `src/main.rs`.
+- `rtk cargo test` runs the unit tests (`src/main.rs`, `src/graph.rs`, `src/tree.rs`, `src/tools.rs`).
 - `rtk cargo fmt --check` checks Rust formatting; `rtk cargo clippy` checks the host crate for lints.
 - `rtk cargo install --path .` installs `bonsai` with the templates embedded in the binary.
 
@@ -18,7 +18,7 @@ Set `BONSAI_TEMPLATES=/path/to/templates` to try local template edits without re
 
 ## Coding Style & Naming Conventions
 
-Use Rust 2024 conventions and `cargo fmt` formatting (four-space indentation). Use `snake_case` for modules, files, functions, and branch names; use `PascalCase` for types and `Nutrient` variants. Keep generated-project marker lines such as `// bonsai:mod`, `// bonsai:start`, and `// bonsai:nutrient-arm` intact: CLI commands insert code at those markers. When adding a board, update both `BOARDS` in `src/main.rs` and its `templates/linux/<board>/` directory.
+Use Rust 2024 conventions and `cargo fmt` formatting (four-space indentation). Use `snake_case` for modules, files, functions, and branch names; use `PascalCase` for types and message structs. Keep generated-project marker lines `// bonsai:input-arm` and `// bonsai:message` intact: CLI commands insert code at those markers. After changing a template's `bonsai.toml` or `src/messages.rs`, the generator, or the runtime, run `bonsai sync` in every `templates/linux/<board>/`. When adding a board, update both `BOARDS` in `src/main.rs` and its `templates/linux/<board>/` directory.
 
 ## Testing Guidelines
 

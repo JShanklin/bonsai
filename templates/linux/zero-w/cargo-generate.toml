@@ -1,6 +1,6 @@
 [template]
 cargo_generate_version = ">=0.18.0"
-description = "Raspberry Pi Zero W Linux app — Embassy trunk + branches"
+description = "Raspberry Pi Zero W Linux app — a deterministic core + branches"
 
 [placeholders.chip]
 type = "string"

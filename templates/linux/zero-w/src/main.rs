@@ -1,19 +1,15 @@
 //! {{project-name}} — Raspberry Pi Zero W Linux application.
-//! The trunk starts pulse and each grafted branch.
+//! The trunk: it starts the core, which runs every branch (see src/bonsai.rs).
 
+mod bonsai;
 mod branches;
-mod pulse;
-mod trunk;
+mod messages;
+#[rustfmt::skip]
+mod settings;
+#[rustfmt::skip]
+mod wiring;
 
-use embassy_executor::Spawner;
-use trunk::Trunk;
-use trunk::sap; // the generated sap lives under the trunk (src/sap.rs)
-
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    let trunk = Trunk::new();
-    pulse::start(&spawner, &trunk);
-
-    // Start branches here. Pass Linux device handles to start() when needed.
-    // bonsai:start
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    bonsai::run(wiring::Core::new()).await;
 }

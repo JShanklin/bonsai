@@ -1,5 +1,6 @@
-mod flow;
+mod graph;
 mod tools;
+mod tree;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -50,61 +51,6 @@ const NAME_STEP: usize = 3;
 // The whole templates/ tree is baked into the binary, so an installed `bonsai`
 // carries its templates and works from any directory.
 static TEMPLATES: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/templates");
-
-// The branch scaffolds, also embedded, so `bonsai branch` works from inside a
-// grown tree (where the templates/ dir isn't around). All of them draw on the
-// generated `src/sap.rs`: taps via `sap::<branch>::Taps`, releases via `Sap`.
-const BRANCH_TEMPLATE: &str = include_str!("../templates/_branch/branch.rs");
-
-// The producer variant: releases nutrients instead of tapping them. Has no
-// `match Nutrient`, so `tap` refuses it and `starve` has no arm to patch.
-const BRANCH_PRODUCER_TEMPLATE: &str = include_str!("../templates/_branch/branch_producer.rs");
-
-// The duplex variant: taps and releases. Keeps the `match Nutrient` (and its
-// `// bonsai:nutrient-arm` marker) plus the `// bonsai:emit` marker.
-const BRANCH_DUPLEX_TEMPLATE: &str = include_str!("../templates/_branch/branch_duplex.rs");
-
-// The roots variant (std trees only): `start` opens the link and hands its
-// blocking receive/send to `roots::bridge`; `run` selects over the inbox and
-// the taps. Carries both markers (release → inbox arm, tap → nutrient arm).
-const BRANCH_ROOTS_TEMPLATE: &str = include_str!("../templates/_branch/branch_roots.rs");
-
-// The shared bridge every root uses (OS threads ⇄ the executor). Written to
-// `src/roots.rs` by the first `branch --roots`, removed by the last `snip`.
-const ROOTS_BRIDGE: &str = include_str!("../templates/_branch/roots.rs");
-const ROOTS_RS: &str = "src/roots.rs";
-const ROOTS_MOD: &str = "mod roots;";
-/// `select` for a root's `run` loop.
-const EMBASSY_FUTURES: (&str, &str) = ("embassy-futures", "0.1.2");
-
-/// Which scaffold `branch` lays down.
-#[derive(Clone, Copy, PartialEq)]
-enum BranchMode {
-    Consumer,
-    Producer,
-    Duplex,
-    Roots,
-}
-
-impl BranchMode {
-    fn template(self) -> &'static str {
-        match self {
-            BranchMode::Consumer => BRANCH_TEMPLATE,
-            BranchMode::Producer => BRANCH_PRODUCER_TEMPLATE,
-            BranchMode::Duplex => BRANCH_DUPLEX_TEMPLATE,
-            BranchMode::Roots => BRANCH_ROOTS_TEMPLATE,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            BranchMode::Consumer => "branch",
-            BranchMode::Producer => "producer branch",
-            BranchMode::Duplex => "duplex branch",
-            BranchMode::Roots => "roots branch",
-        }
-    }
-}
 
 /// Locate the trunk template for `board`. Returns its path and whether that
 /// path is a temp dir we extracted (and should delete afterwards).
@@ -767,7 +713,7 @@ fn crate_name(folder: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Small interactive prompts, reused by the `branch`/`feed` TUIs. Each drives an
+// Small interactive prompts, reused by the `branch`/`message` TUIs. Each drives an
 // already-init'd ratatui terminal; the caller runs `ratatui::init`/`restore`.
 // ---------------------------------------------------------------------------
 
@@ -847,46 +793,6 @@ fn prompt_text(
     }
 }
 
-/// Menu select. Some(index) on Enter, None on Esc.
-fn prompt_menu(
-    term: &mut DefaultTerminal,
-    prompt: &str,
-    context: &[String],
-    options: &[&str],
-) -> io::Result<Option<usize>> {
-    let mut cur = 0usize;
-    loop {
-        term.draw(|f| {
-            let body = prompt_frame(f, context, prompt);
-            let items: Vec<ListItem> = options.iter().map(|o| ListItem::new(*o)).collect();
-            let list = List::new(items)
-                .block(Block::bordered().title(" select "))
-                .highlight_style(
-                    Style::new()
-                        .bg(Color::Indexed(238))
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol("▸ ");
-            let mut state = ListState::default();
-            state.select(Some(cur));
-            f.render_stateful_widget(list, body, &mut state);
-        })?;
-        if let Event::Key(k) = event::read()?
-            && k.kind == KeyEventKind::Press
-        {
-            match k.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    cur = if cur == 0 { options.len() - 1 } else { cur - 1 };
-                }
-                KeyCode::Down | KeyCode::Char('j') => cur = (cur + 1) % options.len(),
-                KeyCode::Enter => return Ok(Some(cur)),
-                KeyCode::Esc => return Ok(None),
-                _ => {}
-            }
-        }
-    }
-}
-
 fn ident_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
@@ -914,49 +820,21 @@ fn prompt_text_valid(
     }
 }
 
-/// `bonsai branch` with no name: pick the name and kind in a TUI, then graft.
+/// `bonsai branch` with no name: ask for it in a TUI, then add the branch.
 fn branch_interactive() -> io::Result<()> {
-    require_managed("branch");
+    tree::require_tree("branch add");
     let mut term = ratatui::init();
-    let picked = (|| -> io::Result<Option<(String, BranchMode)>> {
-        let Some(name) = prompt_text_valid(
-            &mut term,
-            "branch name (snake_case)",
-            &[],
-            ident_char,
-            is_ident,
-            "must be a snake_case identifier",
-        )?
-        else {
-            return Ok(None);
-        };
-        let ctx = vec![format!("branch: {name}")];
-        let Some(kind) = prompt_menu(
-            &mut term,
-            "branch kind",
-            &ctx,
-            &[
-                "consumer — taps nutrients (subscriber)",
-                "producer — feeds nutrients (publisher)",
-                "duplex — both",
-                "roots — I/O bridge: OS threads ⇄ the tree (std trees)",
-            ],
-        )?
-        else {
-            return Ok(None);
-        };
-        let mode = [
-            BranchMode::Consumer,
-            BranchMode::Producer,
-            BranchMode::Duplex,
-            BranchMode::Roots,
-        ][kind];
-        Ok(Some((name, mode)))
-    })();
+    let name = prompt_text_valid(
+        &mut term,
+        "branch name (snake_case)",
+        &[],
+        ident_char,
+        graph::is_branch_name,
+        "snake_case (a-z, 0-9, _), and not a Rust keyword",
+    );
     ratatui::restore();
-
-    match picked? {
-        Some((name, mode)) => add_branch(&name, mode),
+    match name? {
+        Some(name) => tree::branch_add(&name),
         None => {
             println!("cancelled");
             Ok(())
@@ -964,27 +842,25 @@ fn branch_interactive() -> io::Result<()> {
     }
 }
 
-/// `bonsai feed` with no name: enter the nutrient name and its fields in a TUI.
-fn add_nutrient_interactive() -> io::Result<()> {
-    require_managed("feed");
+/// `bonsai message` with no name: enter the name and its fields in a TUI.
+fn message_interactive() -> io::Result<()> {
+    tree::require_tree("message add");
     let mut term = ratatui::init();
-    // (name, field specs, path)
-    type Entered = (String, Vec<String>, Option<flow::PathCfg>);
-    let entered = (|| -> io::Result<Option<Entered>> {
+    let entered = (|| -> io::Result<Option<(String, Vec<String>)>> {
         let Some(name) = prompt_text_valid(
             &mut term,
-            "nutrient name (UpperCamelCase)",
+            "message name (UpperCamelCase)",
             &[],
             ident_char,
-            is_variant,
-            "must be an UpperCamelCase identifier",
+            |t| is_ident(t) && t.starts_with(|c: char| c.is_ascii_uppercase()),
+            "an UpperCamelCase identifier",
         )?
         else {
             return Ok(None);
         };
         let mut fields: Vec<String> = Vec::new();
         loop {
-            let mut ctx = vec![format!("nutrient: {name}")];
+            let mut ctx = vec![format!("message: {name}")];
             ctx.extend(fields.iter().map(|f| format!("  {f}")));
             let Some(fname) = prompt_text_valid(
                 &mut term,
@@ -992,13 +868,13 @@ fn add_nutrient_interactive() -> io::Result<()> {
                 &ctx,
                 ident_char,
                 |t| t.is_empty() || is_ident(t),
-                "must be a snake_case identifier (or empty to finish)",
+                "a snake_case identifier (or empty to finish)",
             )?
             else {
                 return Ok(None);
             };
             if fname.is_empty() {
-                break;
+                return Ok(Some((name, fields)));
             }
             ctx.push(format!("  {fname}: …"));
             let Some(ftype) = prompt_text(&mut term, &format!("type for `{fname}`"), &ctx, |c| {
@@ -1009,54 +885,16 @@ fn add_nutrient_interactive() -> io::Result<()> {
             };
             fields.push(format!("{fname}:{ftype}"));
         }
-        let mut ctx = vec![format!("nutrient: {name}")];
-        ctx.extend(fields.iter().map(|f| format!("  {f}")));
-        let Some(shape) = prompt_menu(
-            &mut term,
-            "path shape",
-            &ctx,
-            &[
-                "broadcast — one → many; never waits, laggards lose the oldest (events)",
-                "directed — many → one; waits while full, never drops (commands, TX)",
-                "state — latest value; late tappers still get it (status, mode)",
-            ],
-        )?
-        else {
-            return Ok(None);
-        };
-        let shape = flow::SHAPES[shape];
-        if shape == flow::Shape::State {
-            return Ok(Some((name, fields, Some(flow::PathCfg::new(shape, None)))));
-        }
-        ctx.push(format!("  path: {}", shape.name()));
-        let Some(cap) = prompt_text_valid(
-            &mut term,
-            &format!("capacity (empty = {})", shape.default_cap()),
-            &ctx,
-            |c| c.is_ascii_digit(),
-            |t| t.is_empty() || t.parse::<usize>().is_ok_and(|n| n >= 1),
-            "a positive number (or empty for the default)",
-        )?
-        else {
-            return Ok(None);
-        };
-        let cfg = flow::PathCfg::new(shape, cap.parse().ok());
-        Ok(Some((name, fields, Some(cfg))))
     })();
     ratatui::restore();
-
     match entered? {
-        Some((name, fields, cfg)) => add_nutrient(&name, &fields, cfg),
+        Some((name, fields)) => tree::message_add(&name, &fields),
         None => {
             println!("cancelled");
             Ok(())
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// `branch <name>`: graft a new subsystem onto the trunk of the tree in the cwd.
-// ---------------------------------------------------------------------------
 
 fn is_ident(name: &str) -> bool {
     let mut chars = name.chars();
@@ -1068,6 +906,14 @@ fn is_ident(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn template_file(board: &str, f: &str) -> &'static str {
+        let path = format!("linux/{board}/{f}");
+        TEMPLATES
+            .get_file(&path)
+            .and_then(|f| f.contents_utf8())
+            .unwrap_or_else(|| panic!("{path} embedded"))
+    }
+
     // Guards against the embedded template silently dropping dotfiles — a
     // missing .cargo/config.toml would produce a project that can't build.
     // Walks every board, so a board added to BOARDS without its template fails.
@@ -1075,15 +921,17 @@ mod tests {
     fn embedded_template_includes_all_files() {
         const COMMON: &[&str] = &[
             ".gitignore",
+            ".cargo/config.toml",
             "Cargo.toml",
             "cargo-generate.toml",
-            "src/main.rs",
-            "src/trunk.rs",
-            "src/pulse.rs",
-            "src/branches/mod.rs",
-            "src/sap.rs",
             "bonsai.toml",
-            ".cargo/config.toml",
+            "src/main.rs",
+            "src/bonsai.rs",
+            "src/messages.rs",
+            "src/settings.rs",
+            "src/wiring.rs",
+            "src/branches/mod.rs",
+            "src/branches/pulse.rs",
         ];
         for &board in &board_names() {
             let sub = format!("linux/{board}");
@@ -1100,67 +948,114 @@ mod tests {
         }
     }
 
-    // The empty registry's doc comment mentions `// bonsai:mod`; grafting must
-    // still insert before the real marker line, not inside the comment.
+    // Every board's shipped generated files must be exactly what `bonsai sync`
+    // writes from that template's own bonsai.toml and messages.rs — otherwise
+    // a fresh tree would change on its first command. The branch sources and
+    // messages are the same on every board.
+    #[test]
+    fn template_wiring_matches_generator() {
+        for &board in &board_names() {
+            let file = |f: &str| template_file(board, f);
+            let cfg = graph::parse(file("bonsai.toml")).unwrap();
+            let report = graph::check(&cfg, &graph::parse_messages(file("src/messages.rs")));
+            assert_eq!(report, graph::Report::default(), "{board}");
+            let stale = |f: &str| format!("linux/{board}/{f} is stale — run `bonsai sync` there");
+            assert!(
+                file("src/bonsai.rs") == tree::RUNTIME,
+                "{}",
+                stale("src/bonsai.rs")
+            );
+            assert!(
+                file("src/wiring.rs") == graph::render_wiring(&cfg),
+                "{}",
+                stale("src/wiring.rs")
+            );
+            assert!(
+                file("src/settings.rs") == graph::render_settings(&cfg),
+                "{}",
+                stale("src/settings.rs")
+            );
+            assert!(
+                file("src/branches/mod.rs") == graph::render_mod(&cfg),
+                "{}",
+                stale("src/branches/mod.rs")
+            );
+            for f in ["bonsai.toml", "src/messages.rs", "src/branches/pulse.rs"] {
+                assert_eq!(
+                    file(f),
+                    template_file("host", f),
+                    "{board}/{f} differs from host's"
+                );
+            }
+            assert!(
+                file("src/messages.rs")
+                    .lines()
+                    .any(|l| l == tree::MESSAGE_MARKER)
+            );
+            assert!(
+                file("src/branches/pulse.rs")
+                    .lines()
+                    .any(|l| l.trim() == tree::INPUT_ARM)
+            );
+        }
+    }
+
+    #[test]
+    fn branch_scaffold_fills_in_its_names() {
+        let src = tree::BRANCH_TEMPLATE
+            .replace("{{branch_name}}", "radio_link")
+            .replace("{{BranchName}}", &graph::camel("radio_link"));
+        assert!(!src.contains("{{"), "{src}");
+        assert!(src.contains("pub struct RadioLink {}"), "{src}");
+        assert!(
+            src.contains("use crate::wiring::radio_link::{Input, Out};"),
+            "{src}"
+        );
+        assert!(src.lines().any(|l| l.trim() == tree::INPUT_ARM), "{src}");
+    }
+
+    // A comment mentioning a marker must not be mistaken for it.
     #[test]
     fn marker_matches_whole_line_not_substring() {
-        let src = "//! keep the // bonsai:mod marker intact\n\n// bonsai:mod\n".to_string();
-        let out = insert_before_marker(Path::new("mod.rs"), src, "// bonsai:mod", "pub mod x;\n");
+        let src = "//! keep the // bonsai:message marker intact\n\n// bonsai:message\n".to_string();
+        let out = insert_before_marker(
+            Path::new("messages.rs"),
+            src,
+            "// bonsai:message",
+            "pub struct X;\n",
+        );
         assert!(
-            out.contains("pub mod x;\n// bonsai:mod\n"),
+            out.contains("pub struct X;\n// bonsai:message\n"),
             "inserted wrong:\n{out}"
         );
         assert!(
-            out.starts_with("//! keep the // bonsai:mod marker intact\n"),
+            out.starts_with("//! keep the // bonsai:message marker intact\n"),
             "doc line was split:\n{out}"
         );
     }
 
-    // snip removes only the targeted module line, leaving siblings and the
-    // marker untouched.
+    // `insert_indented_before` puts content above a whole-line marker, matching
+    // its indentation; no marker → None.
     #[test]
-    fn snip_removes_module_line() {
-        let src = "//! registry\npub mod imu;\npub mod gps;\n// bonsai:mod\n".to_string();
-        let out = remove_line(src, |l| l.trim() == "pub mod imu;").unwrap();
-        assert_eq!(out, "//! registry\npub mod gps;\n// bonsai:mod\n");
-    }
-
-    // A start call hand-edited to hand over hardware is still matched by the
-    // `branches::<name>::start(` prefix, and the marker survives.
-    #[test]
-    fn snip_removes_hand_edited_start_line() {
-        let src = "    branches::imu::start(&spawner, &trunk, Output::new(p.PIN_25, Level::Low));\n    // bonsai:start\n";
-        let out =
-            remove_balanced_span(src, |l| l.trim_start().starts_with("branches::imu::start("))
-                .unwrap();
-        assert_eq!(out, "    // bonsai:start\n");
-    }
-
-    // A rustfmt-wrapped multi-line start call comes out whole — no dangling args.
-    #[test]
-    fn snip_removes_wrapped_start_call() {
-        let src = "    branches::imu::start(\n        &spawner,\n        &trunk,\n        Output::new(p.PIN_25, Level::Low),\n    );\n    // bonsai:start\n";
-        let out =
-            remove_balanced_span(src, |l| l.trim_start().starts_with("branches::imu::start("))
-                .unwrap();
-        assert_eq!(out, "    // bonsai:start\n");
-    }
-
-    // `imu` must not match `imu2` — the `::start(` boundary guards this.
-    #[test]
-    fn snip_start_prefix_does_not_match_sibling() {
-        let src = "    branches::imu2::start(&spawner, &trunk);\n";
+    fn insert_indented_before_matches_indent() {
+        let src = "        match input {\n            // bonsai:input-arm\n        }\n";
+        let out = insert_indented_before(src, "// bonsai:input-arm", "Input::Tick => {}").unwrap();
         assert!(
-            remove_balanced_span(src, |l| l.trim_start().starts_with("branches::imu::start("))
-                .is_none()
+            out.contains("            Input::Tick => {}\n            // bonsai:input-arm\n"),
+            "inserted wrong (or indent lost):\n{out}"
+        );
+        assert!(
+            insert_indented_before("    match input {}\n", "// bonsai:input-arm", "x").is_none()
         );
     }
 
-    // No match → None, which drives the fatal (mod) / warn (start) branches.
+    // A filled-in arm spanning lines comes out whole.
     #[test]
-    fn snip_missing_line_returns_none() {
-        let src = "//! nothing here\n".to_string();
-        assert!(remove_line(src, |l| l.trim() == "pub mod imu;").is_none());
+    fn balanced_span_takes_a_multiline_arm() {
+        let src = "match input {\n    Input::Beat(b) => {\n        count(b);\n    }\n    Input::Tick => {}\n}\n";
+        let out =
+            remove_balanced_span(src, |l| l.trim_start().starts_with("Input::Beat(")).unwrap();
+        assert_eq!(out, "match input {\n    Input::Tick => {}\n}\n");
     }
 
     // regrow recovers the chip from the board alone.
@@ -1177,12 +1072,7 @@ mod tests {
     #[test]
     fn templates_stamp_their_board_and_chip() {
         for &(board, chip, _) in BOARDS {
-            let dir = TEMPLATES.get_dir(format!("linux/{board}")).unwrap();
-            let manifest = dir
-                .get_file(format!("linux/{board}/Cargo.toml"))
-                .unwrap()
-                .contents_utf8()
-                .unwrap();
+            let manifest = template_file(board, "Cargo.toml");
             assert_eq!(parse_board(manifest).as_deref(), Some(board));
             assert!(
                 manifest.contains(&format!("for {board} ({chip})")),
@@ -1191,7 +1081,7 @@ mod tests {
         }
     }
 
-    // regrow reads the board back out of the Cargo.toml stamp (both HAL styles).
+    // regrow reads the board back out of the Cargo.toml stamp.
     #[test]
     fn regrow_parse_board_from_stamp() {
         let rpi = "# Generated by bonsai for zero-2w (bcm2710a1) — Linux trunk + branches.\n";
@@ -1225,284 +1115,6 @@ mod tests {
         assert!(parse_target("[build]\n").is_none());
     }
 
-    // `feed` inserts a variant above the marker, matched as a whole line (a doc
-    // comment mentioning the marker isn't mistaken for it).
-    #[test]
-    fn feed_inserts_variant_before_marker() {
-        let src = "//! keep the // bonsai:nutrient marker\npub enum Nutrient {\n    Beat,\n    // bonsai:nutrient\n}\n".to_string();
-        let out = insert_before_marker(
-            Path::new("trunk.rs"),
-            src,
-            "// bonsai:nutrient",
-            "    Target,\n",
-        );
-        assert!(
-            out.contains("    Target,\n    // bonsai:nutrient\n"),
-            "inserted wrong:\n{out}"
-        );
-        assert!(
-            out.starts_with("//! keep the // bonsai:nutrient marker\n"),
-            "doc line split:\n{out}"
-        );
-    }
-
-    // The matcher `remove_nutrient` uses: name + a delimiter char.
-    fn variant_matcher(name: &'static str) -> impl Fn(&str) -> bool {
-        move |l: &str| {
-            l.trim_start()
-                .strip_prefix(name)
-                .is_some_and(|rest| matches!(rest.chars().next(), Some(',' | ' ' | '(' | '{')))
-        }
-    }
-
-    // `starve` removes only the targeted variant, leaving siblings + marker.
-    #[test]
-    fn starve_removes_variant_line() {
-        let src = "pub enum Nutrient {\n    Beat,\n    Target,\n    // bonsai:nutrient\n}\n";
-        let out = remove_balanced_span(src, variant_matcher("Target")).unwrap();
-        assert_eq!(
-            out,
-            "pub enum Nutrient {\n    Beat,\n    // bonsai:nutrient\n}\n"
-        );
-    }
-
-    // A variant hand-edited to carry a payload is still matched by prefix.
-    #[test]
-    fn starve_removes_payload_variant() {
-        let src = "    Beat,\n    Target { pos: i32 },\n";
-        let out = remove_balanced_span(src, variant_matcher("Target")).unwrap();
-        assert_eq!(out, "    Beat,\n");
-    }
-
-    // A variant reformatted across lines comes out whole — no orphaned braces.
-    #[test]
-    fn starve_removes_multiline_variant() {
-        let src = "    Beat,\n    Target {\n        pos: i32,\n        vel: i16,\n    },\n    // bonsai:nutrient\n";
-        let out = remove_balanced_span(src, variant_matcher("Target")).unwrap();
-        assert_eq!(out, "    Beat,\n    // bonsai:nutrient\n");
-    }
-
-    // `Beat` must not match `BeatFast` — the delimiter boundary guards this.
-    #[test]
-    fn starve_prefix_does_not_match_sibling() {
-        let src = "    BeatFast,\n";
-        assert!(remove_balanced_span(src, variant_matcher("Beat")).is_none());
-    }
-
-    // No such variant → None, which drives the fatal branch.
-    #[test]
-    fn starve_missing_variant_returns_none() {
-        let src = "    Beat,\n    // bonsai:nutrient\n";
-        assert!(remove_balanced_span(src, variant_matcher("Target")).is_none());
-    }
-
-    // A nutrient name must be a valid UpperCamelCase identifier.
-    #[test]
-    fn nutrient_name_must_be_uppercase_ident() {
-        assert!(is_variant("Target"));
-        assert!(is_variant("BeatFast"));
-        assert!(!is_variant("target")); // lowercase first
-        assert!(!is_variant("2Fast")); // leading digit
-        assert!(!is_variant("has space"));
-    }
-
-    // `insert_indented_before` puts content above a whole-line marker, matching its
-    // indentation; no marker → None.
-    #[test]
-    fn insert_indented_before_matches_indent() {
-        let src = "        match n {\n            // bonsai:nutrient-arm\n            _ => {}\n        }\n";
-        let out = insert_indented_before(src, "// bonsai:nutrient-arm", "Nutrient::Target => {}")
-            .unwrap();
-        assert!(
-            out.contains(
-                "            Nutrient::Target => {}\n            // bonsai:nutrient-arm\n"
-            ),
-            "inserted wrong (or indent lost):\n{out}"
-        );
-    }
-
-    #[test]
-    fn insert_indented_before_none_without_marker() {
-        assert!(
-            insert_indented_before("    match n { _ => {} }\n", "// bonsai:nutrient-arm", "x")
-                .is_none()
-        );
-    }
-
-    // `arm_lhs_for` binds a payload variant with `{ .. }`, a unit one plainly.
-    #[test]
-    fn arm_lhs_for_unit_and_payload() {
-        let trunk = "pub enum Nutrient {\n    Beat,\n    Target { pos: i32 },\n}\n";
-        assert_eq!(arm_lhs_for(trunk, "Beat"), "Nutrient::Beat");
-        assert_eq!(arm_lhs_for(trunk, "Target"), "Nutrient::Target { .. }");
-    }
-
-    // `tap` adds an arm above the marker (before the catch-all); `untap` removes it.
-    #[test]
-    fn tap_untap_round_trip() {
-        let trunk = "pub enum Nutrient {\n    Target { pos: i32 },\n}\n";
-        let branch = "        match n {\n            // bonsai:nutrient-arm\n            _ => {}\n        }\n";
-        let arm = format!("{} => {{ /* TODO */ }}", arm_lhs_for(trunk, "Target"));
-        let tapped = insert_indented_before(branch, "// bonsai:nutrient-arm", &arm).unwrap();
-        assert!(
-            tapped.contains("Nutrient::Target { .. } => { /* TODO */ }"),
-            "{tapped}"
-        );
-        assert!(tapped.lines().any(|l| is_arm_for(l, "Target")));
-        let untapped = remove_balanced_span(&tapped, |l| is_arm_for(l, "Target")).unwrap();
-        assert_eq!(untapped, branch);
-    }
-
-    // The regression the balanced remover exists for: an arm whose `/* TODO */`
-    // grew into a multi-line body is removed whole, not just its first line.
-    #[test]
-    fn untap_removes_multiline_arm_body() {
-        let branch = "        match n {\n            Nutrient::Target { pos } => {\n                info!(\"target {}\", pos);\n                led.toggle();\n            }\n            // bonsai:nutrient-arm\n            _ => {}\n        }\n";
-        let out = remove_balanced_span(branch, |l| is_arm_for(l, "Target")).unwrap();
-        assert_eq!(
-            out,
-            "        match n {\n            // bonsai:nutrient-arm\n            _ => {}\n        }\n"
-        );
-    }
-
-    // `release` adds a publish above the emit marker; `unrelease` removes it. The
-    // matcher respects the name boundary (Target ≠ TargetLock).
-    #[test]
-    fn release_unrelease_round_trip() {
-        let loop_src = "        // bonsai:emit\n        let _ = &sap;\n";
-        let out = insert_indented_before(
-            loop_src,
-            "// bonsai:emit",
-            "sap.release(Nutrient::Target).await;",
-        )
-        .unwrap();
-        assert!(
-            out.contains("        sap.release(Nutrient::Target).await;\n        // bonsai:emit\n"),
-            "{out}"
-        );
-        assert!(out.lines().any(|l| is_release_of(l, "Target")));
-        assert!(!out.lines().any(|l| is_release_of(l, "Tar")));
-        let back = remove_balanced_span(&out, |l| is_release_of(l, "Target")).unwrap();
-        assert_eq!(back, loop_src);
-    }
-
-    // A publish whose payload ctor was filled in across lines comes out whole.
-    #[test]
-    fn unrelease_removes_multiline_publish() {
-        let src = "        sap.release(Nutrient::Target {\n            pos: reading,\n        })\n        .await;\n        // bonsai:emit\n        let _ = &sap;\n";
-        let out = remove_balanced_span(src, |l| is_release_of(l, "Target")).unwrap();
-        assert_eq!(out, "        // bonsai:emit\n        let _ = &sap;\n");
-    }
-
-    // `list` reads the variant names out of the enum, skipping docs + the marker,
-    // for both unit and payload variants.
-    #[test]
-    fn parse_nutrients_lists_variants() {
-        let trunk = "use x;\npub enum Nutrient {\n    /// doc\n    Beat,\n    Target { pos: i32 },\n    // bonsai:nutrient\n}\nfn other() {}\n";
-        assert_eq!(parse_nutrients(trunk), vec!["Beat", "Target"]);
-    }
-
-    // `feed`'s field parser trims and pairs name:type (error paths exit the
-    // process, so only the happy path is unit-testable).
-    // Consumer + duplex + roots have a `match Nutrient` (so they carry the arm
-    // marker for tap/starve); producer releases only. All draw on the generated
-    // sap. Roots leaves its transport to the user.
-    #[test]
-    fn branch_mode_templates() {
-        for m in [BranchMode::Consumer, BranchMode::Duplex, BranchMode::Roots] {
-            assert!(m.template().contains("// bonsai:nutrient-arm"));
-            assert!(m.template().contains("sap::{{branch_name}}::Taps::new()"));
-        }
-        assert!(
-            !BranchMode::Producer
-                .template()
-                .contains("// bonsai:nutrient-arm")
-        );
-        for m in [BranchMode::Producer, BranchMode::Duplex, BranchMode::Roots] {
-            assert!(m.template().contains("// bonsai:emit"));
-            assert!(m.template().contains("trunk.sap()"));
-        }
-        let roots = BranchMode::Roots.template();
-        assert!(roots.contains("roots::bridge(") && !roots.contains("TcpStream::connect"));
-        assert!(
-            !BranchMode::Producer
-                .template()
-                .contains("Timer::after(Duration")
-        );
-    }
-
-    // Every board's shipped src/sap.rs must be exactly what `bonsai sync` would
-    // generate from that template's own trunk/pulse/bonsai.toml — otherwise a
-    // freshly planted tree would rewrite it on its first wiring command.
-    #[test]
-    fn template_sap_matches_generator() {
-        for &board in &board_names() {
-            let sub = format!("linux/{board}");
-            let file = |f: &str| {
-                let path = format!("{sub}/{f}");
-                TEMPLATES
-                    .get_file(&path)
-                    .and_then(|f| f.contents_utf8())
-                    .unwrap_or_else(|| panic!("{path} embedded"))
-            };
-            let variants = flow::parse_variants(file("src/trunk.rs"));
-            let nutrients: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-            let pulse = flow::Node::scan("pulse", file("src/pulse.rs"), &nutrients);
-            assert_eq!(pulse.taps, vec!["Beat"], "{sub}: pulse taps Beat");
-            assert_eq!(pulse.releases, vec!["Beat"], "{sub}: pulse releases Beat");
-            let cfg = flow::Config::parse(file("bonsai.toml")).unwrap();
-            let g = flow::Graph::build(&variants, &cfg, vec![pulse]);
-            assert!(
-                flow::render(&g) == file("src/sap.rs"),
-                "{sub}/src/sap.rs is stale — run `bonsai sync` in templates/{sub}"
-            );
-            assert!(g.warnings().is_empty(), "{sub}: {:?}", g.warnings());
-            // The sap lives under the trunk, exactly as `migrate_sap_module`
-            // places it in older trees.
-            assert!(
-                file("src/trunk.rs").contains(SAP_MOD_IN_TRUNK),
-                "{sub}: trunk.rs declares the sap as SAP_MOD_IN_TRUNK does"
-            );
-            assert!(
-                file("src/main.rs").contains("use trunk::sap;")
-                    && !file("src/main.rs").contains("mod sap;"),
-                "{sub}: main.rs reaches the sap through the trunk"
-            );
-        }
-    }
-
-    // The graph reads releases wherever they sit on a line; editing commands
-    // only ever match a line that *is* the call.
-    #[test]
-    fn release_detection_loose_and_strict() {
-        let l = "        let _ = sap.try_release(Nutrient::Arm);";
-        assert!(mentions_release_of(l, "Arm") && !is_release_of(l, "Arm"));
-        assert!(!mentions_awaited_release_of(l, "Arm"));
-        let l = "            Nutrient::Beat => sap.release(Nutrient::Ack).await,";
-        assert!(mentions_awaited_release_of(l, "Ack") && !mentions_release_of(l, "Ac"));
-        assert!(is_release_of(
-            "    sap.release(Nutrient::Ack).await;",
-            "Ack"
-        ));
-        assert!(!is_release_of(
-            "    sap.publish_immediate(Nutrient::Ack);",
-            "Ack"
-        )); // the pre-sap form isn't a release any more
-    }
-
-    #[test]
-    fn feed_args_split_flags_from_fields() {
-        let args: Vec<String> = ["len:u16", "--directed", "--cap", "64", "buf:[u8;8]"]
-            .map(String::from)
-            .to_vec();
-        let (fields, shape, cap) = parse_feed_args(&args);
-        assert_eq!(fields, vec!["len:u16", "buf:[u8;8]"]);
-        assert_eq!(shape, Some(flow::Shape::Directed));
-        assert_eq!(cap, Some(64));
-        let (_, shape, cap) = parse_feed_args(&["--state".to_string(), "--cap=2".to_string()]);
-        assert_eq!((shape, cap), (Some(flow::Shape::State), Some(2)));
-    }
-
     #[test]
     fn parse_fields_pairs_name_and_type() {
         let fields = vec!["pos:i32".to_string(), "vel: u16".to_string()];
@@ -1515,410 +1127,110 @@ mod tests {
         );
     }
 
-    // End-to-end fs round trip on a fixture tree: graft → feed → tap → expand the
-    // arm body across lines → untap → snip → starve leaves every file exactly as
-    // it started. This is the coverage the pure-helper tests can't give: the real
-    // command-level edits, including balanced multi-line removal.
+    #[test]
+    fn bonsai_1_commands_point_at_their_replacements() {
+        for old in [
+            "snip",
+            "feed",
+            "starve",
+            "tap",
+            "untap",
+            "release",
+            "unrelease",
+            "path",
+        ] {
+            assert!(renamed(old).is_some(), "{old}");
+        }
+        assert!(renamed("wire").is_none());
+    }
+
+    // End-to-end on a real template: add two branches and a message, wire them,
+    // give one a rate, then undo it all. Every file must come back exactly as
+    // it started — including the arms added to and taken out of branches, and
+    // the comments in bonsai.toml.
     //
-    // The commands operate on the cwd, and set_current_dir is process-wide — keep
+    // The commands work on the cwd, and set_current_dir is process-wide — keep
     // this the ONLY test that changes cwd (all others use absolute/temp paths).
     #[test]
-    fn fs_round_trip_graft_wire_snip_starve() {
+    fn fs_round_trip_branch_message_wire_rate() {
         let root = std::env::temp_dir().join("bonsai-test-roundtrip");
         let _ = std::fs::remove_dir_all(&root);
         let tmpl = TEMPLATES.get_dir("linux/zero-w").unwrap();
         extract_dir(tmpl, tmpl.path(), &root).unwrap();
-        let fresh: Vec<(&str, String)> = [
-            "src/main.rs",
-            "src/branches/mod.rs",
-            "src/trunk.rs",
-            "src/sap.rs",
+        let tracked = [
             "bonsai.toml",
-        ]
-        .into_iter()
-        .map(|f| (f, std::fs::read_to_string(root.join(f)).unwrap()))
-        .collect();
-
-        let old_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&root).unwrap();
-
-        add_branch("imu", BranchMode::Consumer).unwrap();
-        let imu_fresh = std::fs::read_to_string(root.join("src/branches/imu.rs")).unwrap();
-
-        add_nutrient("Target", &["pos:i32".to_string()], None).unwrap();
-        tap("imu", "Target").unwrap();
-
-        // Grow the tapped arm into a real multi-line body — the regression case.
-        let imu = std::fs::read_to_string(root.join("src/branches/imu.rs")).unwrap();
-        let imu = imu.replace(
-            "Nutrient::Target { .. } => { /* TODO */ }",
-            "Nutrient::Target { pos } => {\n                let _ = pos;\n            }",
-        );
-        std::fs::write(root.join("src/branches/imu.rs"), imu).unwrap();
-
-        untap("imu", "Target").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(root.join("src/branches/imu.rs")).unwrap(),
-            imu_fresh,
-            "untap must remove the whole multi-line arm, restoring the fresh scaffold"
-        );
-
-        remove_branch("imu").unwrap();
-        remove_nutrient("Target").unwrap();
-        std::env::set_current_dir(&old_cwd).unwrap();
-
-        for (f, before) in &fresh {
-            assert_eq!(
-                &std::fs::read_to_string(root.join(f)).unwrap(),
-                before,
-                "{f} not restored"
-            );
-        }
-        assert!(!root.join("src/branches/imu.rs").exists());
-        let _ = std::fs::remove_dir_all(&root);
-
-        // Phase 2 — a managed tree (a real template, with its generated sap): the
-        // same round trip also regenerates src/sap.rs and bonsai.toml at each step,
-        // and unwinding it restores every file byte for byte.
-        let root = std::env::temp_dir().join("bonsai-test-roundtrip-sap");
-        let _ = std::fs::remove_dir_all(&root);
-        let tmpl = TEMPLATES.get_dir("linux/zero-w").unwrap();
-        extract_dir(tmpl, tmpl.path(), &root).unwrap();
-        let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap();
-        let fresh: Vec<(&str, String)> = [
-            "src/main.rs",
+            "src/messages.rs",
+            "src/wiring.rs",
+            "src/settings.rs",
+            "src/bonsai.rs",
             "src/branches/mod.rs",
-            "src/trunk.rs",
-            "src/sap.rs",
-            "bonsai.toml",
-        ]
-        .into_iter()
-        .map(|f| (f, read(f)))
-        .collect();
+            "src/branches/pulse.rs",
+        ];
+        let fresh: Vec<String> = tracked
+            .iter()
+            .map(|f| std::fs::read_to_string(root.join(f)).unwrap())
+            .collect();
+        let here = std::env::current_dir().unwrap();
         std::env::set_current_dir(&root).unwrap();
+        let read = |f: &str| std::fs::read_to_string(f).unwrap();
 
-        add_branch("ctl", BranchMode::Duplex).unwrap();
-        assert!(read("src/sap.rs").contains("pub mod ctl {"));
-        let cmd = flow::PathCfg::new(flow::Shape::Directed, Some(16));
-        add_nutrient("Cmd", &[], Some(cmd)).unwrap();
-        assert!(read("bonsai.toml").contains("[nutrients.Cmd]\nshape = \"directed\"\ncap = 16\n"));
-        tap("ctl", "Cmd").unwrap();
-        release("ctl", "Cmd").unwrap();
-        let sap = read("src/sap.rs");
-        assert!(sap.contains("static CMD_PATH: Channel<M, (), 16>"), "{sap}");
-        assert!(
-            sap.contains("CMD_PATH.poll_receive(cx).map(cmd_nutrient)"),
-            "{sap}"
-        );
-        assert!(
-            sap.contains("//!   Cmd   directed   cap 16   ctl → ctl"),
-            "{sap}"
-        );
-        assert!(read("src/branches/ctl.rs").contains("sap.release(Nutrient::Cmd).await;"));
-        // …and the wiring it now has is the self-deadlock the warnings name.
-        assert!(
-            tree_graph()
-                .warnings()
-                .iter()
-                .any(|w| w.contains("deadlock risk: `ctl`"))
-        );
-
-        unrelease("ctl", "Cmd").unwrap();
-        untap("ctl", "Cmd").unwrap();
-        remove_branch("ctl").unwrap();
-        remove_nutrient("Cmd").unwrap();
-
-        // Phase 3 — a tree from the first sap release declares `mod sap;` in
-        // main.rs. The next sync moves it under the trunk (the trunk ends up
-        // exactly as the template has it), and a second sync changes nothing.
-        let main_new = read("src/main.rs");
-        let trunk_new = read("src/trunk.rs");
-        let main_old = main_new
-            .replace("use trunk::sap; // the generated sap lives under the trunk (src/sap.rs)\n", "")
-            .replace(
-                "mod trunk;\n",
-                "#[rustfmt::skip] // generated by bonsai — `bonsai sync` rewrites it\nmod sap;\nmod trunk;\n",
-            );
-        std::fs::write(root.join("src/main.rs"), &main_old).unwrap();
-        std::fs::write(
-            root.join("src/trunk.rs"),
-            trunk_new.replace(SAP_MOD_IN_TRUNK, "pub use crate::sap::Sap;\n"),
+        tree::branch_add("sensor").unwrap();
+        tree::branch_add("display").unwrap();
+        tree::message_add("Reading", &["temp_c:f32".to_string()]).unwrap();
+        tree::wire(
+            "sensor",
+            "Reading",
+            &["display".to_string(), "pulse".to_string()],
         )
         .unwrap();
-        sync_sap().unwrap();
-        let main_migrated = read("src/main.rs");
-        assert_eq!(read("src/trunk.rs"), trunk_new);
-        assert!(!main_migrated.contains("mod sap;"), "{main_migrated}");
-        assert!(!main_migrated.contains("rustfmt::skip"), "{main_migrated}");
-        assert!(main_migrated.contains("use trunk::sap;"), "{main_migrated}");
-        sync_sap().unwrap();
-        assert_eq!(read("src/main.rs"), main_migrated);
-        std::fs::write(root.join("src/main.rs"), &main_new).unwrap();
-        std::env::set_current_dir(&old_cwd).unwrap();
-        for (f, before) in &fresh {
-            assert_eq!(&read(f), before, "{f} not restored");
+        tree::rate("sensor", "10").unwrap();
+        tree::sync().unwrap();
+
+        let toml = read("bonsai.toml");
+        assert!(toml.contains("[branch.sensor]\nrate = 10\n"), "{toml}");
+        assert!(
+            toml.contains("[[wire]]\nfrom = \"sensor\"\nmessage = \"Reading\"\nto = [\"display\", \"pulse\"]\n"),
+            "{toml}"
+        );
+        assert!(read("src/branches/display.rs").contains(
+            "            Input::Reading(_reading) => {}\n            // bonsai:input-arm\n"
+        ));
+        assert!(read("src/branches/pulse.rs").contains("Input::Reading(_reading) => {}"));
+        assert!(read("src/branches/sensor.rs").contains("            Input::Tick => {}\n"));
+        let wiring = read("src/wiring.rs");
+        assert!(wiring.contains("impl Sends<Reading> for Out"), "{wiring}");
+        assert!(read("src/branches/mod.rs").contains("pub mod sensor;\npub mod display;\n"));
+
+        // A filled-in arm spanning lines is removed whole by unwire.
+        let display = read("src/branches/display.rs").replace(
+            "Input::Reading(_reading) => {}",
+            "Input::Reading(reading) => {\n                println!(\"{}\", reading.temp_c);\n            }",
+        );
+        std::fs::write("src/branches/display.rs", display).unwrap();
+
+        tree::unwire("sensor", "Reading", &["pulse".to_string()]).unwrap();
+        assert!(!read("src/branches/pulse.rs").contains("Input::Reading"));
+        tree::unwire("sensor", "Reading", &[]).unwrap();
+        assert!(!read("src/branches/display.rs").contains("Input::Reading"));
+        tree::rate("sensor", "off").unwrap();
+        assert!(!read("src/branches/sensor.rs").contains("Input::Tick"));
+        tree::message_remove("Reading").unwrap();
+        tree::branch_remove("display").unwrap();
+        tree::branch_remove("sensor").unwrap();
+
+        let back: Vec<String> = tracked.iter().map(|f| read(f)).collect();
+        std::env::set_current_dir(&here).unwrap();
+        for ((f, before), after) in tracked.iter().zip(&fresh).zip(&back) {
+            assert_eq!(after, before, "{f} didn't round-trip");
         }
+        assert!(!root.join("src/branches/sensor.rs").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
-
-    // Auto-patch: `starve` removes the arm by `Nutrient::<name>` + delimiter, so a
-    // sibling (`TargetLock`) and a payload arm are handled correctly.
-    #[test]
-    fn arm_matcher_boundaries() {
-        assert!(is_arm_for("            Nutrient::Target => {}", "Target"));
-        assert!(is_arm_for("    Nutrient::Target { .. } => {}", "Target")); // payload
-        assert!(!is_arm_for(
-            "            Nutrient::TargetLock => {}",
-            "Target"
-        )); // sibling
-        assert!(!is_arm_for("            Nutrient::Beat => {}", "Target"));
-    }
-
-    #[test]
-    fn starve_removes_arm_line() {
-        let src = "            Nutrient::Beat => {}\n            Nutrient::Target => {}\n            // bonsai:nutrient-arm\n".to_string();
-        let out = remove_line(src, |l| is_arm_for(l, "Target")).unwrap();
-        assert_eq!(
-            out,
-            "            Nutrient::Beat => {}\n            // bonsai:nutrient-arm\n"
-        );
-    }
-}
-
-fn add_branch(name: &str, mode: BranchMode) -> io::Result<()> {
-    if !is_ident(name) {
-        eprintln!("branch name must be a snake_case identifier, got {name:?}");
-        std::process::exit(2);
-    }
-
-    let mod_rs = Path::new("src/branches/mod.rs");
-    let main_rs = Path::new("src/main.rs");
-    if !mod_rs.is_file() || !main_rs.is_file() {
-        eprintln!("run this inside a bonsai tree (no src/branches/mod.rs + src/main.rs here)");
-        std::process::exit(1);
-    }
-
-    // The generated sap names each node's taps `sap::<name>::Taps`, and the
-    // pulse is already a node.
-    if name == "pulse" {
-        eprintln!("`pulse` is the tree's built-in heartbeat (src/pulse.rs) — pick another name.");
-        std::process::exit(2);
-    }
-
-    let branch_rs = Path::new("src/branches").join(format!("{name}.rs"));
-    if branch_rs.exists() {
-        eprintln!("branch already exists: {}", branch_rs.display());
-        std::process::exit(1);
-    }
-
-    require_managed("branch");
-    // Register the module in branches/mod.rs, and start it in the trunk
-    // (main.rs) where the hardware is handed out. Compute both edits first so a
-    // missing marker aborts before we write anything (no half-grafted tree).
-    let mod_src = insert_before_marker(
-        mod_rs,
-        std::fs::read_to_string(mod_rs)?,
-        "// bonsai:mod",
-        &format!("pub mod {name};\n"),
-    );
-    let mut main_src = insert_before_marker(
-        main_rs,
-        std::fs::read_to_string(main_rs)?,
-        "// bonsai:start",
-        &format!("    branches::{name}::start(&spawner, &trunk);\n"),
-    );
-    // The first root also brings the shared bridge and the crate its `run` needs.
-    let mut manifest = None;
-    let new_bridge = mode == BranchMode::Roots && !Path::new(ROOTS_RS).exists();
-    if mode == BranchMode::Roots {
-        if !main_src.lines().any(|l| l.trim() == ROOTS_MOD) {
-            main_src = with_roots_mod(&main_src).unwrap_or_else(|| {
-                eprintln!("no `mod pulse;` line in src/main.rs to put `{ROOTS_MOD}` after");
-                std::process::exit(1);
-            });
-        }
-        manifest = with_dependency(&std::fs::read_to_string("Cargo.toml")?, EMBASSY_FUTURES)?;
-    }
-
-    std::fs::write(&branch_rs, mode.template().replace("{{branch_name}}", name))?;
-    std::fs::write(mod_rs, mod_src)?;
-    std::fs::write(main_rs, main_src)?;
-    if new_bridge {
-        std::fs::write(ROOTS_RS, ROOTS_BRIDGE)?;
-    }
-    if let Some(manifest) = &manifest {
-        std::fs::write("Cargo.toml", manifest)?;
-    }
-
-    println!("added {} `{name}`:", mode.label());
-    println!("  + {}", branch_rs.display());
-    if new_bridge {
-        println!("  + {ROOTS_RS} (the bridge every root shares)");
-    }
-    println!("  ~ src/branches/mod.rs (module registered)");
-    println!("  ~ src/main.rs (started in the trunk)");
-    if manifest.is_some() {
-        println!("  ~ Cargo.toml ({} added)", EMBASSY_FUTURES.0);
-    }
-    sync_sap()
-}
-
-/// `snip <name>`: prune a branch off the tree in the cwd — the inverse of
-/// `branch`. Deletes `src/branches/<name>.rs` and reverses both wiring edits.
-fn remove_branch(name: &str) -> io::Result<()> {
-    if !is_ident(name) {
-        eprintln!("branch name must be a snake_case identifier, got {name:?}");
-        std::process::exit(2);
-    }
-
-    let mod_rs = Path::new("src/branches/mod.rs");
-    let main_rs = Path::new("src/main.rs");
-    if !mod_rs.is_file() || !main_rs.is_file() {
-        eprintln!("run this inside a bonsai tree (no src/branches/mod.rs + src/main.rs here)");
-        std::process::exit(1);
-    }
-    require_managed("snip");
-
-    let branch_rs = Path::new("src/branches").join(format!("{name}.rs"));
-    if !branch_rs.is_file() {
-        eprintln!("no such branch: {}", branch_rs.display());
-        std::process::exit(1);
-    }
-
-    // Reverse both wiring edits `add_branch` made. Compute them before writing
-    // anything so an inconsistent tree aborts before we delete the file.
-    let mod_line = format!("pub mod {name};");
-    let Some(mod_src) = remove_line(std::fs::read_to_string(mod_rs)?, |l| l.trim() == mod_line)
-    else {
-        eprintln!(
-            "`{mod_line}` not found in {} — is `{name}` really a branch?",
-            mod_rs.display()
-        );
-        std::process::exit(1);
-    };
-    // The trunk's start call may have been hand-edited to hand over hardware, so
-    // match the call by prefix rather than the exact scaffolded line. The
-    // `::start(` boundary keeps `imu` from matching e.g. `imu2`. Balanced-span
-    // removal takes a rustfmt-wrapped multi-line call out whole.
-    let start_call = format!("branches::{name}::start(");
-    let main_before = std::fs::read_to_string(main_rs)?;
-    let main_src = remove_balanced_span(&main_before, |l| l.trim_start().starts_with(&start_call));
-    let start_removed = main_src.is_some();
-    let mut main_src = main_src.unwrap_or(main_before.clone());
-
-    std::fs::remove_file(&branch_rs)?;
-    std::fs::write(mod_rs, mod_src)?;
-
-    // The last root takes the shared bridge with it.
-    let drop_bridge = Path::new(ROOTS_RS).exists()
-        && !nutrient_arm_files()
-            .iter()
-            .any(|p| file_contains(p, "roots::bridge("));
-    if drop_bridge {
-        main_src = remove_line(main_src.clone(), |l| l.trim() == ROOTS_MOD).unwrap_or(main_src);
-        std::fs::remove_file(ROOTS_RS)?;
-    }
-    if main_src != main_before {
-        std::fs::write(main_rs, &main_src)?;
-    }
-
-    println!("snipped branch `{name}`:");
-    println!("  - {}", branch_rs.display());
-    println!("  ~ src/branches/mod.rs (module unregistered)");
-    if start_removed {
-        println!("  ~ src/main.rs (start call removed)");
-    } else {
-        // Already gone (hand-removed) — the file + mod entry are still cleaned up.
-        println!("  · src/main.rs (no `{start_call}…)` call to remove)");
-    }
-    if drop_bridge {
-        println!("  - {ROOTS_RS} (no roots left)");
-    }
-    println!(
-        "note: any hardware you handed `{name}` in the trunk is left in place — remove it if unused."
-    );
-    sync_sap()
-}
-
-/// Declare the roots bridge module just after `mod pulse;`. None if the trunk
-/// has no such line.
-fn with_roots_mod(main_src: &str) -> Option<String> {
-    let mut offset = 0;
-    for l in main_src.split_inclusive('\n') {
-        offset += l.len();
-        if l.trim() == "mod pulse;" {
-            return Some(format!(
-                "{}{ROOTS_MOD}\n{}",
-                &main_src[..offset],
-                &main_src[offset..]
-            ));
-        }
-    }
-    None
-}
-
-/// `manifest` with `name = "version"` added to `[dependencies]`, or None if
-/// it's already there (any version the user picked is kept).
-fn with_dependency(manifest: &str, (name, version): (&str, &str)) -> io::Result<Option<String>> {
-    use std::str::FromStr;
-    use toml_edit::DocumentMut;
-
-    let mut doc = DocumentMut::from_str(manifest)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let deps = doc["dependencies"].as_table_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Cargo.toml has no [dependencies]",
-        )
-    })?;
-    if deps.contains_key(name) {
-        return Ok(None);
-    }
-    deps[name] = toml_edit::value(version);
-    Ok(Some(doc.to_string()))
 }
 
 // ---------------------------------------------------------------------------
-// `feed <Name>` / `starve <Name>`: add/remove a variant of the `Nutrient` enum
-// in src/trunk.rs — the tree's shared event vocabulary. Marker-driven like
-// `branch`, but a single-file edit. Both print a reminder of the `match Nutrient`
-// arms the compiler will now want updated (adding a variant makes existing
-// exhaustive matches non-exhaustive; removing one leaves dangling arms).
+// Source edits the tree commands share (src/tree.rs): markers, spans, fields.
 // ---------------------------------------------------------------------------
-
-/// A `Nutrient` variant must be a valid Rust identifier that starts uppercase
-/// (the enum-variant convention).
-fn is_variant(name: &str) -> bool {
-    is_ident(name) && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-}
-
-/// The trunk in the cwd, or the standard "not a tree" error.
-fn trunk_or_exit() -> &'static Path {
-    let trunk_rs = Path::new("src/trunk.rs");
-    if !trunk_rs.is_file() {
-        eprintln!("run this inside a bonsai tree (no src/trunk.rs here)");
-        std::process::exit(1);
-    }
-    trunk_rs
-}
-
-/// The files that carry a `match Nutrient` block, each with a
-/// `// bonsai:nutrient-arm` marker: the pulse monitor + every branch.
-fn nutrient_arm_files() -> Vec<PathBuf> {
-    let mut branches: Vec<PathBuf> = std::fs::read_dir("src/branches")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension().is_some_and(|x| x == "rs") && p.file_name().is_some_and(|n| n != "mod.rs")
-        })
-        .collect();
-    branches.sort();
-    std::iter::once(PathBuf::from("src/pulse.rs"))
-        .chain(branches)
-        .collect()
-}
 
 /// Insert `content` as a line just above the whole-line `marker`, indented to
 /// match it. None if the file has no such marker.
@@ -1939,14 +1251,26 @@ fn insert_indented_before(src: &str, marker: &str, content: &str) -> Option<Stri
     None
 }
 
-/// Whether a match line is the arm for `Nutrient::<name>` — `name` followed by a
-/// pattern delimiter, so `Foo` isn't matched by a `starve Fo`, and a payload arm
-/// (`Nutrient::Foo { .. } => …`) is still found.
-fn is_arm_for(line: &str, name: &str) -> bool {
-    line.trim_start()
-        .strip_prefix("Nutrient::")
-        .and_then(|r| r.strip_prefix(name))
-        .is_some_and(|rest| matches!(rest.chars().next(), Some(' ' | '{' | '(')))
+/// `manifest` with `name = "version"` added to `[dependencies]`, or None if
+/// it's already there (any version the user picked is kept).
+#[cfg(test)] // for now only the retarget tests add one
+fn with_dependency(manifest: &str, (name, version): (&str, &str)) -> io::Result<Option<String>> {
+    use std::str::FromStr;
+    use toml_edit::DocumentMut;
+
+    let mut doc = DocumentMut::from_str(manifest)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let deps = doc["dependencies"].as_table_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Cargo.toml has no [dependencies]",
+        )
+    })?;
+    if deps.contains_key(name) {
+        return Ok(None);
+    }
+    deps[name] = toml_edit::value(version);
+    Ok(Some(doc.to_string()))
 }
 
 /// Parse `field:type` args into `(name, type)` pairs; exit(2) on a malformed one.
@@ -1966,421 +1290,6 @@ fn parse_fields(fields: &[String]) -> Vec<(String, String)> {
             (fname.to_string(), fty.to_string())
         })
         .collect()
-}
-
-/// Split `feed`'s args into field specs and path flags: `--broadcast`,
-/// `--directed`, `--state`, `--cap N` / `--cap=N`, anywhere in the list.
-fn parse_feed_args(args: &[String]) -> (Vec<String>, Option<flow::Shape>, Option<usize>) {
-    let usage = || -> ! {
-        eprintln!(
-            "usage: bonsai feed <Name> [--broadcast|--directed|--state] [--cap N] [field:type ...]"
-        );
-        std::process::exit(2);
-    };
-    let (mut fields, mut shape, mut cap) = (Vec::new(), None, None);
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        let cap_arg = match a.as_str() {
-            "--cap" => Some(it.next().unwrap_or_else(|| usage()).as_str()),
-            a => a.strip_prefix("--cap="),
-        };
-        if let Some(n) = cap_arg {
-            match n.parse::<usize>() {
-                Ok(n) if n >= 1 => cap = Some(n),
-                _ => {
-                    eprintln!("--cap must be a positive number, got {n:?}");
-                    std::process::exit(2);
-                }
-            }
-        } else if let Some(flag) = a.strip_prefix("--") {
-            let Some(s) = flow::Shape::parse(flag) else {
-                usage()
-            };
-            if shape.is_some_and(|prev| prev != s) {
-                eprintln!("pick one path shape, not several");
-                std::process::exit(2);
-            }
-            shape = Some(s);
-        } else {
-            fields.push(a.clone());
-        }
-    }
-    (fields, shape, cap)
-}
-
-/// `feed <Name> [--broadcast|--directed|--state] [--cap N] [field:type ...]`:
-/// add a `Nutrient` variant to src/trunk.rs — a unit variant, or a struct
-/// variant when fields are given — and give it a path in bonsai.toml.
-fn add_nutrient(name: &str, fields: &[String], path: Option<flow::PathCfg>) -> io::Result<()> {
-    if !is_variant(name) {
-        eprintln!("nutrient name must be an UpperCamelCase identifier, got {name:?}");
-        std::process::exit(2);
-    }
-    let trunk_rs = trunk_or_exit();
-    require_managed("feed");
-    let trunk_src = std::fs::read_to_string(trunk_rs)?;
-    if parse_nutrients(&trunk_src).iter().any(|n| n == name) {
-        eprintln!("`{name}` is already a nutrient (reshape its path with `bonsai path {name} …`).");
-        std::process::exit(1);
-    }
-
-    // Build the variant declaration: unit, or a struct variant when fields given.
-    let variant = if fields.is_empty() {
-        format!("    {name},\n")
-    } else {
-        let body = parse_fields(fields)
-            .iter()
-            .map(|(f, t)| format!("{f}: {t}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("    {name} {{ {body} }},\n")
-    };
-
-    let src = insert_before_marker(trunk_rs, trunk_src, "// bonsai:nutrient", &variant);
-    // Compute the config edit before writing anything, so a broken bonsai.toml
-    // aborts cleanly.
-    let cfg = path.unwrap_or_default();
-    let config = edit_config(|c| flow::set_path(c, name, cfg))?;
-    std::fs::write(trunk_rs, &src)?;
-    std::fs::write(CONFIG, config)?;
-
-    // Enum-only: every branch match has a `_ => {}` catch-all, so a new variant is
-    // safe without touching any branch. Wire it into branches with `tap`/`release`.
-    println!("fed nutrient `{name}`:");
-    println!("  ~ src/trunk.rs (variant added to Nutrient)");
-    let cap = match cfg.shape {
-        flow::Shape::State => String::new(),
-        _ => format!(", cap {}", cfg.cap),
-    };
-    println!("  ~ {CONFIG} (path: {}{cap})", cfg.shape.name());
-    println!("wire it into branches: `bonsai tap <branch> {name}` / `release <branch> {name}`.");
-    size_hint(&src, name);
-    sync_sap()
-}
-
-/// Warn when a variant makes the `Nutrient` enum large: every slot on every
-/// path is sized for the largest variant, so one big payload taxes them all.
-fn size_hint(trunk: &str, name: &str) {
-    const LARGE: usize = 64;
-    let ptr = target_ptr_width();
-    let variants = flow::parse_variants(trunk);
-    let Some(v) = variants.iter().find(|v| v.name == name) else {
-        return;
-    };
-    let Some((size, _)) = flow::variant_size(v, ptr) else {
-        return; // a type we can't size from its name — no guess beats a wrong one
-    };
-    if size < LARGE {
-        return;
-    }
-    let g = tree_graph();
-    let msg = match g.layout {
-        // Paths layout: each path's slots hold only its own payload, so the cost
-        // stays on this nutrient's path.
-        flow::Layout::Paths => {
-            let Some(p) = g.paths.iter().find(|p| p.nutrient == name) else {
-                return;
-            };
-            format!(
-                "note: `{name}` is ≈ {size} B, so its path ({} slots) holds ≈ {} B",
-                p.cfg.cap,
-                size * p.cfg.cap
-            )
-        }
-        // Trunk layout: one bus, every slot sized for the largest variant, so a
-        // big one taxes all of them.
-        flow::Layout::Trunk => {
-            let largest = variants
-                .iter()
-                .filter(|o| o.name != name)
-                .filter_map(|o| flow::variant_size(o, ptr))
-                .map(|(s, _)| s)
-                .max()
-                .unwrap_or(0);
-            if size <= largest {
-                return;
-            }
-            let mut m = format!(
-                "note: `{name}` is ≈ {size} B — and on a single bus every slot is sized for the\n\
-                 \x20     largest Nutrient, so each one now costs that much"
-            );
-            if let Some(bytes) = g.sap_bytes(ptr) {
-                m.push_str(&format!(" (the bus: ≈ {bytes} B)"));
-            }
-            m
-        }
-    };
-    println!(
-        "{msg}.\n      Consider boxing the payload (`Box<[u8; N]>`) so a slot holds a pointer, or a lower cap."
-    );
-}
-
-/// Every slot the sap holds: queued paths hold `cap`, a state path holds one;
-/// the trunk layout has just its one bus.
-fn total_slots(g: &flow::Graph) -> usize {
-    match g.layout {
-        flow::Layout::Trunk => g.trunk_cap(),
-        flow::Layout::Paths => g.paths.iter().map(|p| p.cfg.cap).sum(),
-    }
-}
-
-/// The target's pointer width, for size estimates: 8 on a 64-bit target triple,
-/// else 4 (32-bit Raspberry Pi OS). A tree with no target builds for this
-/// computer, so it has this computer's width.
-fn target_ptr_width() -> usize {
-    let config = std::fs::read_to_string(".cargo/config.toml").unwrap_or_default();
-    match parse_target(&config) {
-        Some(t)
-            if t.starts_with("aarch64") || t.starts_with("x86_64") || t.starts_with("riscv64") =>
-        {
-            8
-        }
-        Some(_) => 4,
-        None => size_of::<usize>(),
-    }
-}
-
-/// `starve <Name>`: remove a `Nutrient` variant from src/trunk.rs.
-fn remove_nutrient(name: &str) -> io::Result<()> {
-    if !is_variant(name) {
-        eprintln!("nutrient name must be an UpperCamelCase identifier, got {name:?}");
-        std::process::exit(2);
-    }
-    // `Beat` is the built-in pulse's nutrient — starving it would gut the pulse
-    // (its heartbeat publish and monitor arm) while leaving the tree compiling,
-    // a silent loss of the tree's vital sign.
-    if name == "Beat" {
-        eprintln!(
-            "refusing to starve `Beat` — the built-in pulse depends on it (see src/pulse.rs)."
-        );
-        std::process::exit(1);
-    }
-    let trunk_rs = trunk_or_exit();
-    require_managed("starve");
-
-    // Match the variant by name + a delimiter, so a variant hand-edited to carry
-    // a payload (`Target { pos: i32 },`) is still found and a sibling (`BeatFast`)
-    // isn't. Balanced-span removal takes a multi-line variant out whole.
-    let Some(src) = remove_balanced_span(&std::fs::read_to_string(trunk_rs)?, |l| {
-        let t = l.trim_start();
-        t.strip_prefix(name)
-            .is_some_and(|rest| matches!(rest.chars().next(), Some(',' | ' ' | '(' | '{')))
-    }) else {
-        eprintln!(
-            "no `{name}` variant in {} — is `{name}` really a nutrient?",
-            trunk_rs.display()
-        );
-        std::process::exit(1);
-    };
-    let config = edit_config(|c| flow::remove_path(c, name))?;
-    std::fs::write(trunk_rs, src)?;
-    std::fs::write(CONFIG, config)?;
-
-    println!("starved nutrient `{name}`:");
-    println!("  ~ src/trunk.rs (variant removed from Nutrient)");
-    println!("  ~ {CONFIG} (path removed)");
-    // Anything that referenced the variant now dangles: remove tapped arms AND
-    // release calls for it across every branch + the pulse, each as a balanced
-    // span (multi-line bodies come out whole). A hand-edited body is dropped with
-    // its arm — if it held real logic, it's gone (re-`feed` to undo).
-    for path in nutrient_arm_files() {
-        let Ok(mut src) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let mut n = 0;
-        while let Some(new) =
-            remove_balanced_span(&src, |l| is_arm_for(l, name) || is_release_of(l, name))
-        {
-            src = new;
-            n += 1;
-        }
-        if n > 0 {
-            std::fs::write(&path, src)?;
-            println!(
-                "  ~ {} ({n} connection{} removed)",
-                path.display(),
-                if n == 1 { "" } else { "s" }
-            );
-        }
-    }
-    println!(
-        "note: a `///` doc line above the variant, if any, is left behind — delete it if stale."
-    );
-    sync_sap()
-}
-
-// ---------------------------------------------------------------------------
-// Connections: wire a branch to a nutrient (per-branch, explicit).
-//   tap/untap <branch> <Nutrient>       — consume (a `match` arm)
-//   release/unrelease <branch> <Nutrient> — produce (a `sap.release` call)
-// ---------------------------------------------------------------------------
-
-/// Whether `name` carries fields — a struct (`Foo { .. }`) or tuple (`Foo(..)`)
-/// variant. Read from the parsed `Nutrient` enum only, so a struct literal
-/// elsewhere in trunk.rs that shares the name can't false-positive.
-fn nutrient_has_payload(trunk: &str, name: &str) -> bool {
-    flow::parse_variants(trunk)
-        .iter()
-        .any(|v| v.name == name && !v.fields.is_empty())
-}
-
-/// The match-arm pattern for `name`: `Nutrient::Foo { .. }` if it carries fields,
-/// else `Nutrient::Foo`.
-fn arm_lhs_for(trunk: &str, name: &str) -> String {
-    if nutrient_has_payload(trunk, name) {
-        format!("Nutrient::{name} {{ .. }}")
-    } else {
-        format!("Nutrient::{name}")
-    }
-}
-
-/// Whether a line releases `Nutrient::<name>` — name + delimiter, so a sibling
-/// isn't matched. Accepts `sap.release(…)` (what `release` writes),
-/// and `sap.try_release(…)` (its never-waiting form).
-fn is_release_of(line: &str, name: &str) -> bool {
-    ["sap.release(", "sap.try_release("]
-        .iter()
-        .any(|call| release_call_names(line, call, name))
-}
-
-/// Whether a line releases `Nutrient::<name>` anywhere in it — `let _ =
-/// sap.try_release(…)`, `if let Err(n) = sap.try_release(…)`, a release inside a
-/// match arm. Looser than `is_release_of` (which only matches a line that *is*
-/// the call, so removal never takes out surrounding code); used to read the
-/// wiring graph, never to edit.
-fn mentions_release_of(line: &str, name: &str) -> bool {
-    ["sap.release(", "sap.try_release("].iter().any(|call| {
-        line.match_indices(call)
-            .any(|(i, _)| release_call_names(&line[i..], call, name))
-    })
-}
-
-/// `mentions_release_of`, limited to the awaited `sap.release(…)` form.
-fn mentions_awaited_release_of(line: &str, name: &str) -> bool {
-    line.match_indices("sap.release(")
-        .any(|(i, _)| release_call_names(&line[i..], "sap.release(", name))
-}
-
-fn release_call_names(line: &str, call: &str, name: &str) -> bool {
-    line.trim_start()
-        .strip_prefix(call)
-        .and_then(|r| r.strip_prefix("Nutrient::"))
-        .and_then(|r| r.strip_prefix(name))
-        .is_some_and(|rest| matches!(rest.chars().next(), Some(' ' | ';' | '{' | '(' | ')')))
-}
-
-/// Shared guard: validate names, the tree, that the nutrient exists, and the
-/// branch file — returning the branch path and the trunk source.
-fn connect_guard(branch: &str, nutrient: &str) -> io::Result<(PathBuf, String)> {
-    if !is_ident(branch) {
-        eprintln!("branch name must be a snake_case identifier, got {branch:?}");
-        std::process::exit(2);
-    }
-    if !is_variant(nutrient) {
-        eprintln!("nutrient name must be an UpperCamelCase identifier, got {nutrient:?}");
-        std::process::exit(2);
-    }
-    require_managed("tap/release");
-    let trunk = std::fs::read_to_string("src/trunk.rs")?;
-    if !parse_nutrients(&trunk).iter().any(|n| n == nutrient) {
-        eprintln!("no `{nutrient}` nutrient — add it first with `bonsai feed {nutrient}`.");
-        std::process::exit(1);
-    }
-    let branch_rs = Path::new("src/branches").join(format!("{branch}.rs"));
-    if !branch_rs.is_file() {
-        eprintln!("no such branch: {}", branch_rs.display());
-        std::process::exit(1);
-    }
-    Ok((branch_rs, trunk))
-}
-
-/// `tap <branch> <Nutrient>`: the branch consumes the nutrient (adds a match arm).
-fn tap(branch: &str, nutrient: &str) -> io::Result<()> {
-    let (branch_rs, trunk) = connect_guard(branch, nutrient)?;
-    let src = std::fs::read_to_string(&branch_rs)?;
-    if !src.contains("// bonsai:nutrient-arm") {
-        eprintln!("`{branch}` doesn't subscribe — tap needs a consumer or duplex branch.");
-        std::process::exit(1);
-    }
-    if src.lines().any(|l| is_arm_for(l, nutrient)) {
-        eprintln!("`{branch}` already taps `{nutrient}`.");
-        std::process::exit(1);
-    }
-    let arm = format!("{} => {{ /* TODO */ }}", arm_lhs_for(&trunk, nutrient));
-    let new =
-        insert_indented_before(&src, "// bonsai:nutrient-arm", &arm).expect("marker checked above");
-    std::fs::write(&branch_rs, new)?;
-    println!("tapped `{branch}` → `{nutrient}`:");
-    println!("  ~ {} (handler arm added)", branch_rs.display());
-    sync_sap()
-}
-
-/// `untap <branch> <Nutrient>`: drop the branch's handler arm for the nutrient.
-fn untap(branch: &str, nutrient: &str) -> io::Result<()> {
-    let (branch_rs, _) = connect_guard(branch, nutrient)?;
-    // Balanced-span removal: an arm whose body grew to multiple lines comes out
-    // whole, not just its first line.
-    let Some(new) = remove_balanced_span(&std::fs::read_to_string(&branch_rs)?, |l| {
-        is_arm_for(l, nutrient)
-    }) else {
-        eprintln!("`{branch}` doesn't tap `{nutrient}`.");
-        std::process::exit(1);
-    };
-    std::fs::write(&branch_rs, new)?;
-    println!("untapped `{branch}` ↛ `{nutrient}`:");
-    println!("  ~ {} (handler arm removed)", branch_rs.display());
-    sync_sap()
-}
-
-/// `release <branch> <Nutrient>`: the branch produces the nutrient (publish call).
-fn release(branch: &str, nutrient: &str) -> io::Result<()> {
-    let (branch_rs, trunk) = connect_guard(branch, nutrient)?;
-    let src = std::fs::read_to_string(&branch_rs)?;
-    if !src.contains("// bonsai:emit") {
-        eprintln!("`{branch}` doesn't publish — release needs a producer or duplex branch.");
-        std::process::exit(1);
-    }
-    if src.lines().any(|l| is_release_of(l, nutrient)) {
-        eprintln!("`{branch}` already releases `{nutrient}`.");
-        std::process::exit(1);
-    }
-    let payload = nutrient_has_payload(&trunk, nutrient);
-    let tuple = flow::parse_variants(&trunk)
-        .iter()
-        .any(|v| v.name == nutrient && v.names.is_none());
-    let ctor = if payload && tuple {
-        format!("Nutrient::{nutrient}(/* TODO: fields */)")
-    } else if payload {
-        format!("Nutrient::{nutrient} {{ /* TODO: fields */ }}")
-    } else {
-        format!("Nutrient::{nutrient}")
-    };
-    let call = format!("sap.release({ctor}).await;");
-    let new = insert_indented_before(&src, "// bonsai:emit", &call).expect("marker checked above");
-    std::fs::write(&branch_rs, new)?;
-    println!("`{branch}` releases `{nutrient}`:");
-    println!("  ~ {} (release call added)", branch_rs.display());
-    if payload {
-        println!("note: `{nutrient}` carries fields — fill them in (won't compile until you do).");
-    }
-    sync_sap()
-}
-
-/// `unrelease <branch> <Nutrient>`: drop the branch's publish call for the nutrient.
-fn unrelease(branch: &str, nutrient: &str) -> io::Result<()> {
-    let (branch_rs, _) = connect_guard(branch, nutrient)?;
-    // Balanced-span removal: a publish whose payload ctor was filled in across
-    // lines comes out whole.
-    let Some(new) = remove_balanced_span(&std::fs::read_to_string(&branch_rs)?, |l| {
-        is_release_of(l, nutrient)
-    }) else {
-        eprintln!("`{branch}` doesn't release `{nutrient}`.");
-        std::process::exit(1);
-    };
-    std::fs::write(&branch_rs, new)?;
-    println!("`{branch}` no longer releases `{nutrient}`:");
-    println!("  ~ {} (release call removed)", branch_rs.display());
-    sync_sap()
 }
 
 /// Net bracket depth of a line: `(`/`{` open, `)`/`}` close. Brackets inside
@@ -2423,22 +1332,6 @@ fn remove_balanced_span(src: &str, matches: impl Fn(&str) -> bool) -> Option<Str
             let mut out = String::with_capacity(src.len());
             out.push_str(&src[..offset]);
             out.push_str(&src[end..]);
-            return Some(out);
-        }
-        offset += l.len();
-    }
-    None
-}
-
-/// Remove the first line for which `matches` is true, returning the new source.
-/// Returns None if no line matched (the caller decides fatal vs. warn).
-fn remove_line(src: String, matches: impl Fn(&str) -> bool) -> Option<String> {
-    let mut offset = 0;
-    for l in src.split_inclusive('\n') {
-        if matches(l.strip_suffix('\n').unwrap_or(l)) {
-            let mut out = String::with_capacity(src.len());
-            out.push_str(&src[..offset]);
-            out.push_str(&src[offset + l.len()..]);
             return Some(out);
         }
         offset += l.len();
@@ -2806,29 +1699,6 @@ mod plant_here_tests {
 }
 
 #[cfg(test)]
-mod roots_tests {
-    use super::*;
-
-    #[test]
-    fn roots_mod_goes_after_pulse() {
-        let main = "mod branches;\nmod pulse;\nmod trunk;\n";
-        assert_eq!(
-            with_roots_mod(main).unwrap(),
-            "mod branches;\nmod pulse;\nmod roots;\nmod trunk;\n"
-        );
-        assert!(with_roots_mod("mod trunk;\n").is_none());
-    }
-
-    #[test]
-    fn dependency_added_once() {
-        let manifest = "[package]\nname = \"x\"\n\n[dependencies]\nembassy-sync = \"0.8.0\"\n";
-        let added = with_dependency(manifest, EMBASSY_FUTURES).unwrap().unwrap();
-        assert!(added.contains("embassy-futures = \"0.1.2\""));
-        assert!(with_dependency(&added, EMBASSY_FUTURES).unwrap().is_none());
-    }
-}
-
-#[cfg(test)]
 mod update_tests {
     use super::updated_manifest;
 
@@ -3002,7 +1872,7 @@ fn retargeted_main(current: &str, template: &str) -> Option<String> {
 /// code stays; the build settings (target, linker, runner,
 /// release profile, board crates) become the new board's.
 fn retarget(new_board: &str) -> io::Result<()> {
-    require_managed("retarget");
+    tree::require_tree("retarget");
     let root = std::env::current_dir()?;
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     let Some(board) = parse_board(&manifest).filter(|b| chip_of(b).is_some()) else {
@@ -3128,14 +1998,15 @@ fn regrow() -> io::Result<()> {
     }
 
     // Require an unambiguous bonsai tree before wiping anything: the Cargo.toml
-    // stamp, both trunk marker files, and the sap/pulse. A stray directory can't
-    // match all of these.
+    // stamp, the graph, the messages and the generated wiring. A stray
+    // directory can't match all of these. (An older, Embassy tree has the
+    // stamp and its own trunk files instead.)
     let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     let is_tree = cargo_toml.contains("Generated by bonsai for")
-        && file_contains(&root.join("src/main.rs"), "// bonsai:start")
-        && file_contains(&root.join("src/branches/mod.rs"), "// bonsai:mod")
-        && root.join("src/trunk.rs").is_file()
-        && root.join("src/pulse.rs").is_file();
+        && root.join(tree::CONFIG).is_file()
+        && (file_contains(&root.join(tree::MESSAGES), tree::MESSAGE_MARKER)
+            || file_contains(&root.join("src/trunk.rs"), "// bonsai:nutrient"))
+        && (root.join("src/wiring.rs").is_file() || root.join("src/sap.rs").is_file());
     if !is_tree {
         eprintln!(
             "not a bonsai tree: {} — refusing to wipe.\nrun regrow from inside a project bonsai grew.",
@@ -3241,359 +2112,22 @@ fn regrow() -> io::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// `list`: a read-only summary of the tree in the cwd — device, branches, nutrients.
-// ---------------------------------------------------------------------------
-
-/// The variant names declared in the `Nutrient` enum of trunk.rs — unit,
-/// struct or tuple, single- or multi-line (a wrapped variant's field lines are
-/// never mistaken for variants).
-fn parse_nutrients(trunk: &str) -> Vec<String> {
-    flow::parse_variants(trunk)
-        .into_iter()
-        .map(|v| v.name)
-        .collect()
-}
-
-fn list() -> io::Result<()> {
-    let cargo_toml = std::fs::read_to_string("Cargo.toml").unwrap_or_default();
-    if !cargo_toml.contains("Generated by bonsai for") {
-        eprintln!("not a bonsai tree — run `bonsai list` from inside a project bonsai grew.");
-        std::process::exit(1);
-    }
-    require_managed("list");
-
-    let name = parse_package_name(&cargo_toml).unwrap_or_else(|| "?".to_string());
-    let device = parse_board(&cargo_toml)
-        .and_then(|board| chip_of(&board).map(|chip| format!("{board} ({chip})")))
-        .unwrap_or_else(|| "unknown board".to_string());
-    let target = parse_target(&std::fs::read_to_string(".cargo/config.toml").unwrap_or_default());
-
-    let branches: Vec<String> = nutrient_arm_files()
-        .iter()
-        .filter(|p| p.starts_with("src/branches"))
-        .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
-        .collect();
-
-    let trunk = std::fs::read_to_string("src/trunk.rs").unwrap_or_default();
-    let nutrients = parse_nutrients(&trunk);
-
-    match target {
-        Some(t) => println!("tree: {name}  ({device}, target {t})"),
-        None => println!("tree: {name}  ({device})"),
-    }
-
-    // The flow graph: producer → path → consumers, with shape and capacity.
-    let graph = tree_graph();
-    match graph.layout {
-        flow::Layout::Paths => println!("sap: paths — one channel per nutrient"),
-        flow::Layout::Trunk => println!(
-            "sap: trunk — one shared bus (cap {}) carries every nutrient",
-            graph.trunk_cap()
-        ),
-    }
-    for l in graph.flow_lines() {
-        println!("  {l}");
-    }
-    if let Some(bytes) = graph.sap_bytes(target_ptr_width()) {
-        println!(
-            "  ≈ {bytes} B of queued payload across {} slots",
-            total_slots(&graph)
-        );
-    }
-    if branches.is_empty() {
-        println!("branches: none");
-    } else {
-        println!("branches:");
-        for b in &branches {
-            let src = std::fs::read_to_string(format!("src/branches/{b}.rs")).unwrap_or_default();
-            let taps = branch_connections(&src, &nutrients, /* release */ false);
-            let releases = branch_connections(&src, &nutrients, /* release */ true);
-            let mut edges = Vec::new();
-            if !taps.is_empty() {
-                edges.push(format!("taps {}", taps.join(", ")));
-            }
-            if !releases.is_empty() {
-                edges.push(format!("releases {}", releases.join(", ")));
-            }
-            let wiring = if edges.is_empty() {
-                "—".to_string()
-            } else {
-                edges.join(" · ")
-            };
-            println!("  {b}: {wiring}");
-        }
-    }
-    for w in graph.warnings() {
-        print_warning(&w);
-    }
-    Ok(())
-}
-
-/// The nutrients a branch taps (match arms) or releases (publish calls), by
-/// scanning its source for each known nutrient. Order follows `nutrients`.
-fn branch_connections(src: &str, nutrients: &[String], release: bool) -> Vec<String> {
-    nutrients
-        .iter()
-        .filter(|n| {
-            src.lines().any(|l| {
-                if release {
-                    mentions_release_of(l, n)
-                } else {
-                    is_arm_for(l, n)
-                }
-            })
-        })
-        .cloned()
-        .collect()
-}
-
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// The generated sap: `src/sap.rs`, rebuilt from the wiring by every wiring
-// command (and `sync`); per-nutrient path config lives in `bonsai.toml`.
-// ---------------------------------------------------------------------------
-
-/// The tree's path config: shape + capacity per nutrient, and the layout.
-const CONFIG: &str = "bonsai.toml";
-const SAP_RS: &str = "src/sap.rs";
-
-/// Whether the tree in the cwd has a generated sap. Trees grown before
-/// per-nutrient paths (a single `PubSubChannel` in trunk.rs) don't, and every
-/// command refuses them via `require_managed`.
-fn sap_managed() -> bool {
-    Path::new(SAP_RS).is_file()
-}
-
-/// The parsed `bonsai.toml` (defaults if it's missing); exit(1) if malformed.
-fn load_config() -> flow::Config {
-    let Ok(src) = std::fs::read_to_string(CONFIG) else {
-        return flow::Config::default();
-    };
-    flow::Config::parse(&src).unwrap_or_else(|e| {
-        eprintln!("{CONFIG}: {e}");
-        std::process::exit(1);
-    })
-}
-
-/// Apply `edit` to bonsai.toml's source (empty if missing), returning the new
-/// text without writing it — callers write once every edit has succeeded.
-fn edit_config(edit: impl Fn(&str) -> Result<String, String>) -> io::Result<String> {
-    let src = std::fs::read_to_string(CONFIG).unwrap_or_default();
-    edit(&src).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{CONFIG}: {e}")))
-}
-
-/// The tree's wiring graph: every nutrient's path, and each node (the pulse +
-/// every branch) with what it taps and releases.
-fn tree_graph() -> flow::Graph {
-    let trunk = std::fs::read_to_string("src/trunk.rs").unwrap_or_default();
-    let variants = flow::parse_variants(&trunk);
-    let nutrients: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-    let nodes = nutrient_arm_files()
-        .into_iter()
-        .filter_map(|p| {
-            let src = std::fs::read_to_string(&p).ok()?;
-            let name = p.file_stem()?.to_string_lossy().into_owned();
-            Some(flow::Node::scan(&name, &src, &nutrients))
-        })
-        .collect();
-    flow::Graph::build(&variants, &load_config(), nodes)
-}
-
-/// Regenerate `src/sap.rs` from the wiring, and print any hazards the wiring
-/// now has.
-fn sync_sap() -> io::Result<()> {
-    migrate_sap_module()?;
-    let graph = tree_graph();
-    let new = flow::render(&graph);
-    if std::fs::read_to_string(SAP_RS).ok().as_deref() != Some(new.as_str()) {
-        std::fs::write(SAP_RS, new)?;
-        println!("  ~ {SAP_RS} (paths regenerated)");
-    }
-    for w in graph.warnings() {
-        print_warning(&w);
-    }
-    Ok(())
-}
-
-/// The sap's module declaration, as the templates place it inside trunk.rs.
-const SAP_MOD_IN_TRUNK: &str =
-    "// The generated sap (src/sap.rs) is a child of the trunk, so the payload types
-// you use in `Nutrient` resolve there exactly as they do here.
-#[rustfmt::skip] // generated by bonsai — `bonsai sync` rewrites it
-#[path = \"sap.rs\"]
-pub mod sap;
-
-pub use sap::Sap;
-";
-
-/// Trees from the first per-nutrient-path release declare `mod sap;` in
-/// main.rs, beside the trunk. The sap now lives *under* the trunk, so payload
-/// types imported in trunk.rs resolve in the generated slot structs. Move the
-/// declaration (two bonsai-owned lines in each file); a no-op once moved, and a
-/// note — not an error — if the files were hand-edited out of shape.
-fn migrate_sap_module() -> io::Result<()> {
-    let (main_rs, trunk_rs) = (Path::new("src/main.rs"), Path::new("src/trunk.rs"));
-    let main = std::fs::read_to_string(main_rs)?;
-    let trunk = std::fs::read_to_string(trunk_rs)?;
-    if !main.lines().any(|l| l.trim() == "mod sap;") || trunk.contains("pub mod sap;") {
-        return Ok(());
-    }
-    let reexport = "pub use crate::sap::Sap;\n";
-    let has_mod_trunk = main.lines().any(|l| l.trim() == "mod trunk;");
-    if !trunk.contains(reexport) || !has_mod_trunk {
-        println!(
-            "note: src/sap.rs should now be declared inside src/trunk.rs — move `mod sap;` out of\n\
-             \x20     main.rs (see \"Migrating an older tree\" in bonsai's README)."
-        );
-        return Ok(());
-    }
-    // main.rs: drop `mod sap;` (and the rustfmt::skip line bonsai put above it),
-    // and reach the sap through the trunk instead.
-    let mut out = String::new();
-    let mut lines = main.split_inclusive('\n').peekable();
-    while let Some(l) = lines.next() {
-        let next_is_mod = lines.peek().is_some_and(|n| n.trim() == "mod sap;");
-        if (l.trim_start().starts_with("#[rustfmt::skip]") && next_is_mod) || l.trim() == "mod sap;"
-        {
-            continue;
-        }
-        out.push_str(l);
-        if l.trim() == "mod trunk;" && !main.contains("use trunk::sap;") {
-            // Placed after the module list; `use` order is rustfmt's business.
-            out.push_str(
-                "\nuse trunk::sap; // the generated sap lives under the trunk (src/sap.rs)\n",
-            );
-        }
-    }
-    std::fs::write(trunk_rs, trunk.replacen(reexport, SAP_MOD_IN_TRUNK, 1))?;
-    std::fs::write(main_rs, out)?;
-    println!("  ~ src/main.rs, src/trunk.rs (the sap moved under the trunk)");
-    Ok(())
-}
-
-/// Print a wiring warning word-wrapped to the terminal-friendly width, with a
-/// hanging indent under the `warning:` label.
-fn print_warning(w: &str) {
-    const WIDTH: usize = 88;
-    let mut line = String::from("warning:");
-    for word in w.split_whitespace() {
-        if line.len() + 1 + word.len() > WIDTH {
-            println!("{line}");
-            line = String::from("        ");
-        }
-        line.push(' ');
-        line.push_str(word);
-    }
-    println!("{line}");
-}
-
-/// Exit unless the cwd is a tree with a generated sap.
-fn require_managed(cmd: &str) {
-    if !Path::new("src/trunk.rs").is_file() {
-        eprintln!("run this inside a bonsai tree (no src/trunk.rs here)");
-        std::process::exit(1);
-    }
-    if !sap_managed() {
-        eprintln!(
-            "`bonsai {cmd}`: this tree predates per-nutrient paths (it has no src/sap.rs), which\n\
-             this bonsai no longer supports. regrow it, or migrate it by hand (see \"Migrating an\n\
-             older tree\" in bonsai's README)."
-        );
-        std::process::exit(1);
-    }
-}
-
-/// `sync`: regenerate src/sap.rs after hand edits (to bonsai.toml, the
-/// `Nutrient` enum, or a branch's arms/releases).
-fn sync() -> io::Result<()> {
-    require_managed("sync");
-    let before = std::fs::read_to_string(SAP_RS).unwrap_or_default();
-    sync_sap()?;
-    if std::fs::read_to_string(SAP_RS).unwrap_or_default() == before {
-        println!("{SAP_RS} is already in step with the wiring.");
-    }
-    Ok(())
-}
-
-/// `path <Nutrient> [broadcast|directed|state] [--cap N]`: show or reshape one
-/// nutrient's path. Changing the shape without a cap resets the cap to the new
-/// shape's default.
-fn path(nutrient: &str, args: &[String]) -> io::Result<()> {
-    require_managed("path");
-    if !is_variant(nutrient) {
-        eprintln!("nutrient name must be an UpperCamelCase identifier, got {nutrient:?}");
-        std::process::exit(2);
-    }
-    let trunk = std::fs::read_to_string("src/trunk.rs")?;
-    if !parse_nutrients(&trunk).iter().any(|n| n == nutrient) {
-        eprintln!("no `{nutrient}` nutrient — add it first with `bonsai feed {nutrient}`.");
-        std::process::exit(1);
-    }
-    let current = load_config().path(nutrient);
-    // Accept the shape bare (`directed`) or as feed spells it (`--directed`).
-    let flags: Vec<String> = args
-        .iter()
-        .map(|a| match flow::Shape::parse(a) {
-            Some(_) => format!("--{a}"),
-            None => a.clone(),
-        })
-        .collect();
-    let (rest, shape, cap) = parse_feed_args(&flags);
-    if !rest.is_empty() {
-        eprintln!("usage: bonsai path <Nutrient> [broadcast|directed|state] [--cap N]");
-        std::process::exit(2);
-    }
-    if shape.is_none() && cap.is_none() {
-        let g = tree_graph();
-        let line = g
-            .flow_lines()
-            .into_iter()
-            .zip(&g.paths)
-            .find(|(_, p)| p.nutrient == nutrient)
-            .map(|(l, _)| l)
-            .unwrap_or_default();
-        println!("{line}");
-        return Ok(());
-    }
-    let shape = shape.unwrap_or(current.shape);
-    if shape == flow::Shape::State && cap.is_some() {
-        eprintln!("a state path holds exactly one value (the latest) — it takes no --cap.");
-        std::process::exit(2);
-    }
-    let cap = cap.or((shape == current.shape).then_some(current.cap));
-    let cfg = flow::PathCfg::new(shape, cap);
-    std::fs::write(CONFIG, edit_config(|c| flow::set_path(c, nutrient, cfg))?)?;
-    let cap = match shape {
-        flow::Shape::State => String::new(),
-        _ => format!(", cap {}", cfg.cap),
-    };
-    println!("`{nutrient}` flows on a {} path{cap}:", shape.name());
-    println!("  ~ {CONFIG}");
-    sync_sap()
-}
-
 fn print_help() {
     println!("bonsai — grow a Linux application as a tree: a trunk, and branches you add");
     println!();
     println!("usage:");
     println!("  bonsai                 plant a new tree (interactive wizard)");
     println!("  bonsai init            plant it in the cwd instead of a new folder");
-    println!("  bonsai branch [--produces|--duplex|--roots] [<name>]  graft a subsystem");
-    println!("                         (no name → interactive: name + kind)");
-    println!("  bonsai snip <name>     prune a subsystem off the tree in the cwd");
-    println!("  bonsai feed [<Name> [--broadcast|--directed|--state] [--cap N] [field:type ...]]");
-    println!("                         add a Nutrient variant + its path (no args → interactive)");
-    println!("  bonsai starve <Name>   remove a Nutrient event variant from the trunk");
-    println!("  bonsai tap <branch> <Nutrient>       branch consumes the nutrient");
-    println!("  bonsai untap <branch> <Nutrient>     stop consuming it");
-    println!("  bonsai release <branch> <Nutrient>   branch produces the nutrient");
-    println!("  bonsai unrelease <branch> <Nutrient> stop producing it");
-    println!("  bonsai path <Nutrient> [broadcast|directed|state] [--cap N]");
-    println!("                         show or reshape one nutrient's path");
-    println!("  bonsai sync            regenerate src/sap.rs after hand edits");
-    println!("  bonsai list            summarize the tree (device, flow graph, branches)");
+    println!("  bonsai branch add <name>      add a branch (no name → interactive)");
+    println!("  bonsai branch remove <name>   remove it, and every wire from or to it");
+    println!("  bonsai message add <Name> [field:type ...]  add a message type");
+    println!("                         (no name → interactive)");
+    println!("  bonsai message remove <Name>  remove an unwired message type");
+    println!("  bonsai wire <from> <Message> <to> [<to> ...]  from sends it to each");
+    println!("  bonsai unwire <from> <Message> [<to> ...]     stop (all when none named)");
+    println!("  bonsai rate <branch> <hz|off>   tick a branch this many times a second");
+    println!("  bonsai sync            regenerate the wiring after editing bonsai.toml");
+    println!("  bonsai list            the tree's branches and wires, and any warnings");
     println!("  bonsai update          refresh template crates and Cargo.lock");
     println!("  bonsai regrow          reset the tree in the cwd to a fresh template");
     println!(
@@ -3606,56 +2140,66 @@ fn print_help() {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         [] => create_device(false),
-        [cmd] if cmd == "init" => create_device(true),
-        [cmd] if cmd == "help" || cmd == "-h" || cmd == "--help" => {
+        ["init"] => create_device(true),
+        ["help" | "-h" | "--help"] => {
             print_help();
             Ok(())
         }
-        [cmd] if cmd == "branch" => branch_interactive(),
-        [branch, flag, name] if branch == "branch" && flag == "--produces" => {
-            add_branch(name, BranchMode::Producer)
+        ["branch"] | ["branch", "add"] => branch_interactive(),
+        ["branch", "add", name] => tree::branch_add(name),
+        ["branch", "remove", name] => tree::branch_remove(name),
+        ["message"] | ["message", "add"] => message_interactive(),
+        ["message", "add", name, fields @ ..] => {
+            let fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+            tree::message_add(name, &fields)
         }
-        [branch, flag, name] if branch == "branch" && flag == "--duplex" => {
-            add_branch(name, BranchMode::Duplex)
+        ["message", "remove", name] => tree::message_remove(name),
+        ["wire", from, message, to @ ..] if !to.is_empty() => {
+            let to: Vec<String> = to.iter().map(|t| t.to_string()).collect();
+            tree::wire(from, message, &to)
         }
-        [branch, flag, name] if branch == "branch" && flag == "--roots" => {
-            add_branch(name, BranchMode::Roots)
+        ["unwire", from, message, to @ ..] => {
+            let to: Vec<String> = to.iter().map(|t| t.to_string()).collect();
+            tree::unwire(from, message, &to)
         }
-        [branch, flag, ..] if branch == "branch" && flag.starts_with("--") => {
-            eprintln!("usage: bonsai branch [--produces|--duplex|--roots] <name>");
+        ["rate", branch, hz] => tree::rate(branch, hz),
+        ["sync"] => tree::sync(),
+        ["list"] => tree::list(),
+        ["regrow"] => regrow(),
+        ["update"] => update(),
+        ["retarget", board] => retarget(board),
+        ["tools", names @ ..] => {
+            let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+            tools_command(&names)
+        }
+        [old, ..] if renamed(old).is_some() => {
+            eprintln!(
+                "`bonsai {old}` is from bonsai 1; now it's {}",
+                renamed(old).unwrap_or_default()
+            );
             std::process::exit(2);
         }
-        [branch, name] if branch == "branch" => add_branch(name, BranchMode::Consumer),
-        [snip, name] if snip == "snip" => remove_branch(name),
-        [cmd] if cmd == "feed" => add_nutrient_interactive(),
-        [feed, name, rest @ ..] if feed == "feed" => {
-            let (fields, shape, cap) = parse_feed_args(rest);
-            if shape == Some(flow::Shape::State) && cap.is_some() {
-                eprintln!("a state path holds exactly one value (the latest) — it takes no --cap.");
-                std::process::exit(2);
-            }
-            let path = (shape.is_some() || cap.is_some())
-                .then(|| flow::PathCfg::new(shape.unwrap_or(flow::Shape::Broadcast), cap));
-            add_nutrient(name, &fields, path)
-        }
-        [starve, name] if starve == "starve" => remove_nutrient(name),
-        [cmd, branch, nutrient] if cmd == "tap" => tap(branch, nutrient),
-        [cmd, branch, nutrient] if cmd == "untap" => untap(branch, nutrient),
-        [cmd, branch, nutrient] if cmd == "release" => release(branch, nutrient),
-        [cmd, branch, nutrient] if cmd == "unrelease" => unrelease(branch, nutrient),
-        [cmd, nutrient, rest @ ..] if cmd == "path" => path(nutrient, rest),
-        [cmd] if cmd == "sync" => sync(),
-        [cmd] if cmd == "list" => list(),
-        [cmd] if cmd == "regrow" => regrow(),
-        [cmd] if cmd == "update" => update(),
-        [cmd, board] if cmd == "retarget" => retarget(board),
-        [cmd, names @ ..] if cmd == "tools" => tools_command(names),
         _ => {
             eprintln!("unrecognised arguments: {}", args.join(" "));
             print_help();
             std::process::exit(2);
         }
     }
+}
+
+/// What a bonsai 1 command became.
+fn renamed(cmd: &str) -> Option<&'static str> {
+    Some(match cmd {
+        "snip" => "`bonsai branch remove <name>`",
+        "feed" => "`bonsai message add <Name> [field:type ...]`",
+        "starve" => "`bonsai message remove <Name>`",
+        "tap" | "release" => "`bonsai wire <from> <Message> <to>`, a wire in bonsai.toml",
+        "untap" | "unrelease" => "`bonsai unwire <from> <Message> [<to>]`",
+        "path" => "gone: every message is delivered in order by the core",
+        "ide" => "gone, with microcontroller support",
+        _ => return None,
+    })
 }

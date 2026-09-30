@@ -3,6 +3,7 @@
 
 mod bonsai;
 mod branches;
+mod edges;
 mod messages;
 #[rustfmt::skip]
 mod settings;

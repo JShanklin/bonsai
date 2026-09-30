@@ -2,7 +2,7 @@
 
 Templates for [cargo-generate]. Each one is a Linux application built as a
 tree: **branches** that decide, run one event at a time by a deterministic
-**core**, on the tokio runtime.
+**core**, and **edges** that do the I/O, on the tokio runtime.
 
 - **Trunk**: the per-board project. `src/main.rs` starts the core, which
   runs every branch. It stays small.
@@ -15,9 +15,14 @@ tree: **branches** that decide, run one event at a time by a deterministic
 templates/
   _tree/
     bonsai.rs              # the runtime every tree carries as src/bonsai.rs:
-                           # the Branch trait, the core loop, ticks, shutdown.
-                           # Baked into the binary; `bonsai sync` keeps each
-                           # tree's copy current.
+                           # the Branch and Edge traits, the core loop, ticks,
+                           # edge supervision, UDP/TCP edges, shutdown. Baked
+                           # into the binary; `bonsai sync` keeps each tree's
+                           # copy current.
+    serial.rs              # the serial edge: written to src/edges/serial.rs
+                           # (and tokio-serial added) only while a tree has one.
+  _edge/
+    edge.rs                # the custom-edge scaffold (`bonsai edge add --custom`).
   _branch/
     branch.rs              # the branch scaffold. `{{branch_name}}` and
                            # `{{BranchName}}` are plain .replace, not Liquid.
@@ -36,6 +41,8 @@ templates/
         branches/
           mod.rs           # GENERATED: one `pub mod` per branch
           pulse.rs         # the built-in heartbeat, `rate = 2`
+        edges/
+          mod.rs           # GENERATED: custom edges (+ serial when used)
 ```
 
 Boards covered: `linux/{zero-w,zero-2w,pi5,host}`. There's no HAL: Linux owns
@@ -80,7 +87,8 @@ mistaken for it), keep them intact:
 
 ## Generated files
 
-`src/bonsai.rs`, `src/wiring.rs`, `src/settings.rs` and `src/branches/mod.rs`
+`src/bonsai.rs`, `src/wiring.rs`, `src/settings.rs`, `src/branches/mod.rs` and
+`src/edges/mod.rs` (plus `src/edges/serial.rs` while a tree has a serial edge)
 are written by `bonsai sync` (every graph command runs it). After changing a
 template's `bonsai.toml` or `src/messages.rs`, run `bonsai sync` inside
 `templates/linux/<board>/`. The `template_wiring_matches_generator` test fails

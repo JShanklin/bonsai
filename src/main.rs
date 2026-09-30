@@ -932,6 +932,7 @@ mod tests {
             "src/wiring.rs",
             "src/branches/mod.rs",
             "src/branches/pulse.rs",
+            "src/edges/mod.rs",
         ];
         for &board in &board_names() {
             let sub = format!("linux/{board}");
@@ -979,6 +980,11 @@ mod tests {
                 file("src/branches/mod.rs") == graph::render_mod(&cfg),
                 "{}",
                 stale("src/branches/mod.rs")
+            );
+            assert!(
+                file("src/edges/mod.rs") == graph::render_edges_mod(&cfg),
+                "{}",
+                stale("src/edges/mod.rs")
             );
             for f in ["bonsai.toml", "src/messages.rs", "src/branches/pulse.rs"] {
                 assert_eq!(
@@ -1152,7 +1158,7 @@ mod tests {
     // The commands work on the cwd, and set_current_dir is process-wide — keep
     // this the ONLY test that changes cwd (all others use absolute/temp paths).
     #[test]
-    fn fs_round_trip_branch_message_wire_rate() {
+    fn fs_round_trip_branch_edge_message_wire_rate() {
         let root = std::env::temp_dir().join("bonsai-test-roundtrip");
         let _ = std::fs::remove_dir_all(&root);
         let tmpl = TEMPLATES.get_dir("linux/zero-w").unwrap();
@@ -1165,6 +1171,8 @@ mod tests {
             "src/bonsai.rs",
             "src/branches/mod.rs",
             "src/branches/pulse.rs",
+            "src/edges/mod.rs",
+            "Cargo.toml",
         ];
         let fresh: Vec<String> = tracked
             .iter()
@@ -1177,12 +1185,8 @@ mod tests {
         tree::branch_add("sensor").unwrap();
         tree::branch_add("display").unwrap();
         tree::message_add("Reading", &["temp_c:f32".to_string()]).unwrap();
-        tree::wire(
-            "sensor",
-            "Reading",
-            &["display".to_string(), "pulse".to_string()],
-        )
-        .unwrap();
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        tree::wire("sensor", &args(&["Reading", "display", "pulse"])).unwrap();
         tree::rate("sensor", "10").unwrap();
         tree::sync().unwrap();
 
@@ -1208,9 +1212,62 @@ mod tests {
         );
         std::fs::write("src/branches/display.rs", display).unwrap();
 
-        tree::unwire("sensor", "Reading", &["pulse".to_string()]).unwrap();
+        // Edges: a UDP link both ways, a serial port in, and a custom edge.
+        tree::edge_add(
+            "link",
+            &args(&["udp", "--bind", "0.0.0.0:6969", "--join", "239.2.3.2"]),
+        )
+        .unwrap();
+        tree::edge_add(
+            "gps",
+            &args(&["serial", "--device", "/dev/serial0", "--baud", "9600"]),
+        )
+        .unwrap();
+        tree::edge_add("radio", &args(&["--custom"])).unwrap();
+        tree::wire("link", &args(&["display"])).unwrap();
+        tree::wire("display", &args(&["link", "radio"])).unwrap();
+        tree::wire("gps", &args(&["display", "sensor"])).unwrap();
+        let toml = read("bonsai.toml");
+        assert!(
+            toml.contains(
+                "[edge.link]\nkind = \"udp\"\nbind = \"0.0.0.0:6969\"\njoin = [\"239.2.3.2\"]\n"
+            ),
+            "{toml}"
+        );
+        assert!(
+            toml.contains(
+                "[edge.gps]\nkind = \"serial\"\ndevice = \"/dev/serial0\"\nbaud = 9600\n"
+            ),
+            "{toml}"
+        );
+        assert!(
+            toml.contains("[[wire]]\nfrom = \"display\"\nto = [\"link\", \"radio\"]\n"),
+            "{toml}"
+        );
+        let display = read("src/branches/display.rs");
+        assert!(display.contains("Input::Link(_link) => {}"), "{display}");
+        assert!(display.contains("Input::Gps(_gps) => {}"), "{display}");
+        assert!(read("src/branches/sensor.rs").contains("Input::Gps(_gps) => {}"));
+        assert!(read("Cargo.toml").contains("tokio-serial = \"5.5\""));
+        assert!(read("src/edges/serial.rs").contains("pub struct Serial"));
+        assert!(read("src/edges/radio.rs").contains("impl Edge for Radio"));
+        assert!(read("src/edges/mod.rs").contains("pub mod serial;"));
+        assert!(read("src/wiring.rs").contains("pub fn to_link(&mut self"));
+
+        tree::unwire("display", &args(&["radio"])).unwrap();
+        tree::edge_remove("radio").unwrap();
+        assert!(!root.join("src/edges/radio.rs").exists());
+        tree::edge_remove("gps").unwrap();
+        assert!(!read("src/branches/sensor.rs").contains("Input::Gps"));
+        assert!(!read("Cargo.toml").contains("tokio-serial"));
+        assert!(!root.join("src/edges/serial.rs").exists());
+        tree::unwire("link", &args(&[])).unwrap();
+        assert!(!read("src/branches/display.rs").contains("Input::Link"));
+        tree::edge_remove("link").unwrap();
+
+        tree::unwire("sensor", &args(&["Reading", "pulse"])).unwrap();
         assert!(!read("src/branches/pulse.rs").contains("Input::Reading"));
-        tree::unwire("sensor", "Reading", &[]).unwrap();
+        tree::unwire("sensor", &args(&["Reading"])).unwrap();
         assert!(!read("src/branches/display.rs").contains("Input::Reading"));
         tree::rate("sensor", "off").unwrap();
         assert!(!read("src/branches/sensor.rs").contains("Input::Tick"));
@@ -1253,7 +1310,6 @@ fn insert_indented_before(src: &str, marker: &str, content: &str) -> Option<Stri
 
 /// `manifest` with `name = "version"` added to `[dependencies]`, or None if
 /// it's already there (any version the user picked is kept).
-#[cfg(test)] // for now only the retarget tests add one
 fn with_dependency(manifest: &str, (name, version): (&str, &str)) -> io::Result<Option<String>> {
     use std::str::FromStr;
     use toml_edit::DocumentMut;
@@ -1271,6 +1327,20 @@ fn with_dependency(manifest: &str, (name, version): (&str, &str)) -> io::Result<
     }
     deps[name] = toml_edit::value(version);
     Ok(Some(doc.to_string()))
+}
+
+/// `manifest` without the `name` dependency, or None if it has none.
+fn without_dependency(manifest: &str, name: &str) -> io::Result<Option<String>> {
+    use std::str::FromStr;
+    use toml_edit::DocumentMut;
+
+    let mut doc = DocumentMut::from_str(manifest)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let removed = doc
+        .get_mut("dependencies")
+        .and_then(|d| d.as_table_like_mut())
+        .and_then(|d| d.remove(name));
+    Ok(removed.map(|_| doc.to_string()))
 }
 
 /// Parse `field:type` args into `(name, type)` pairs; exit(2) on a malformed one.
@@ -2123,8 +2193,15 @@ fn print_help() {
     println!("  bonsai message add <Name> [field:type ...]  add a message type");
     println!("                         (no name → interactive)");
     println!("  bonsai message remove <Name>  remove an unwired message type");
-    println!("  bonsai wire <from> <Message> <to> [<to> ...]  from sends it to each");
-    println!("  bonsai unwire <from> <Message> [<to> ...]     stop (all when none named)");
+    println!("  bonsai edge add <name> udp|tcp|serial [--bind A] [--to A] [--join G] [--reply]");
+    println!(
+        "                         [--connect A] [--listen A] [--device D --baud N] [--framing lines]"
+    );
+    println!("  bonsai edge add <name> --custom   an edge of your own (src/edges/<name>.rs)");
+    println!("  bonsai edge remove <name>     remove it, and every wire from or to it");
+    println!("  bonsai wire <from> <Message> <to> [<to> ...]  from sends it to each branch");
+    println!("  bonsai wire <from> <to> [<to> ...]   with an edge at one end (no message)");
+    println!("  bonsai unwire <from> [<Message>] [<to> ...]   stop (all when none named)");
     println!("  bonsai rate <branch> <hz|off>   tick a branch this many times a second");
     println!("  bonsai sync            regenerate the wiring after editing bonsai.toml");
     println!("  bonsai list            the tree's branches and wires, and any warnings");
@@ -2157,13 +2234,18 @@ fn main() -> io::Result<()> {
             tree::message_add(name, &fields)
         }
         ["message", "remove", name] => tree::message_remove(name),
-        ["wire", from, message, to @ ..] if !to.is_empty() => {
-            let to: Vec<String> = to.iter().map(|t| t.to_string()).collect();
-            tree::wire(from, message, &to)
+        ["edge", "add", name, rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
+            tree::edge_add(name, &rest)
         }
-        ["unwire", from, message, to @ ..] => {
-            let to: Vec<String> = to.iter().map(|t| t.to_string()).collect();
-            tree::unwire(from, message, &to)
+        ["edge", "remove", name] => tree::edge_remove(name),
+        ["wire", from, rest @ ..] if !rest.is_empty() => {
+            let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
+            tree::wire(from, &rest)
+        }
+        ["unwire", from, rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
+            tree::unwire(from, &rest)
         }
         ["rate", branch, hz] => tree::rate(branch, hz),
         ["sync"] => tree::sync(),
@@ -2200,6 +2282,7 @@ fn renamed(cmd: &str) -> Option<&'static str> {
         "untap" | "unrelease" => "`bonsai unwire <from> <Message> [<to>]`",
         "path" => "gone: every message is delivered in order by the core",
         "ide" => "gone, with microcontroller support",
+        "roots" => "an edge: `bonsai edge add <name> udp|tcp|serial ...`",
         _ => return None,
     })
 }

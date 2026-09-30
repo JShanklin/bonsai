@@ -19,9 +19,9 @@ core on tokio. bonsai 1's Embassy vocabulary (nutrient, sap, tap/release,
 feed/starve, graft/snip, roots, paths) is gone; `renamed()` in `main.rs` points
 old commands at their replacements.
 
-bonsai 2 lands as a series of PRs: 1 Linux only (done), 2 the deterministic
-core (this), 3 edges (built-in UDP/TCP/serial bridges to the outside, in
-`bonsai.toml`, plus an `Edge` trait), 4 logs tagged by branch, 5 stats and
+bonsai 2 lands as a series of PRs: 1 Linux only, 2 the deterministic core,
+3 edges (built-in UDP/TCP/serial bridges to the outside, in `bonsai.toml`,
+plus an `Edge` trait) — all done — then 4 logs tagged by branch, 5 stats and
 `bonsai top` (a live TUI over ssh), 6 the tutorial rewrite.
 
 ## Commands
@@ -36,10 +36,14 @@ cargo run -- branch         # no name → interactive TUI (name)
 cargo run -- message add <Name> [field:type ...]   # a struct in src/messages.rs
 cargo run -- message remove <Name>        # refused while wired
 cargo run -- message        # no args → interactive TUI (name + fields)
-cargo run -- wire <from> <Message> <to> [<to> ...]  # a [[wire]] in bonsai.toml
-cargo run -- unwire <from> <Message> [<to> ...]     # all receivers when none named
+cargo run -- edge add <name> udp|tcp|serial [--bind A --to A --join G --reply --connect A --listen A --device D --baud N --framing lines]
+cargo run -- edge add <name> --custom     # src/edges/<name>.rs, an Edge of your own
+cargo run -- edge remove <name>           # and every wire from/to it
+cargo run -- wire <from> <Message> <to> [<to> ...]  # branch → branches, a [[wire]] in bonsai.toml
+cargo run -- wire <from> <to> [<to> ...]  # an edge at one end: no message
+cargo run -- unwire <from> [<Message>] [<to> ...]   # all receivers when none named
 cargo run -- rate <branch> <hz|off>       # Input::Tick at that rate
-cargo run -- sync           # regenerate src/{bonsai,wiring,settings}.rs + branches/mod.rs
+cargo run -- sync           # regenerate src/{bonsai,wiring,settings}.rs, branches/ and edges/mod.rs
 cargo run -- list           # branches, wires, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
 cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs)
@@ -75,39 +79,73 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out) and
   cargo-generate output is printed (see the comment in `create_device`).
 - **The tree model.** A tree's graph is `bonsai.toml`: `[branch.<name>]`
   tables (in core order; `rate` → `Input::Tick`s per second; every other key a
-  setting) and `[[wire]]`s (`from`, `message`, `to = [..]`). Messages are
+  setting), `[edge.<name>]` tables (`kind` = udp/tcp/serial/custom; built-in
+  kinds' keys are checked when parsed, `graph::EDGE_KINDS`; a custom edge's
+  other keys are settings) and `[[wire]]`s (`from`, optional `message`,
+  `to = [..]`: with a message, branch → branches; without, an edge at exactly
+  one end: edge → branches, or branch → edges). Messages are
   top-level `pub struct`s in `src/messages.rs` (`graph::parse_messages`).
   `graph::parse` → `graph::check` (errors refuse generation: unknown
-  branch/message, self-wire, duplicates, bad names, `Tick`; warnings: loops via
-  `cycles`, branches with no inputs and no rate) → `render_wiring`,
-  `render_settings`, `render_mod`. `tree::sync_tree` writes those plus
-  `src/bonsai.rs` (`tree::RUNTIME`, from `templates/_tree/bonsai.rs`), only when
-  changed; every graph command ends with it.
+  names, self-wire, duplicates, bad names, `Tick`, the wire rules above, an
+  edge whose CamelCase name is a message's; warnings: loops via `cycles`,
+  branches with no inputs and no rate, unwired edges) → `render_wiring`,
+  `render_settings`, `render_mod`, `render_edges_mod`. `tree::sync_tree` writes
+  those plus `src/bonsai.rs` (`tree::RUNTIME`, from
+  `templates/_tree/bonsai.rs`), only when changed; while the tree has a serial
+  edge it also writes `src/edges/serial.rs` (`templates/_tree/serial.rs`) and
+  adds `tokio-serial` (default features off: no libudev, cross-builds for the
+  Zero W) with `with_dependency`, and removes both with the last one
+  (`without_dependency`). Every graph command ends with it.
 - **The runtime** (`templates/_tree/bonsai.rs`, a tree's `src/bonsai.rs`):
   `trait Branch { type Input; type Out: Default; fn setup() -> Self; fn
   process(&mut self, Input, &mut Out) }`, `trait Sends<M>`, `Slot<B>`
   (catch_unwind around `process`; a panic logs and re-runs `setup`), `drain`
   (run-to-completion with a `MAX_DELIVERIES` runaway cap) and `run()`: one
-  tokio interval task per rate feeding an mpsc of `Event`s, a core loop that
-  handles one event at a time, and shutdown on Ctrl-C/SIGTERM (the shutdown
-  future is made once and pinned: rebuilt per iteration, it missed signals).
+  tokio interval task per rate feeding an mpsc of `Event<EdgeIn>`s (`Tick` or
+  `Edge`), `Tree::start_edges`, a core loop that handles one event at a time,
+  and shutdown on Ctrl-C/SIGTERM (the shutdown future is made once and
+  pinned: rebuilt per iteration, it missed signals). Edges: `trait Edge { type
+  In; type Out; recv (cancel-safe: it's dropped whenever something goes out);
+  execute }`, opened by an inherent `setup` (built-ins take their config);
+  `spawn_edge` supervises one (each attempt its own task, so a panic or `Err`
+  restarts only that edge, backoff 0.1 s → 5 s, reset after 30 s healthy; a
+  forwarder keeps the outbound queue across restarts); `EdgeOut<T>` is the
+  core's side (`try_send`, never waits: drops and counts when full; before
+  `start_edges` it keeps what's sent, which `drain_<edge>()` returns for
+  tests). Built-ins: `Udp` (bind, to, join on iface, reply-to-last),
+  `Tcp` (client, reconnect = restart; server with per-client reader tasks,
+  send to `peer` or all), `Framed<S>` (raw / lines) shared with `Serial`;
+  all carry `Packet { bytes, peer }`.
   Templates build with `flavor = "current_thread"` and **no**
   `panic = "abort"` (unwinding is what makes the reset possible).
-- **The generated wiring** (`src/wiring.rs`): `enum Msg` (one variant per
-  wire, `<FromCamel><Message>`), and per branch `mod <name> { enum Input
-  (Tick if rated, then each wired message); struct Out { sent: Vec<Msg> } }`
-  with an inherent generic `out.send(m)` bounded on `Sends<M>`, implemented
-  only for the wires from that branch. `Core` holds a `Slot` per branch and
-  delivers each `Msg` to its `to` list in order (cloning for all but the
-  last). A branch's struct is `branches::<name>::<CamelName>`.
+- **The generated wiring** (`src/wiring.rs`): `enum EdgeIn` (one variant per
+  edge, its CamelCase name), `enum Msg` (per message wire `<FromCamel><Message>`,
+  per branch → edge `<FromCamel>To<EdgeCamel>`), and per branch `mod <name> {
+  enum Input (in `graph::input_variants` order: Tick if rated, then each wired
+  message or edge); struct Out { sent: Vec<Msg> } }` with an inherent generic
+  `out.send(m)` bounded on `Sends<M>` (implemented only for that branch's
+  message wires) and `out.to_<edge>(v)` per edge it's wired to. Built-in edges'
+  settings become `UdpConfig`/`TcpConfig`/`SerialConfig` consts. `Core` holds a
+  `Slot` per branch and an `EdgeOut` per edge, delivers each `Msg` and each
+  `Event::Edge` to its `to` list in order (cloning for all but the last), and
+  `start_edges` spawns every edge. A branch's struct is
+  `branches::<name>::<CamelName>`, a custom edge's `edges::<name>::<CamelName>`
+  (its `In`/`Out` used as `<T as Edge>::In`). Runtime types are written fully
+  qualified, so a message can't shadow them; `Packet` and friends are also
+  reserved message names (`tree::RESERVED`), and `serial` an edge/branch name.
 - **Graph commands** (`src/tree.rs`): `branch add` writes the scaffold
   (`templates/_branch/branch.rs`, `{{branch_name}}`/`{{BranchName}}` by plain
   replace) and an empty `[branch.x]`; `branch remove` also drops its wires,
   takes it out of `to` lists, and removes arms no longer fed. `wire` merges
   into an existing (from, message) wire and inserts `Input::M(_m) => {}` at
-  `// bonsai:input-arm` in each new receiver; `unwire` removes arms
-  (`remove_balanced_span`, so filled-in multi-line arms go whole) only when no
-  wire still delivers that message there. `rate` adds/removes the `Tick` arm.
+  `// bonsai:input-arm` in each new receiver. Arms follow one rule
+  (`reconcile_arms`): every command that edits the graph compares each
+  branch's `input_variants` before and after, adds an arm for each gained and
+  removes (`remove_balanced_span`, so filled-in multi-line arms go whole) each
+  lost — so `unwire`, `rate`, `branch remove` and `edge remove` all stay in
+  step. `edge add` builds the table from `--key value` flags (`--reply`,
+  repeatable `--join`) and saves only if `graph::parse` accepts it;
+  `--custom` writes `templates/_edge/edge.rs` to `src/edges/<name>.rs`.
   `message add` inserts a `#[derive(Clone, Debug)]` struct above
   `// bonsai:message`; `message remove` (refused while wired) takes it with
   its attributes/docs (`without_struct`). toml_edit keeps `bonsai.toml`'s
@@ -189,8 +227,8 @@ Order: `$BONSAI_TEMPLATES` → `./templates` (running from the repo) → the cop
 **embedded in the binary** via `include_dir!` (installed, run from anywhere). The
 embedded copy is extracted to a temp dir for cargo-generate, then deleted.
 The branch scaffold and the runtime are embedded separately with
-`include_str!` so the graph commands work inside a tree where `templates/`
-isn't present.
+`include_str!` (with the serial edge and the custom-edge scaffold) so the
+graph commands work inside a tree where `templates/` isn't present.
 
 ## Invariants to preserve
 
@@ -206,7 +244,8 @@ isn't present.
   found with `is_input_arm` (`Input::M(` / `Input::Tick` then a delimiter).
 - **Determinism.** `process` must stay sync and I/O-free, and the core must
   deliver in `bonsai.toml` order, run-to-completion per event. Anything that
-  talks to the outside world belongs on an edge (PR 3), never in `process`.
+  talks to the outside world belongs on an edge, never in `process`; the core
+  never awaits an edge (`EdgeOut::send` is `try_send`).
 - **The board list** — `BOARDS` in `src/main.rs` (board, chip, description) —
   is the single place the CLI encodes supported hardware. Adding a board means
   editing it **and** adding `templates/linux/<board>/`; `bonsai.toml`,
@@ -255,7 +294,8 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold
   comments are one short line saying what to change and why; placeholders
-  (`let _ = out; // delete once it sends`) say to delete them once used.
+  (`let _ = out; // delete once it sends`, the custom edge's `pending()`) say
+  to delete them once used.
 - Tutorial code and command output are taken from real runs. When you change a
   scaffold, a generated file or any CLI message, update the snippets and
   outputs that quote it, and re-run the affected chapter or guide.

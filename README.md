@@ -19,6 +19,9 @@ structure. You write what each part decides.
   touching the rest.
 - **Wires** say who sends what to whom. They live in `bonsai.toml`, one file
   for the whole graph, and bonsai generates the typed code that carries them.
+- **Edges** are the bridges to the outside world: UDP (with multicast), TCP
+  and serial ports, configured in `bonsai.toml` with no code, or your own.
+  They do the I/O; branches only decide.
 - **The core** runs every branch in one loop, one event at a time, on
   [tokio]. Everything a branch sends is delivered, in order, before the next
   event, so the same inputs always give the same outputs.
@@ -43,8 +46,9 @@ already works. bonsai is built to prevent those:
 - **One file is the graph.** Branches, their settings and rates, and every
   wire are in `bonsai.toml`, edited by commands or by hand. `bonsai list`
   shows it, and flags loops and branches nothing reaches.
-- **A panic isn't the end.** A branch that panics is set up again, and the
-  rest of the tree keeps running.
+- **A panic isn't the end.** A branch that panics is set up again; an edge
+  that fails or panics is restarted with backoff. The rest of the tree keeps
+  running, and the core never waits on an edge.
 - **Small.** tokio with only the features the runtime uses, and no macros to
   compile: the glue is generated source.
 
@@ -59,6 +63,8 @@ bonsai message add Alarm temp_c10:i16
 bonsai wire sensor Reading display
 bonsai wire display Alarm sensor
 bonsai rate sensor 4                     # an Input::Tick four times a second
+bonsai edge add net udp --bind 0.0.0.0:6969 --to 10.0.0.2:6970
+bonsai wire display net                  # display sends readings out: out.to_net(..)
 bonsai list
 ```
 
@@ -68,9 +74,12 @@ branches, in the order the core runs them:
   pulse  (ticks 2/s)
   sensor  (ticks 4/s)
   display
+edges:
+  net  (udp 0.0.0.0:6969 → 10.0.0.2:6970)
 wires:
   sensor --Reading--> display
   display --Alarm--> sensor
+  display --> net
 warning: sensor → display → sensor send to each other in a loop: make at least one of those sends conditional
 ```
 
@@ -119,7 +128,10 @@ bonsai                                          plant a new tree (interactive)
 bonsai init                                     plant it in the current folder
 bonsai branch add|remove <name>                 add or remove a branch
 bonsai message add <Name> [field:type …]        add a message type (remove undoes)
+bonsai edge add <name> udp|tcp|serial [--key value …]   a bridge to the outside (remove undoes)
+bonsai edge add <name> --custom                 an edge of your own, in src/edges/<name>.rs
 bonsai wire <from> <Message> <to> [<to> …]      from sends it to each (unwire undoes)
+bonsai wire <from> <to> [<to> …]                with an edge at one end: no message
 bonsai rate <branch> <hz|off>                   tick a branch this many times a second
 bonsai list                                     branches, wires, warnings
 bonsai sync                                     regenerate the wiring after editing bonsai.toml
@@ -139,11 +151,47 @@ bonsai tools [<tool> …]                         build tools: sccache, mold, zi
 | **trunk** | startup: starts the core | `src/main.rs` |
 | **branch** | a part: its state, and `setup` + `process` | `src/branches/<name>.rs` |
 | **message** | what branches send each other | a struct in `src/messages.rs` |
-| **wire** | `from` sends a message to branches in `to` | a `[[wire]]` in `bonsai.toml` |
+| **edge** | a bridge to the outside: its I/O, restarted on failure | an `[edge.<name>]` in `bonsai.toml` |
+| **wire** | `from` sends a message to branches in `to`, or an edge's packets in or out | a `[[wire]]` in `bonsai.toml` |
 | **rate** | a branch's own clock: `Input::Tick`s per second | `rate` in its `[branch.<name>]` |
 | **settings** | a branch's values, as constants | other keys in `[branch.<name>]` → `src/settings.rs` |
-| **wiring** | the generated `Input`/`Out` types and the core | `src/wiring.rs` (never edit) |
+| **wiring** | the generated `Input`/`Out` types, the edges and the core | `src/wiring.rs` (never edit) |
 | **pulse** | a built-in heartbeat, proof the tree is alive | `src/branches/pulse.rs` |
+
+## Edges
+
+```toml
+[edge.tak]                    # bonsai edge add tak udp --bind … --to … --join …
+kind = "udp"
+bind = "0.0.0.0:6969"
+to = "100.125.26.5:6970"      # where sends go (or `reply = true`: back to the last sender)
+join = ["239.2.3.2"]          # multicast groups
+
+[edge.fc]
+kind = "tcp"
+connect = "127.0.0.1:5760"    # a client that reconnects; `listen = "…"` for a server
+
+[edge.gps]
+kind = "serial"
+device = "/dev/serial0"
+baud = 9600
+framing = "lines"             # a packet per line; "raw" (the default) passes each read on
+```
+
+Built-in edges carry `Packet { bytes, peer }`: `peer` is who sent it, and on
+the way out who gets it (`packet.reply(bytes)` answers the sender). A branch
+wired from an edge gets `Input::Tak(packet)`; one wired to it sends with
+`out.to_tak(packet)`. Decoding (MAVLink, a protobuf) belongs in `process`, so
+it stays testable. For anything else, `bonsai edge add <name> --custom`
+scaffolds an `Edge` with typed `In`/`Out`, `setup`, `recv` and `execute`.
+
+A test can drive the whole core without sockets:
+
+```rust
+let mut core = Core::new();
+core.handle(Event::Edge(EdgeIn::Net(Packet::new("hi"))));
+assert_eq!(core.drain_net(), [Packet::new("HI")]);
+```
 
 ## Status
 
@@ -151,9 +199,8 @@ bonsai 2 lands in steps:
 
 1. ✅ Linux only: Raspberry Pi boards and `host`.
 2. ✅ The deterministic core: branches, messages, wires, rates, settings.
-3. Edges: the bridge to the outside world. Built-in UDP (with multicast), TCP
-   and serial, configured in `bonsai.toml`, plus a trait for your own. Until
-   then a tree can't reach sockets or serial ports.
+3. ✅ Edges: built-in UDP (with multicast), TCP (client and server) and
+   serial, configured in `bonsai.toml`, plus an `Edge` trait for your own.
 4. Logs tagged with the branch that wrote them.
 5. Stats, and `bonsai top`: a live view of a running tree.
 6. The tutorial, rewritten.

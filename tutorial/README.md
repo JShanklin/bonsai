@@ -7,8 +7,8 @@ bonsai.
 > virtual Pi, build tools, CI) and the wire format apply as they are. From
 > chapter 3 on, and in the roots guides, the tutorial still describes bonsai 1
 > (nutrients, the sap, `tap`/`release`, roots). For bonsai 2's model (branches
-> with `setup` and `process`, messages, wires in `bonsai.toml`), see the
-> [README](../README.md) until the rewrite lands.
+> with `setup` and `process`, messages, wires in `bonsai.toml`, and edges,
+> which replace roots), see the [README](../README.md) until the rewrite lands.
 
 ## Foundations: read in order
 

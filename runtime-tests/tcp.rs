@@ -49,6 +49,66 @@ async fn next(inbox: &mut mpsc::Receiver<Event<Packet>>) -> Packet {
     }
 }
 
+/// Read `stream` until `marker` arrives; the receiver gets `()` then. It
+/// gets nothing, and closes, if the stream ends or fails first.
+fn watch_for(
+    mut stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    marker: &'static [u8],
+) -> mpsc::Receiver<()> {
+    let (saw, seen_it) = mpsc::channel(1);
+    tokio::spawn(async move {
+        let mut seen = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => return, // ended first: `saw` drops unsent
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+            }
+            if seen.windows(marker.len()).any(|w| w == marker) {
+                let _ = saw.send(()).await;
+                return;
+            }
+            if seen.len() > 1 << 20 {
+                seen.drain(..seen.len() - marker.len());
+            }
+        }
+    });
+    seen_it
+}
+
+/// Whether `watch_for` saw its marker within `within`, and if not, why.
+async fn wait_for(seen_it: &mut mpsc::Receiver<()>, within: Duration) -> Result<(), &'static str> {
+    match timeout(within, seen_it.recv()).await {
+        Ok(Some(())) => Ok(()),
+        Ok(None) => Err("its connection ended before the marker arrived"),
+        Err(_) => Err("timed out waiting for the marker"),
+    }
+}
+
+#[tokio::test]
+async fn waiting_for_a_marker_fails_unless_it_arrives() {
+    // Delivered.
+    let (mut near, far) = tokio::io::duplex(64);
+    let mut seen = watch_for(far, b"late\n");
+    near.write_all(b"x\nlate\n").await.unwrap();
+    assert_eq!(wait_for(&mut seen, Duration::from_secs(3)).await, Ok(()));
+    // The client disconnects before the marker: a failure, not a pass.
+    let (near, far) = tokio::io::duplex(64);
+    let mut seen = watch_for(far, b"late\n");
+    drop(near);
+    assert_eq!(
+        wait_for(&mut seen, Duration::from_secs(3)).await,
+        Err("its connection ended before the marker arrived")
+    );
+    // Nothing comes at all: a timeout, told apart from the above.
+    let (_near, far) = tokio::io::duplex(64);
+    let mut seen = watch_for(far, b"late\n");
+    assert_eq!(
+        wait_for(&mut seen, Duration::from_millis(200)).await,
+        Err("timed out waiting for the marker")
+    );
+}
+
 #[tokio::test]
 async fn an_endless_line_is_refused_before_it_fills_memory() {
     let (mut near, far) = tokio::io::duplex(64 * 1024);
@@ -166,24 +226,7 @@ async fn a_client_that_stops_reading_holds_up_no_one() {
     let mut healthy = connect(addr).await;
     healthy.write_all(b"healthy\n").await.unwrap();
     next(&mut inbox).await;
-    let (saw_late_tx, mut saw_late) = mpsc::channel::<()>(1);
-    tokio::spawn(async move {
-        let mut seen = Vec::new();
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            match healthy.read(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => seen.extend_from_slice(&buf[..n]),
-            }
-            if seen.windows(5).any(|w| w == b"late\n") {
-                let _ = saw_late_tx.send(()).await;
-                return;
-            }
-            if seen.len() > 1 << 20 {
-                seen.drain(..seen.len() - 8);
-            }
-        }
-    });
+    let mut saw_late = watch_for(healthy, b"late\n");
     // Far more than the slow client's socket buffers hold.
     let big = vec![b'x'; 64 * 1024];
     for _ in 0..400 {
@@ -210,12 +253,9 @@ async fn a_client_that_stops_reading_holds_up_no_one() {
     );
     // ...and the healthy client still gets what's sent.
     out.send(Packet::new(b"late".to_vec()));
-    assert!(
-        timeout(Duration::from_secs(3), saw_late.recv())
-            .await
-            .is_ok(),
-        "a stalled client held up the healthy one"
-    );
+    if let Err(why) = wait_for(&mut saw_late, Duration::from_secs(3)).await {
+        panic!("the healthy client never got \"late\": {why}");
+    }
     // The slow client: once a write to it has waited WRITE_TIMEOUT, it's
     // disconnected and what couldn't reach it is counted.
     tokio::time::sleep(crate::bonsai::WRITE_TIMEOUT + Duration::from_secs(1)).await;

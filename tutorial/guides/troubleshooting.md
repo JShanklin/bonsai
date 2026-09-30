@@ -52,7 +52,8 @@ is fine: bonsai puts it back on its own line.
 | `WARN <edge>: bind 0.0.0.0:6969: Address already in use …; retrying in …` | another program (or another tree) has the port | stop it, or change the edge's port; the edge comes up once it's free |
 | `WARN <edge>: connect …: Connection refused …; retrying in …` | nothing is listening there yet | start the server; the edge connects at its next try |
 | `WARN <edge>: … Permission denied …` (serial) | the user can't open the port | `sudo usermod -aG dialout $USER`, then log in again |
-| `WARN <edge>: isn't keeping up; dropping what's sent to it` | branches send the edge faster than it can go out | send less often, or check the link; `bonsai top` counts the drops |
+| `WARN <edge>: isn't keeping up; dropping what's sent to it (counted in bonsai top)` | branches send the edge faster than it can go out, and its queue of 64 is full | send less often, or check the link; `bonsai top` counts the drops. Said once each time dropping starts |
+| `WARN <edge>: has stopped; dropping what's sent to it (counted in bonsai top)` | the edge's task is gone (the tree is shutting down) | nothing, while stopping |
 | `ERROR <branch>: panicked at …`, then `WARN <branch>: set up again after a panic` | a bug in `process`; the branch was reset | fix it; `RUST_BACKTRACE=1` shows the backtrace |
 | `ERROR bonsai: one event set off over 10000 messages; dropping the … left` | branches send to each other without end | `bonsai list` warns about the loop; make one of its sends conditional |
 | `WARN bonsai: top: can't listen on 127.0.0.1:7777 …` | another tree already serves `bonsai top` there | `BONSAI_TOP=7778` for this one (and `bonsai top --port 7778`) |

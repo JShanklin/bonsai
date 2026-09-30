@@ -1,5 +1,6 @@
 //! Helpers for the runtime tests: child processes, a scratch folder, and a
 //! small tree to run.
+#![allow(dead_code)] // not every test module uses every helper
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

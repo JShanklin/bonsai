@@ -986,6 +986,20 @@ mod tests {
             &dest.join("src/runtime_tests"),
             "",
         )?;
+        // BONSAI_RUNTIME_MODULES=edges,tcp builds only those test modules.
+        if let Ok(only) = std::env::var("BONSAI_RUNTIME_MODULES") {
+            let mod_rs = dest.join("src/runtime_tests/mod.rs");
+            let keep = |line: &str| match line.strip_prefix("mod ") {
+                Some(m) => {
+                    let m = m.trim_end_matches(';');
+                    m == "support" || only.split(',').any(|o| o.trim() == m)
+                }
+                None => true,
+            };
+            let text = std::fs::read_to_string(&mod_rs)?;
+            let kept: Vec<&str> = text.lines().filter(|l| keep(l)).collect();
+            std::fs::write(mod_rs, kept.join("\n") + "\n")?;
+        }
         let main = dest.join("src/main.rs");
         let text = std::fs::read_to_string(&main)?;
         std::fs::write(main, text + "\n#[cfg(test)]\nmod runtime_tests;\n")
@@ -994,7 +1008,8 @@ mod tests {
     /// The runtime (templates/_tree/bonsai.rs, as every tree carries it) is
     /// data to this crate, so its behaviour is tested in a rendered host tree:
     /// `cargo test -- --ignored runtime`. `BONSAI_RUNTIME_TESTS` passes a
-    /// filter through (`BONSAI_RUNTIME_TESTS=tcp`).
+    /// filter through (`BONSAI_RUNTIME_TESTS=tcp`); `BONSAI_RUNTIME_MODULES`
+    /// builds only some test modules (`BONSAI_RUNTIME_MODULES=edges,tcp`).
     #[test]
     #[ignore = "builds a rendered host tree and runs its runtime tests; run with --ignored"]
     fn runtime_regression_tests_pass_in_a_rendered_host_tree() {

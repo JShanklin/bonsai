@@ -152,7 +152,9 @@ click:
    ```
 
 3. **Edges**: `up` or `retrying`, packets in and out a second, what was
-   dropped because the edge fell behind, restarts, and why it last failed.
+   **dropped** because the edge's queue was full, what was **lost** after
+   the edge took it (it failed carrying it out, or couldn't deliver it to a
+   slow client), restarts, and why it last failed.
 4. **Log**: the lines as they come. `↑↓`/`PgUp`/`PgDn` scroll back, `/`
    searches, `l` steps through the levels shown (all, info+, warn+,
    errors), `esc` clears.

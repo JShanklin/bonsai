@@ -565,8 +565,13 @@ impl App {
         }
         if let Some(e) = now.edges.iter().find(|e| e.name == name) {
             let mut s = format!(
-                " {name}: {}, {} in, {} out, {} dropped, {} restarts",
-                e.state, e.received, e.sent, e.dropped, e.restarts
+                " {name}: {}, {} in, {} out, {} dropped, {} lost, {} restarts",
+                e.state,
+                e.received,
+                e.sent,
+                e.dropped,
+                e.lost(),
+                e.restarts
             );
             if !e.error.is_empty() {
                 s += &format!(" (last: {})", e.error);
@@ -636,12 +641,14 @@ impl App {
                 Line::from(format!("{:.1}", per_sec(rx, e.received, ms))).right_aligned(),
                 Line::from(format!("{:.1}", per_sec(tx, e.sent, ms))).right_aligned(),
                 Line::from(e.dropped.to_string()).right_aligned(),
+                Line::from(e.lost().to_string()).right_aligned(),
                 Line::from(e.restarts.to_string()).right_aligned(),
                 Line::from(e.error.clone()),
             ])
         });
         let widths = [
             Constraint::Length(16),
+            Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Length(9),
@@ -655,6 +662,7 @@ impl App {
             "in/s",
             "out/s",
             "dropped",
+            "lost",
             "restarts",
             "last error",
         ];

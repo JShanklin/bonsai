@@ -58,6 +58,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
@@ -1217,13 +1218,21 @@ pub mod stats {
     pub const UP: u8 = 1;
     pub const RETRYING: u8 = 2;
 
-    /// One edge's counts.
+    /// An edge's counts. What branches send it goes through one queue:
+    /// every message is `accepted` into it or `dropped` (the queue was full,
+    /// or the edge had stopped); every accepted one is then `sent` (carried
+    /// out) or `failed` (its `execute` returned an error or panicked), unless
+    /// it's still waiting. `discarded` counts copies an edge took but could
+    /// not deliver (a TCP server's slow or departed client).
     #[derive(Default)]
     pub struct EdgeStats {
         pub state: AtomicU8,
         pub received: AtomicU64,
+        pub accepted: AtomicU64,
         pub sent: AtomicU64,
         pub dropped: AtomicU64,
+        pub failed: AtomicU64,
+        pub discarded: AtomicU64,
         pub restarts: AtomicU64,
         pub error: Mutex<String>,
     }
@@ -1298,8 +1307,9 @@ pub mod stats {
         pub inbox: u64,
         /// name, inputs, sent, panics, busy µs, max µs
         pub branches: Vec<(String, [u64; 5])>,
-        /// name, state, received, sent, dropped, restarts, last error
-        pub edges: Vec<(String, &'static str, [u64; 4], String)>,
+        /// name, state, [received, sent, dropped, restarts, accepted, failed,
+        /// discarded], last error
+        pub edges: Vec<(String, &'static str, [u64; 7], String)>,
         /// from, message (empty for an edge's link), to, deliveries
         pub links: Vec<(&'static str, &'static str, &'static [&'static str], u64)>,
         pub sys: Option<Sys>,
@@ -1413,6 +1423,9 @@ pub mod stats {
                         s.sent.load(Relaxed),
                         s.dropped.load(Relaxed),
                         s.restarts.load(Relaxed),
+                        s.accepted.load(Relaxed),
+                        s.failed.load(Relaxed),
+                        s.discarded.load(Relaxed),
                     ];
                     let error = s.error.lock().map(|e| e.clone()).unwrap_or_default();
                     (name.to_string(), state, n, error)
@@ -1447,15 +1460,20 @@ pub mod stats {
                 n[4]
             );
         }
+        // New counts go after the error, so an older `bonsai top` (which
+        // reads up to it) still understands the row.
         for (name, state, n, error) in &s.edges {
             o += &format!(
-                "edge\t{}\t{state}\t{}\t{}\t{}\t{}\t{}\n",
+                "edge\t{}\t{state}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 clean(name),
                 n[0],
                 n[1],
                 n[2],
                 n[3],
-                clean(error)
+                clean(error),
+                n[4],
+                n[5],
+                n[6]
             );
         }
         for (from, label, to, n) in &s.links {
@@ -1490,7 +1508,12 @@ pub mod stats {
                 max_event_us: 40,
                 inbox: 0,
                 branches: vec![("sensor".into(), [3, 0, 0, 12, 5])],
-                edges: vec![("net".into(), "retrying", [1, 2, 0, 1], "bind\tx".into())],
+                edges: vec![(
+                    "net".into(),
+                    "retrying",
+                    [1, 2, 0, 1, 3, 1, 0],
+                    "bind\tx".into(),
+                )],
                 links: vec![("sensor", "Reading", &["net", "log"], 3)],
                 sys: Some(Sys {
                     rss_kb: 2048,
@@ -1505,7 +1528,7 @@ pub mod stats {
                 render(&s, &["a line".into()]),
                 "bonsai-top 1\t1500\t3\t40\t0\n\
                  branch\tsensor\t3\t0\t0\t12\t5\n\
-                 edge\tnet\tretrying\t1\t2\t0\t1\tbind x\n\
+                 edge\tnet\tretrying\t1\t2\t0\t1\tbind x\t3\t1\t0\n\
                  link\tsensor\tReading\tnet,log\t3\n\
                  sys\t2048\t30\t1\t12\t4000\t3000\n\
                  log\ta line\n\
@@ -1675,15 +1698,24 @@ impl Packet {
     }
 }
 
-/// Where the core puts what branches send to one edge. It never waits: when
-/// the edge falls behind, what it can't take is dropped and counted.
+/// How many messages an edge's queue holds: what branches send it waits
+/// there while the edge is busy or restarting.
+pub const EDGE_QUEUE: usize = 64;
+
+/// Where the core puts what branches send to one edge. It never waits: a
+/// message goes into the edge's queue (`accepted`), or, when the queue is
+/// full (the edge is falling behind) or the edge has stopped, is dropped and
+/// counted (`dropped`), with one warning each time dropping starts.
 pub struct EdgeOut<T> {
     name: &'static str,
     stats: Arc<stats::EdgeStats>,
     tx: Option<mpsc::Sender<T>>,
     /// Sent before the edge started: what tests check.
     offline: Vec<T>,
+    /// Dropped by this `EdgeOut`, all told.
     pub dropped: u64,
+    /// Dropping now: warned already, until a message gets through again.
+    dropping: bool,
 }
 
 impl<T> EdgeOut<T> {
@@ -1694,6 +1726,7 @@ impl<T> EdgeOut<T> {
             tx: None,
             offline: Vec::new(),
             dropped: 0,
+            dropping: false,
         }
     }
 
@@ -1702,23 +1735,28 @@ impl<T> EdgeOut<T> {
     }
 
     pub fn send(&mut self, value: T) {
-        match &self.tx {
-            Some(tx) => {
-                if tx.try_send(value).is_ok() {
-                    self.stats.sent.fetch_add(1, Relaxed);
-                } else {
-                    self.stats.dropped.fetch_add(1, Relaxed);
-                    if self.dropped == 0 {
-                        log::write(
-                            log::Level::Warn,
-                            Some(self.name),
-                            format_args!("isn't keeping up; dropping what's sent to it"),
-                        );
-                    }
-                    self.dropped += 1;
-                }
+        let Some(tx) = &self.tx else {
+            self.offline.push(value);
+            return;
+        };
+        let why = match tx.try_send(value) {
+            Ok(()) => {
+                self.stats.accepted.fetch_add(1, Relaxed);
+                self.dropping = false;
+                return;
             }
-            None => self.offline.push(value),
+            Err(mpsc::error::TrySendError::Full(_)) => "isn't keeping up",
+            Err(mpsc::error::TrySendError::Closed(_)) => "has stopped",
+        };
+        self.stats.dropped.fetch_add(1, Relaxed);
+        self.dropped += 1;
+        if !self.dropping {
+            self.dropping = true;
+            log::write(
+                log::Level::Warn,
+                Some(self.name),
+                format_args!("{why}; dropping what's sent to it (counted in bonsai top)"),
+            );
         }
     }
 
@@ -1742,7 +1780,10 @@ where
     I: Send + 'static,
     F: Future<Output = io::Result<E>> + Send + 'static,
 {
-    let (tx, mut outbound) = mpsc::channel::<E::Out>(64);
+    // One queue for the edge's whole life: each attempt takes it over, so
+    // what waits in it survives a restart, and nothing is lost in between.
+    let (tx, outbound) = mpsc::channel::<E::Out>(EDGE_QUEUE);
+    let outbound = Arc::new(tokio::sync::Mutex::new(outbound));
     let stats = stats::edge(name);
     // Every line an edge logs, from any of its tasks, is tagged with its name.
     tokio::spawn(log::EDGE.scope(name, async move {
@@ -1750,22 +1791,27 @@ where
         loop {
             let started = Instant::now();
             // Each attempt is its own task, so a panic ends only the attempt.
-            // What branches send is forwarded to whichever attempt is running.
-            let (to_attempt, attempt_rx) = mpsc::channel::<E::Out>(64);
-            let mut attempt = tokio::spawn(log::EDGE.scope(
+            let executing = Arc::new(AtomicBool::new(false));
+            let attempt = tokio::spawn(log::EDGE.scope(
                 name,
-                attempt::<E, I, F>(setup(), attempt_rx, events.clone(), wrap, stats.clone()),
+                attempt::<E, I, F>(
+                    setup(),
+                    outbound.clone(),
+                    events.clone(),
+                    wrap,
+                    stats.clone(),
+                    executing.clone(),
+                ),
             ));
-            let why = loop {
-                tokio::select! {
-                    done = &mut attempt => break match done {
-                        Ok(Ok(())) => return, // the core is gone: shutting down
-                        Ok(Err(e)) => e.to_string(),
-                        Err(_) => "panicked".to_string(),
-                    },
-                    Some(out) = outbound.recv() => {
-                        let _ = to_attempt.try_send(out);
+            let why = match attempt.await {
+                Ok(Ok(())) => return, // the core is gone: shutting down
+                Ok(Err(e)) => e.to_string(),
+                Err(_) => {
+                    // A panic in `execute` loses the message it was carrying.
+                    if executing.load(Relaxed) {
+                        stats.failed.fetch_add(1, Relaxed);
                     }
+                    "panicked".to_string()
                 }
             };
             if started.elapsed() > Duration::from_secs(30) {
@@ -1787,10 +1833,11 @@ where
 
 async fn attempt<E, I, F>(
     setup: F,
-    mut outbound: mpsc::Receiver<E::Out>,
+    outbound: Arc<tokio::sync::Mutex<mpsc::Receiver<E::Out>>>,
     events: mpsc::Sender<Event<I>>,
     wrap: fn(E::In) -> I,
     stats: Arc<stats::EdgeStats>,
+    executing: Arc<AtomicBool>,
 ) -> io::Result<()>
 where
     E: Edge,
@@ -1800,6 +1847,8 @@ where
         In(io::Result<In>),
         Out(Out),
     }
+    // Held until this attempt ends (a panic releases it too).
+    let mut outbound = outbound.lock().await;
     let mut edge = setup.await?;
     stats.state.store(stats::UP, Relaxed);
     info!("up");
@@ -1817,7 +1866,18 @@ where
                     return Ok(());
                 }
             }
-            Step::Out(out) => edge.execute(out).await?,
+            Step::Out(out) => {
+                executing.store(true, Relaxed);
+                let done = edge.execute(out).await;
+                executing.store(false, Relaxed);
+                match done {
+                    Ok(()) => stats.sent.fetch_add(1, Relaxed),
+                    Err(e) => {
+                        stats.failed.fetch_add(1, Relaxed);
+                        return Err(e);
+                    }
+                };
+            }
         }
     }
 }

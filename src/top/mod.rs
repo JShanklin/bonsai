@@ -38,6 +38,19 @@ pub struct Edge {
     pub dropped: u64,
     pub restarts: u64,
     pub error: String,
+    /// Taken into the edge's queue (0 from a tree older than this count).
+    pub accepted: u64,
+    /// Taken, but `execute` failed on it.
+    pub failed: u64,
+    /// Taken, but a copy couldn't be delivered (a slow TCP client).
+    pub discarded: u64,
+}
+
+impl Edge {
+    /// Taken into the edge, then never delivered: failed or discarded.
+    pub fn lost(&self) -> u64 {
+        self.failed + self.discarded
+    }
 }
 
 /// A link in bonsai.toml, and how many deliveries it has carried.
@@ -136,6 +149,10 @@ pub fn parse(lines: &[String]) -> io::Result<Snapshot> {
                 dropped: num(f.next())?,
                 restarts: num(f.next())?,
                 error: f.next().unwrap_or_default().to_string(),
+                // Newer trees add these after the error; older ones don't.
+                accepted: f.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                failed: f.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                discarded: f.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             }),
             Some("link" | "wire") => s.links.push(Link {
                 from: f.next().unwrap_or_default().to_string(),
@@ -405,19 +422,20 @@ fn print_once(dest: &Option<String>, port: u16, title: &str) -> io::Result<()> {
     }
     if !b.edges.is_empty() {
         println!(
-            "{:<16} {:>9} {:>9} {:>9} {:>9} {:>7}  last error",
-            "edge", "state", "in/s", "out/s", "dropped", "restarts"
+            "{:<16} {:>9} {:>9} {:>9} {:>9} {:>9} {:>7}  last error",
+            "edge", "state", "in/s", "out/s", "dropped", "lost", "restarts"
         );
         for (i, e) in b.edges.iter().enumerate() {
             let before = a.edges.get(i).filter(|x| x.name == e.name);
             let (rx, tx) = before.map_or((0, 0), |x| (x.received, x.sent));
             println!(
-                "{:<16} {:>9} {:>9.1} {:>9.1} {:>9} {:>7}  {}",
+                "{:<16} {:>9} {:>9.1} {:>9.1} {:>9} {:>9} {:>7}  {}",
                 e.name,
                 e.state,
                 per_sec(rx, e.received, ms),
                 per_sec(tx, e.sent, ms),
                 e.dropped,
+                e.lost(),
                 e.restarts,
                 e.error
             );
@@ -461,10 +479,11 @@ mod tests {
 
     const REPORT: &str = "bonsai-top 1\t1500\t3\t40\t0\n\
          branch\tsensor\t3\t0\t0\t12\t5\n\
-         edge\tnet\tretrying\t1\t2\t0\t1\tbind x\n\
+         edge\tnet\tretrying\t1\t2\t0\t1\tbind x\t3\t1\t0\n\
          log\t14:05:03.123Z  INFO sensor: 26.5 °C\n\
          end\n\
          bonsai-top 1\t2000\t4\t40\t0\n\
+         edge\told\tup\t5\t6\t0\t0\t\n\
          end\n";
 
     #[test]
@@ -488,10 +507,16 @@ mod tests {
         );
         assert_eq!(s.edges[0].state, "retrying");
         assert_eq!(s.edges[0].error, "bind x");
+        assert_eq!(
+            (s.edges[0].accepted, s.edges[0].failed, s.edges[0].discarded),
+            (3, 1, 0)
+        );
         assert_eq!(s.logs, ["14:05:03.123Z  INFO sensor: 26.5 °C"]);
         let s = read_snapshot(&mut r).unwrap().unwrap();
         assert_eq!(s.uptime_ms, 2000);
         assert!(s.branches.is_empty());
+        // A tree from before the queue counts: they read as 0.
+        assert_eq!((s.edges[0].sent, s.edges[0].accepted), (6, 0));
         assert_eq!(read_snapshot(&mut r).unwrap(), None);
     }
 

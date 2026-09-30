@@ -142,8 +142,15 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   bonsai.toml order: per branch inputs/sent/panics/busy/max (`Slot::process`
   times `process`; a panicked input isn't timed; sent comes from `Outbox::count`,
   which the generated `Out` implements, bound on `Branch::Out`), per edge
-  state/received/sent/dropped/restarts/last error (`spawn_edge`, `attempt`,
-  `EdgeOut::send`), and the core's events/slowest/inbox (`run`). `mod top`:
+  state/received/accepted/sent/dropped/failed/discarded/restarts/last error
+  (`EdgeOut::send` counts accepted into the edge's one queue, `EDGE_QUEUE`,
+  or dropped when full or closed, warning once per episode; each attempt
+  locks that queue, so it survives restarts with nothing lost in between;
+  `attempt` counts sent or failed per message, a panic mid-`execute` via its
+  `executing` flag; discarded is a copy an edge took but couldn't deliver),
+  and the core's events/slowest/inbox (`run`). The edge row puts the newer
+  counts after the error, so older `bonsai top`s still read it; top shows
+  failed + discarded as **lost**. `mod top`:
   `run()` serves them on `BONSAI_TOP` (default `127.0.0.1:7777`, a bare port,
   or `off`; a bind failure is one WARN) as `stats::render` text every 500 ms:
   `bonsai-top 1\t…` then `branch`/`edge`/`link`/`sys`/`log` rows

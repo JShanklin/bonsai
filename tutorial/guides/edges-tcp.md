@@ -143,9 +143,11 @@ The hub, the relay and the clients carry on the whole time.
 
 ## Notes
 
-- While an edge is down, what branches send it waits in a queue of 64. If
-  that fills, the rest is dropped and counted (`bonsai top` shows it), so
-  a long outage doesn't grow memory without end.
+- What branches send an edge waits in one queue of 64, kept across
+  restarts: while the edge is down it waits there. If that fills, the rest
+  is dropped and counted (`bonsai top`'s **dropped**), so a long outage
+  doesn't grow memory without end, and the core never waits. A message the
+  edge was carrying out when it failed is counted as **lost**.
 - A client that disconnects from a server edge is simply forgotten; sends
   to it are skipped.
 - For binary protocols, keep `framing = "raw"` and put the parsing in

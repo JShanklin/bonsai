@@ -76,7 +76,7 @@ async fn a_saturated_edge_accounts_for_every_message() {
         last = now;
     }
     let s = stats::edge("rt_saturated");
-    let (accepted, dropped) = (s.sent.load(Relaxed), s.dropped.load(Relaxed));
+    let (accepted, dropped) = (s.accepted.load(Relaxed), s.dropped.load(Relaxed));
     let done = done.load(Relaxed);
     assert_eq!(
         accepted + dropped,
@@ -85,5 +85,73 @@ async fn a_saturated_edge_accounts_for_every_message() {
     );
     // Nothing accepted goes missing: all of it was carried out.
     assert_eq!(done, accepted, "accepted {accepted}, carried out {done}");
+    assert_eq!(s.sent.load(Relaxed), done);
+    assert_eq!(s.failed.load(Relaxed), 0);
     assert!(dropped > 0, "the queue should have filled");
+}
+
+/// An edge that fails on every 7th message and panics on every 11th.
+struct Flaky {
+    n: Arc<AtomicU64>,
+}
+
+impl Edge for Flaky {
+    type In = ();
+    type Out = u32;
+
+    async fn recv(&mut self) -> io::Result<()> {
+        std::future::pending().await
+    }
+
+    async fn execute(&mut self, _: u32) -> io::Result<()> {
+        let n = self.n.fetch_add(1, Relaxed) + 1;
+        if n % 11 == 0 {
+            panic!("flaky edge panics on {n}");
+        }
+        if n % 7 == 0 {
+            return Err(io::Error::other("flaky"));
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_failing_edge_accounts_for_what_it_took_and_keeps_what_waits() {
+    let n = Arc::new(AtomicU64::new(0));
+    let (events, _inbox) = mpsc::channel::<Event<()>>(16);
+    let n2 = n.clone();
+    let tx = spawn_edge::<Flaky, (), _>(
+        "rt_flaky",
+        move || {
+            let n = n2.clone();
+            async move { Ok(Flaky { n }) }
+        },
+        events,
+        |_| (),
+    );
+    let mut out = EdgeOut::new("rt_flaky");
+    out.connect(tx);
+    // 30 messages: fewer than the queue holds, so none is dropped, and the
+    // ones sent while the edge restarts wait for it.
+    for i in 0..30 {
+        out.send(i);
+    }
+    // Every restart backs off (0.1 s, 0.2 s, ...): give it time.
+    let s = stats::edge("rt_flaky");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while s.sent.load(Relaxed) + s.failed.load(Relaxed) < 30 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (accepted, sent, failed) = (
+        s.accepted.load(Relaxed),
+        s.sent.load(Relaxed),
+        s.failed.load(Relaxed),
+    );
+    assert_eq!((accepted, s.dropped.load(Relaxed)), (30, 0));
+    assert_eq!(sent + failed, 30, "sent {sent} + failed {failed}");
+    // Every 7th or 11th execute failed: exactly those are counted.
+    let tried = n.load(Relaxed);
+    let bad = (1..=tried).filter(|k| k % 11 == 0 || k % 7 == 0).count() as u64;
+    assert_eq!(failed, bad, "tried {tried}");
+    assert!(s.restarts.load(Relaxed) >= bad);
 }

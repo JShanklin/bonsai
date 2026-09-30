@@ -904,6 +904,83 @@ pub mod stats {
         pub branches: Vec<(String, [u64; 5])>,
         /// name, state, received, sent, dropped, restarts, last error
         pub edges: Vec<(String, &'static str, [u64; 4], String)>,
+        /// from, message (empty for an edge's wire), to, deliveries
+        pub wires: Vec<(&'static str, &'static str, &'static [&'static str], u64)>,
+        pub sys: Option<Sys>,
+    }
+
+    /// A wire in bonsai.toml: from, message (`""` when an edge is at one
+    /// end), to. The generated core registers them all.
+    pub type WireInfo = (&'static str, &'static str, &'static [&'static str]);
+
+    static WIRES: OnceLock<(&'static [WireInfo], Box<[AtomicU64]>)> = OnceLock::new();
+
+    /// The tree's wires, in bonsai.toml order (the first call wins).
+    pub fn wires(list: &'static [WireInfo]) {
+        WIRES.get_or_init(|| (list, list.iter().map(|_| AtomicU64::new(0)).collect()));
+    }
+
+    /// One delivery down wire `i`.
+    pub fn wire(i: usize) {
+        if let Some(count) = WIRES.get().and_then(|(_, counts)| counts.get(i)) {
+            count.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// The tree's process and its computer, from /proc.
+    #[derive(Debug, Default, PartialEq)]
+    pub struct Sys {
+        pub rss_kb: u64,
+        /// CPU time used, user and system.
+        pub cpu_ms: u64,
+        pub threads: u64,
+        /// The one-minute load average, times 100.
+        pub load: u64,
+        pub mem_total_kb: u64,
+        pub mem_available_kb: u64,
+    }
+
+    /// A `Key:   123 kB` line's number from /proc/*/status or /proc/meminfo.
+    fn field(text: &str, key: &str) -> Option<u64> {
+        let line = text.lines().find(|l| l.starts_with(key))?;
+        line[key.len()..].split_whitespace().next()?.parse().ok()
+    }
+
+    /// From the texts of /proc/self/status, /proc/self/stat, /proc/loadavg
+    /// and /proc/meminfo.
+    pub fn parse_sys(status: &str, stat: &str, loadavg: &str, meminfo: &str) -> Sys {
+        // stat's fields after the command (which may hold spaces) end at ")":
+        // utime and stime are the 12th and 13th, in 1/100 s.
+        let after = stat.rsplit_once(')').map_or("", |(_, rest)| rest);
+        let ticks: u64 = after
+            .split_whitespace()
+            .skip(11)
+            .take(2)
+            .filter_map(|t| t.parse::<u64>().ok())
+            .sum();
+        let load = loadavg
+            .split_whitespace()
+            .next()
+            .and_then(|l| l.parse::<f64>().ok())
+            .map_or(0, |l| (l * 100.0).round() as u64);
+        Sys {
+            rss_kb: field(status, "VmRSS:").unwrap_or(0),
+            cpu_ms: ticks * 10,
+            threads: field(status, "Threads:").unwrap_or(0),
+            load,
+            mem_total_kb: field(meminfo, "MemTotal:").unwrap_or(0),
+            mem_available_kb: field(meminfo, "MemAvailable:").unwrap_or(0),
+        }
+    }
+
+    fn sys() -> Option<Sys> {
+        let read = |p: &str| std::fs::read_to_string(p).ok();
+        Some(parse_sys(
+            &read("/proc/self/status")?,
+            &read("/proc/self/stat")?,
+            &read("/proc/loadavg").unwrap_or_default(),
+            &read("/proc/meminfo").unwrap_or_default(),
+        ))
     }
 
     pub fn snapshot() -> Snapshot {
@@ -945,6 +1022,13 @@ pub mod stats {
                     (name.to_string(), state, n, error)
                 })
                 .collect(),
+            wires: WIRES.get().map_or(Vec::new(), |(list, counts)| {
+                list.iter()
+                    .zip(counts.iter())
+                    .map(|((from, label, to), n)| (*from, *label, *to, n.load(Relaxed)))
+                    .collect()
+            }),
+            sys: sys(),
         }
     }
 
@@ -978,6 +1062,20 @@ pub mod stats {
                 clean(error)
             );
         }
+        for (from, label, to, n) in &s.wires {
+            o += &format!("wire\t{from}\t{label}\t{}\t{n}\n", to.join(","));
+        }
+        if let Some(sys) = &s.sys {
+            o += &format!(
+                "sys\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                sys.rss_kb,
+                sys.cpu_ms,
+                sys.threads,
+                sys.load,
+                sys.mem_total_kb,
+                sys.mem_available_kb
+            );
+        }
         for line in logs {
             o += &format!("log\t{}\n", clean(line));
         }
@@ -997,14 +1095,48 @@ pub mod stats {
                 inbox: 0,
                 branches: vec![("sensor".into(), [3, 0, 0, 12, 5])],
                 edges: vec![("net".into(), "retrying", [1, 2, 0, 1], "bind\tx".into())],
+                wires: vec![("sensor", "Reading", &["net", "log"], 3)],
+                sys: Some(Sys {
+                    rss_kb: 2048,
+                    cpu_ms: 30,
+                    threads: 1,
+                    load: 12,
+                    mem_total_kb: 4000,
+                    mem_available_kb: 3000,
+                }),
             };
             assert_eq!(
                 render(&s, &["a line".into()]),
                 "bonsai-top 1\t1500\t3\t40\t0\n\
                  branch\tsensor\t3\t0\t0\t12\t5\n\
                  edge\tnet\tretrying\t1\t2\t0\t1\tbind x\n\
+                 wire\tsensor\tReading\tnet,log\t3\n\
+                 sys\t2048\t30\t1\t12\t4000\t3000\n\
                  log\ta line\n\
                  end\n"
+            );
+        }
+
+        #[test]
+        fn proc_files_give_the_process_and_the_computer() {
+            let status = "Name:\tgreenhouse\nVmRSS:\t    2048 kB\nThreads:\t2\n";
+            let stat = "42 (green house) S 1 42 42 0 -1 4194560 100 0 0 0 7 3 0 0 20 0 2 0";
+            let sys = parse_sys(
+                status,
+                stat,
+                "0.12 0.10 0.05 1/100 42\n",
+                "MemTotal: 4000 kB\nMemAvailable: 3000 kB\n",
+            );
+            assert_eq!(
+                sys,
+                Sys {
+                    rss_kb: 2048,
+                    cpu_ms: 100,
+                    threads: 2,
+                    load: 12,
+                    mem_total_kb: 4000,
+                    mem_available_kb: 3000
+                }
             );
         }
 

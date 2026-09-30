@@ -59,5 +59,6 @@ is fine: bonsai puts it back on its own line.
 |---------|--------------|-----|
 | a branch never runs | nothing is wired to it and it has no `rate` | `bonsai list` warns about it |
 | the tree stops responding | something in a branch or an edge blocks: a busy loop, `std::thread::sleep`, blocking I/O | branches must not wait; move the waiting into an edge, and in an edge use async I/O or `tokio::task::spawn_blocking` |
+| `bonsai top`'s graph has no arrows, and System says the tree doesn't report | the tree was grown before those | `bonsai sync` in it, and rebuild |
 | `bonsai top` shows `waiting` climbing | the core can't keep up | its `max µs` column shows which branch is slow |
 | nothing arrives over multicast | the network drops it (common on Wi-Fi) | see [UDP: multicast on a Pi](edges-udp.md#multicast-on-a-pi) |

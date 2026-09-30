@@ -934,6 +934,19 @@ pub mod {name} {{
         o.push_str(&configs);
     }
 
+    o.push_str(
+        "\n/// The wires, in bonsai.toml order (from, message, to): for `bonsai top`.\nconst WIRES: &[crate::bonsai::stats::WireInfo] = &[\n",
+    );
+    for w in &cfg.wires {
+        let to: Vec<String> = w.to.iter().map(|t| format!("\"{t}\"")).collect();
+        o.push_str(&format!(
+            "    (\"{}\", \"{}\", &[{}]),\n",
+            w.from,
+            w.message.as_deref().unwrap_or(""),
+            to.join(", ")
+        ));
+    }
+    o.push_str("];\n");
     o.push_str("\n/// Every branch and edge, set up and waiting for events.\npub struct Core {\n");
     for b in &cfg.branches {
         o.push_str(&format!(
@@ -947,7 +960,7 @@ pub mod {name} {{
         o.push_str(&format!("    {}: EdgeOut<{}>,\n", e.name, edge_types(e).1));
     }
     o.push_str(
-        "    queue: VecDeque<Msg>,\n}\n\nimpl Core {\n    pub fn new() -> Self {\n        Core {\n",
+        "    queue: VecDeque<Msg>,\n}\n\nimpl Core {\n    pub fn new() -> Self {\n        crate::bonsai::stats::wires(WIRES);\n        Core {\n",
     );
     for b in &cfg.branches {
         o.push_str(&format!(
@@ -983,11 +996,11 @@ pub mod {name} {{
         match message {
 ",
     );
-    for w in &cfg.wires {
+    for (i, w) in cfg.wires.iter().enumerate() {
         match &w.message {
             Some(m) => {
                 o.push_str(&format!(
-                    "            Msg::{}(message) => {{\n",
+                    "            Msg::{}(message) => {{\n                crate::bonsai::stats::wire({i});\n",
                     msg_variant(&w.from, m)
                 ));
                 deliveries(&mut o, &w.to, m, "message");
@@ -996,7 +1009,7 @@ pub mod {name} {{
             None if cfg.is_branch(&w.from) => {
                 for to in &w.to {
                     o.push_str(&format!(
-                        "            Msg::{}(value) => self.{to}.send(value),\n",
+                        "            Msg::{}(value) => {{\n                crate::bonsai::stats::wire({i});\n                self.{to}.send(value);\n            }}\n",
                         edge_msg_variant(&w.from, to)
                     ));
                 }
@@ -1091,6 +1104,13 @@ impl Tree for Core {
             o.push_str(&format!(
                 "            Event::Edge(EdgeIn::{c}(value)) => {{\n"
             ));
+            for (i, w) in cfg.wires.iter().enumerate() {
+                if w.from == e.name {
+                    o.push_str(&format!(
+                        "                crate::bonsai::stats::wire({i});\n"
+                    ));
+                }
+            }
             deliveries(&mut o, &to, &c, "value");
             o.push_str("            }\n");
         }
@@ -1625,15 +1645,23 @@ to = ["b"]
             w.contains("        /// From the tak edge.\n        Tak(crate::bonsai::Packet),"),
             "{w}"
         );
+        assert!(w.contains("            Event::Edge(EdgeIn::Fc(value)) => {\n                crate::bonsai::stats::wire("), "{w}");
         assert!(w.contains(
-            "            Event::Edge(EdgeIn::Fc(value)) => {\n                queue.extend(self.gcs.process(gcs::Input::Fc(value.clone())).sent);\n                queue.extend(self.atak.process(atak::Input::Fc(value)).sent);\n"
+            "                queue.extend(self.gcs.process(gcs::Input::Fc(value.clone())).sent);\n                queue.extend(self.atak.process(atak::Input::Fc(value)).sent);\n"
         ), "{w}");
+        // bonsai top draws the wires and counts what goes down each.
+        assert!(
+            w.contains("const WIRES: &[crate::bonsai::stats::WireInfo] = &[\n"),
+            "{w}"
+        );
+        assert!(w.contains("crate::bonsai::stats::wires(WIRES);"), "{w}");
         // ...and send to edges with out.to_<edge>, one Msg variant per edge.
         assert!(w.contains("pub fn to_tak(&mut self, value: crate::bonsai::Packet) {\n            self.sent.push(Msg::AtakToTak(value));"), "{w}");
         assert!(
-            w.contains("Msg::AtakToFc(value) => self.fc.send(value),"),
+            w.contains("Msg::AtakToFc(value) => {\n                crate::bonsai::stats::wire("),
             "{w}"
         );
+        assert!(w.contains("                self.fc.send(value);\n"), "{w}");
         assert!(w.contains("pub fn to_radio(&mut self, value: <crate::edges::radio::Radio as crate::bonsai::Edge>::Out)"), "{w}");
         // Tests can see what the core sent an edge.
         assert!(

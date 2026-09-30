@@ -45,7 +45,7 @@ cargo run -- sync           # regenerate src/{bonsai,wiring,settings}.rs, branch
 cargo run -- list           # branches, wires, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
 cargo run -- top [user@host|local] [--port N] [--once]   # watch a running tree
-cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs, top.rs)
+cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs, top/)
 cargo test marker_matches_whole_line_not_substring   # run a single test by name
 cargo install --path .      # put `bonsai` on PATH (embeds templates/ into the binary)
 ```
@@ -60,7 +60,7 @@ edit templates and generate without rebuilding.
 The CLI is `src/main.rs` (the wizard, TUIs, `tools`/`regrow`/`retarget`/
 `update`, shared text helpers, tests), `src/tree.rs` (the commands that grow a
 tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
-`src/tools.rs` and `src/top.rs`. Entry points are dispatched in `main()`:
+`src/tools.rs` and `src/top/`. Entry points are dispatched in `main()`:
 
 - **Wizard** (`create_device` / `Wizard` / `run_wizard`): a ratatui TUI that
   walks `Board → Tools → Where → project name` (`BOARD_STEP`…`NAME_STEP`), then
@@ -136,7 +136,13 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `EdgeOut::send`), and the core's events/slowest/inbox (`run`). `mod top`:
   `run()` serves them on `BONSAI_TOP` (default `127.0.0.1:7777`, a bare port,
   or `off`; a bind failure is one WARN) as `stats::render` text every 500 ms:
-  `bonsai-top 1\t…` then `branch`/`edge`/`log` rows (tab-separated) and `end`;
+  `bonsai-top 1\t…` then `branch`/`edge`/`wire`/`sys`/`log` rows
+  (tab-separated) and `end`. Wires: the generated `Core::new` registers a
+  `WIRES` table (from, message or `""`, to…; `stats::wires`, first call
+  wins) and `deliver`/`handle` bump `stats::wire(i)` per message wire,
+  edge→branch event and branch→edge send (lock-free counters in a
+  `OnceLock`). `sys`: `parse_sys` over /proc/self/status, /proc/self/stat,
+  /proc/loadavg and /proc/meminfo, read only while a client is connected;
   new log lines come from `log::since(n)` (the ring counts every line).
   Observation only: it never changes what a branch sends.
   Units (`mod units`): `f32` newtypes made by `macro_rules! unit` (same-unit
@@ -221,18 +227,32 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `codegen-units = 1`, `strip`, `opt-level = "s"`; `3` on pi5 and host), and
   in tokio's trimmed features (`rt`, `macros`, `time`, `sync`, `signal`).
   No proc macros: the glue is generated source.
-- **`bonsai top`** (`src/top.rs`): reads a tree's top server. Where
+- **`bonsai top`** (`src/top/`: `mod.rs` the data, connecting and
+  `--once`; `view.rs` the tabs; `graph.rs` the layout): reads a tree's top
+  server. Where
   (`destination`): an arg (`local` = this computer), else `$BONSAI_PI`, else
   a Pi-targeting tree's `[env] BONSAI_PI` (`parse_target`/`parse_scoped_key`),
   else 127.0.0.1. Remote goes through `ssh -o BatchMode=yes -W
   127.0.0.1:<port> <host>` (stdio forwarding: nothing on the Pi but sshd;
   ssh's last stderr line becomes the error). A reader thread parses snapshots
   (`read_snapshot`/`parse`, pure; version in the first field, unknown row
-  kinds skipped) and reconnects every second; the ratatui view shows the core,
-  branches and edges tables (rates from counter deltas over the tree's
-  uptime, `per_sec`, across a `WINDOW_MS` (2 s) history of snapshots, so a
-  1 Hz branch doesn't flicker) and the log tail, filterable by source
-  (`source`). `--once` prints tables from snapshots 2 s apart. The format must match
+  kinds skipped) and reconnects every second. The view (`view::App`) is a
+  header (the core) over five tabs, switched by `1`-`5`, Tab/Shift-Tab or a
+  click (mouse capture on while it runs; `Hits` records where the last frame
+  put tabs and nodes): Graph, Branches, Edges, Log (scroll, `/` search, `l`
+  level, source filter from `enter` on a node) and System (gauges from the
+  `sys` row). Rates are counter deltas over the tree's uptime (`per_sec`)
+  across a `WINDOW_MS` (2 s) history of snapshots, so a 1 Hz branch doesn't
+  flicker. The graph: `graph::links`/`back_links` (a DFS from the edges
+  that feed the tree, then unfed nodes) /`columns` (longest path over
+  forward links; receive-only edges at least as far right as the last
+  branch) place boxes (square branches, round edges, coloured by state: red
+  for a panic in the last 10 s or a retrying edge); a `Canvas` joins line
+  segments into box-drawing junctions; next-column links run through the
+  gap, longer ones over lanes above the boxes, back links along lanes
+  below. A tree without `wire`/`sys` rows (older runtime) shows nodes
+  without arrows and a hint to `bonsai sync`. `--once` prints tables (and
+  the wires) from snapshots 2 s apart. The format must match
   `templates/_tree/bonsai.rs`'s `stats::render` (both sides are unit-tested
   against the same text).
 - **`regrow`** (`regrow`): wipes the cwd back to a fresh template (destructive,

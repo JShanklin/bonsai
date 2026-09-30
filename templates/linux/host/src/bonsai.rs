@@ -2120,17 +2120,31 @@ impl Tcp {
 /// sent. Broadcasts skip it meanwhile; then it's closed.
 pub const LINGER: Duration = Duration::from_secs(2);
 
-/// What a client's reader tells its server.
+/// What a TCP server holds for each client while its writer catches up:
+/// past this, what's sent to that client is discarded (and counted).
+pub const CLIENT_QUEUE: usize = 64;
+
+/// How long one write to a TCP server's client may take. A client that
+/// stops reading holds it up until then; then it's disconnected (what was
+/// half-written is never re-sent on the same connection) and what's queued
+/// for it is discarded.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What a client's tasks tell its server.
 enum FromClient {
     Packet(Packet),
-    /// It won't read from this client again.
+    /// Its reader won't read from this client again.
     ReadEnded(SocketAddr),
+    /// Its writer gave up: close it now.
+    WriteFailed(SocketAddr),
 }
 
-/// One connected client.
+/// One connected client: a reader task, and a writer task with its own
+/// bounded queue, so no client waits on another.
 struct Client {
-    write: OwnedWriteHalf,
+    queue: mpsc::Sender<Arc<[u8]>>,
     reader: tokio::task::AbortHandle,
+    writer: tokio::task::AbortHandle,
     /// When its reader ended: closed once `LINGER` has passed.
     read_ended: Option<Instant>,
 }
@@ -2146,9 +2160,12 @@ pub struct Server {
     max_frame: usize,
     max_clients: usize,
     clients: HashMap<SocketAddr, Client>,
+    /// Writers of closed clients, still sending what was queued for them.
+    closing: Vec<tokio::task::AbortHandle>,
     from_clients: (mpsc::Sender<FromClient>, mpsc::Receiver<FromClient>),
     /// Turning connections away now: warned already.
     full: bool,
+    stats: Arc<stats::EdgeStats>,
 }
 
 impl Server {
@@ -2159,8 +2176,10 @@ impl Server {
             max_frame: cfg.max_frame,
             max_clients: cfg.max_clients,
             clients: HashMap::new(),
+            closing: Vec::new(),
             from_clients: mpsc::channel(1024),
             full: false,
+            stats: stats::edge(log::source()),
         }
     }
 
@@ -2184,6 +2203,7 @@ impl Server {
                             client.read_ended = Some(Instant::now());
                         }
                     }
+                    FromClient::WriteFailed(peer) => self.drop_client(peer),
                 },
                 _ = tokio::time::sleep_until(next_close.unwrap_or_else(Instant::now).into()),
                     if next_close.is_some() => self.close_lingering(),
@@ -2203,7 +2223,7 @@ impl Server {
                 .min()
                 .map(|(_, p)| p)
         {
-            self.clients.remove(&oldest);
+            self.close(oldest);
         }
         if self.clients.len() >= self.max_clients {
             drop(stream); // closed: the client sees its connection end
@@ -2221,6 +2241,11 @@ impl Server {
         let to_server = self.from_clients.0.clone();
         let mut framed = Framed::with_limit(ReadOnly(read), self.framing, self.max_frame);
         let edge = log::source();
+        let (queue, pending) = mpsc::channel(CLIENT_QUEUE);
+        let writer = tokio::spawn(log::EDGE.scope(
+            edge,
+            write_to(peer, write, pending, to_server.clone(), self.stats.clone()),
+        ));
         let reader = tokio::spawn(log::EDGE.scope(edge, async move {
             loop {
                 match framed.recv().await {
@@ -2246,26 +2271,58 @@ impl Server {
         self.clients.insert(
             peer,
             Client {
-                write,
+                queue,
                 reader: reader.abort_handle(),
+                writer: writer.abort_handle(),
                 read_ended: None,
             },
         );
     }
 
+    /// Close a client gracefully: its reader stops, and its writer sends
+    /// what's queued for it (each write under `WRITE_TIMEOUT`), then closes
+    /// the connection.
+    fn close(&mut self, peer: SocketAddr) {
+        if let Some(client) = self.clients.remove(&peer) {
+            client.reader.abort();
+            self.closing.retain(|w| !w.is_finished());
+            self.closing.push(client.writer);
+            // Dropping `client.queue` tells the writer nothing more is coming.
+        }
+    }
+
+    /// Close a client now: its writer has already given up.
+    fn drop_client(&mut self, peer: SocketAddr) {
+        if let Some(client) = self.clients.remove(&peer) {
+            client.reader.abort();
+            client.writer.abort();
+        }
+    }
+
     /// Close the clients whose `LINGER` is over.
     fn close_lingering(&mut self) {
         let now = Instant::now();
-        self.clients
-            .retain(|_, c| c.read_ended.is_none_or(|t| now < t + LINGER));
+        let over: Vec<SocketAddr> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.read_ended.is_some_and(|t| now >= t + LINGER))
+            .map(|(p, _)| *p)
+            .collect();
+        for peer in over {
+            self.close(peer);
+        }
     }
 
+    /// Queue `out` for its peer, or every client, without waiting on any:
+    /// a client whose queue is full (it isn't reading) misses this one, and
+    /// the copy is counted as discarded.
     async fn execute(&mut self, out: Packet) -> io::Result<()> {
         self.close_lingering();
         let mut bytes = out.bytes;
         if self.framing == Framing::Lines && bytes.last() != Some(&b'\n') {
             bytes.push(b'\n');
         }
+        let bytes: Arc<[u8]> = bytes.into();
         // A reply goes to its peer, even one that has stopped sending; a
         // broadcast only to clients still sending.
         let peers: Vec<SocketAddr> = match out.peer {
@@ -2278,12 +2335,11 @@ impl Server {
                 .collect(),
         };
         for peer in peers {
-            let gone = match self.clients.get_mut(&peer) {
-                Some(client) => client.write.write_all(&bytes).await.is_err(),
-                None => false,
+            let Some(client) = self.clients.get(&peer) else {
+                continue; // gone already: nothing to deliver to
             };
-            if gone && let Some(client) = self.clients.remove(&peer) {
-                client.reader.abort();
+            if client.queue.try_send(bytes.clone()).is_err() {
+                self.stats.discarded.fetch_add(1, Relaxed);
             }
         }
         Ok(())
@@ -2294,8 +2350,44 @@ impl Drop for Server {
     fn drop(&mut self) {
         for client in self.clients.values() {
             client.reader.abort();
+            client.writer.abort();
+        }
+        for writer in &self.closing {
+            writer.abort();
         }
     }
+}
+
+/// A server client's writer: what's queued for it, one write at a time,
+/// each within `WRITE_TIMEOUT`. When one fails or times out it gives up:
+/// the connection is closed (a half-written frame is never re-sent), what's
+/// left is discarded and counted, and the server is told. When the server
+/// closes the queue, it sends what's left and shuts the connection down.
+async fn write_to(
+    peer: SocketAddr,
+    mut write: OwnedWriteHalf,
+    mut queue: mpsc::Receiver<Arc<[u8]>>,
+    to_server: mpsc::Sender<FromClient>,
+    stats: Arc<stats::EdgeStats>,
+) {
+    while let Some(bytes) = queue.recv().await {
+        let why = match tokio::time::timeout(WRITE_TIMEOUT, write.write_all(&bytes)).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(e)) => e.to_string(),
+            Err(_) => format!("not reading: a write took over {WRITE_TIMEOUT:?}"),
+        };
+        queue.close();
+        let mut lost = 1; // the one being written
+        while queue.try_recv().is_ok() {
+            lost += 1;
+        }
+        stats.discarded.fetch_add(lost, Relaxed);
+        warn!("{peer}: {why}; disconnecting it ({lost} discarded)");
+        drop(write); // closed now: nothing more on this connection
+        let _ = to_server.send(FromClient::WriteFailed(peer)).await;
+        return;
+    }
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, write.shutdown()).await;
 }
 
 /// The read half of a TCP stream, usable where `Framed` wants both halves

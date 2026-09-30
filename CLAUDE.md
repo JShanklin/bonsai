@@ -215,9 +215,10 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   ssh's last stderr line becomes the error). A reader thread parses snapshots
   (`read_snapshot`/`parse`, pure; version in the first field, unknown row
   kinds skipped) and reconnects every second; the ratatui view shows the core,
-  branches and edges tables (rates from counter deltas over the snapshots'
-  uptime, `per_sec`) and the log tail, filterable by source (`source`).
-  `--once` prints two snapshots' worth as plain tables. The format must match
+  branches and edges tables (rates from counter deltas over the tree's
+  uptime, `per_sec`, across a `WINDOW_MS` (2 s) history of snapshots, so a
+  1 Hz branch doesn't flicker) and the log tail, filterable by source
+  (`source`). `--once` prints tables from snapshots 2 s apart. The format must match
   `templates/_tree/bonsai.rs`'s `stats::render` (both sides are unit-tested
   against the same text).
 - **`regrow`** (`regrow`): wipes the cwd back to a fresh template (destructive,

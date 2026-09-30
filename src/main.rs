@@ -961,7 +961,9 @@ mod tests {
     fn generated_files_are_rustfmt_clean() {
         use std::io::Write;
         let fmt = |src: &str| -> Option<String> {
+            // Its own directory: another test moves the process's cwd around.
             let mut child = Command::new("rustfmt")
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
                 .args(["--edition", "2024", "--emit", "stdout"])
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())

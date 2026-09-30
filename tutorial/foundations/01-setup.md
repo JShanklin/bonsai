@@ -60,10 +60,10 @@ you completions, inline errors and go-to-definition:
 
 ## Hardware (later)
 
-Chapters 1–6 need no hardware. For the hardware guides:
+The foundations (chapters 1–8) need no hardware. For the Pi guides:
 
 | board | good for | extra setup |
 |-------|----------|-------------|
-| Raspberry Pi Zero W / Zero 2 W / Pi 5 | Linux: networking, files, USB devices | a linker for the Pi (zig, via `bonsai tools`); see the [deploy guide](../guides/deploy.md) |
+| Raspberry Pi Zero W / Zero 2 W / Pi 5 | a small Linux computer: networking, serial ports, USB devices | a linker for the Pi (zig, via `bonsai tools`); see the [deploy guide](../guides/deploy.md) |
 
 Next: [Rust essentials](02-rust-essentials.md).

@@ -22,8 +22,8 @@ old commands at their replacements.
 bonsai 2 lands as a series of PRs: 1 Linux only, 2 the deterministic core,
 3 edges (built-in UDP/TCP/serial bridges to the outside, in `bonsai.toml`,
 plus an `Edge` trait), 4 logs tagged by the branch or edge that wrote them,
-5 stats and `bonsai top` (a live TUI, over ssh for a Pi) — all done — then
-6 the tutorial rewrite.
+5 stats and `bonsai top` (a live TUI, over ssh for a Pi), 6 the tutorial
+rewrite — all done.
 
 ## Commands
 
@@ -95,8 +95,8 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   those plus `src/bonsai.rs` (`tree::RUNTIME`, from
   `templates/_tree/bonsai.rs`), only when changed; while the tree has a serial
   edge it also writes `src/edges/serial.rs` (`templates/_tree/serial.rs`) and
-  adds `tokio-serial` (default features off: no libudev, cross-builds for the
-  Zero W) with `with_dependency`, and removes both with the last one
+  adds `tokio-serial` (its defaults pull in no libudev, so it cross-builds
+  for the Zero W) with `with_dependency`, and removes both with the last one
   (`without_dependency`). Every graph command ends with it.
 - **The runtime** (`templates/_tree/bonsai.rs`, a tree's `src/bonsai.rs`):
   `trait Branch { type Input; type Out: Default; fn setup() -> Self; fn
@@ -334,14 +334,14 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
 
 ## Docs
 
-- `README.md` explains what bonsai is. How-to material lives in `tutorial/`,
-  which still describes bonsai 1 from chapter 3 on (flagged at its top) until
-  PR 6 rewrites it:
-  `foundations/` (read in order; builds the running **greenhouse** project on
-  the rpi zero-2w template, so it runs on a PC) and `guides/` (short
-  self-contained recipes: roots over UDP/TCP/serial/MAVLink, wire format,
-  testing, deploy, a virtual Pi (arm64 Podman container, qemu, macvlan/ipvlan), CI,
-  troubleshooting).
+- `README.md` explains what bonsai is. How-to material lives in `tutorial/`:
+  `foundations/` (8 chapters, read in order; builds the running
+  **greenhouse** project on the zero-2w template, run with `cargo local` so
+  it runs on a PC: sensor → watchdog → display, a `limit_c10` setting, a UDP
+  `uplink` edge with a text protocol, tests, logs and `bonsai top`) and
+  `guides/` (short self-contained recipes: edges over UDP/TCP/serial/MAVLink
+  and custom edges, wire format, testing, deploy, build tools, a virtual Pi
+  (arm64 Podman container, qemu, macvlan/ipvlan), CI, troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold
   comments are one short line saying what to change and why; placeholders

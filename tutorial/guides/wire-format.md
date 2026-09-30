@@ -1,46 +1,35 @@
 # Wire format
 
-Turn messages into compact bytes and back, with no hand-written parsing.
+Turn what crosses the network into compact bytes and back, with no
+hand-written parsing.
 
+**Needs:** [chapter 7](../foundations/07-edges.md).
 **Crates:** [serde](https://serde.rs) (describe the messages) +
-[postcard](https://docs.rs/postcard) (a compact binary format built for
-embedded) + COBS framing (built into postcard: each frame ends in a `0` byte
-and contains no other).
+[postcard](https://docs.rs/postcard) (a compact binary format, also used on
+microcontrollers), with COBS framing for byte streams (built into postcard:
+each frame ends in a `0` byte and contains no other).
 
-Why this combination: a `Reading` is 5 bytes on the wire, the same format
-works on a microcontroller at the other end of a serial link, and a corrupted
-frame is simply skipped. The next frame
-starts after the next `0`.
+Why this combination: an `Alarm` is 3 bytes on the wire, the same format
+works on a microcontroller at the other end of a serial link, and a
+corrupted frame on a stream is simply skipped: the next one starts after
+the next `0`.
 
-## `Wire` vs `Nutrient`
+## Messages vs the wire
 
-They look alike but do different jobs. The root branch translates between
-them: an incoming `Wire::Setpoint` becomes a `Nutrient::Setpoint`, and a
-tapped `Nutrient::Reading` goes out as a `Wire::Reading`.
+Chapter 7's greenhouse speaks text (`limit 280`). Here it speaks postcard
+instead, and the decoding still happens in the watchdog's `process`, where
+tests can reach it. Keep a separate `Wire` type for it rather than sending
+your messages as they are:
 
-| | `Nutrient` (`src/trunk.rs`) | `Wire` (`src/wire.rs`) |
+| | messages (`src/messages.rs`) | `Wire` (`src/wire.rs`) |
 |---|---|---|
-| between | branches in one program | your program and the peer |
-| travels as | Rust values in memory | postcard bytes on a link |
-| can hold | anything: `Box`, handles, driver types | only data that serializes |
-| changing it | free: bonsai rewires, everything recompiles | both sides must agree |
-| contains | everything, including internal messages like `Beat` | only what the peer should see |
+| between | branches in one tree | your tree and the other end |
+| travels as | Rust values in memory | postcard bytes on an edge |
+| changing it | free: bonsai rewires, everything recompiles | both ends must agree |
+| contains | everything, including messages only branches use | only what the other end should see |
 
-**Why not derive `Serialize` on `Nutrient` and send that?** You can, but
-then your internal message list *is* your protocol:
-
-- postcard numbers variants by position. `bonsai starve` on a variant in the
-  middle renumbers the rest, and an older peer silently reads one message as
-  another.
-- Internal messages (`Beat`, branch-to-branch coordination) leak into the
-  protocol. `Nutrient` also can't hold anything that doesn't serialize.
-- The peer has to compile your whole `Nutrient` enum, instead of one small
-  shared file.
-
-Keep `Wire` separate whenever the other end isn't rebuilt and deployed with
-the tree, which in the field is almost always. Serializing `Nutrient` directly
-is fine for a quick prototype where both ends always come from the same
-commit.
+The other end is rarely rebuilt from the same commit as the tree, so the
+protocol deserves its own small file you can share with it.
 
 ## Add the crates
 
@@ -51,43 +40,124 @@ cargo add postcard --no-default-features --features use-std
 
 ## `src/wire.rs`
 
-List everything that crosses the wire in one enum, and share this file with
-the program on the other end:
+List everything that crosses the wire in one enum, and add `mod wire;`
+after `mod messages;` in `src/main.rs`:
 
 ```rust
+//! What crosses the network, as bytes. Share this file with the program at
+//! the other end.
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Wire {
-    Reading { temp_c10: i16, humidity: u8 },
     Alarm { temp_c10: i16 },
-    Setpoint { temp_c10: i16 },
+    Limit { temp_c10: i16 },
+    LimitSet { temp_c10: i16 },
 }
 
-/// One message → one frame (ends in a 0 byte).
-pub fn encode(msg: &Wire) -> Vec<u8> {
-    postcard::to_stdvec_cobs(msg).expect("a Wire always serializes")
+/// One message → one datagram.
+pub fn encode(message: &Wire) -> Vec<u8> {
+    // Only fails for types serde can't describe; a Wire always encodes.
+    postcard::to_stdvec(message).unwrap_or_default()
 }
 
-/// One frame (including its 0 byte) → one message; None if it's corrupt.
-pub fn decode(frame: &mut [u8]) -> Option<Wire> {
-    postcard::from_bytes_cobs(frame).ok()
+/// One datagram → one message; None if it isn't one.
+pub fn decode(bytes: &[u8]) -> Option<Wire> {
+    postcard::from_bytes(bytes).ok()
 }
 ```
 
-Add `mod wire;` next to `mod trunk;` in `src/main.rs`.
+`#[derive(Serialize, Deserialize)]` is what lets serde turn a `Wire` into
+postcard bytes and back.
 
-A program without `Vec` (a microcontroller on the other end) encodes into a
-buffer instead:
+## Use it in a branch
+
+Over UDP, one datagram is one message. The watchdog's arms become (with
+`use crate::wire::{self, Wire};` at the top):
 
 ```rust
-let mut buf = [0u8; 32];
-let frame: &mut [u8] = postcard::to_slice_cobs(&msg, &mut buf)?;
+Input::Reading(reading) => {
+    if reading.temp_c10 > self.limit_c10 {
+        out.send(Alarm {
+            temp_c10: reading.temp_c10,
+        });
+        let alarm = Wire::Alarm {
+            temp_c10: reading.temp_c10,
+        };
+        out.to_uplink(Packet::new(wire::encode(&alarm)));
+    }
+}
+Input::Uplink(packet) => match wire::decode(&packet.bytes) {
+    Some(Wire::Limit { temp_c10 }) => {
+        self.limit_c10 = temp_c10;
+        info!("limit is now {temp_c10}");
+        let answer = Wire::LimitSet { temp_c10 };
+        out.to_uplink(packet.reply(wire::encode(&answer)));
+    }
+    other => warn!("didn't expect {other:?}"),
+},
 ```
+
+`Wire::Limit { temp_c10: 280 }` is 3 bytes: the variant's number (1), then
+280, stored small (`b0 04`). Send those, and the answer is `LimitSet` (2):
+
+```sh
+printf '\x01\xb0\x04' | socat - UDP:127.0.0.1:6969 | od -An -tx1
+```
+
+```
+ 02 b0 04
+```
+
+```
+11:03:13.753Z  INFO watchdog: limit is now 280
+```
+
+## Byte streams: TCP and serial
+
+A stream has no datagrams: one read can hold half a message, or two. Frame
+each message with COBS (it then ends in a `0`), and keep what's been read
+until a frame is whole. Add to `src/wire.rs`:
+
+```rust
+/// One message → one frame for a byte stream (TCP, serial): it ends in a 0
+/// byte, and holds no other.
+pub fn encode_frame(message: &Wire) -> Vec<u8> {
+    postcard::to_stdvec_cobs(message).unwrap_or_default()
+}
+
+/// Frames arriving on a byte stream, which may split or join them.
+#[derive(Default)]
+pub struct Frames {
+    pending: Vec<u8>,
+}
+
+impl Frames {
+    /// Add what was read; get every whole message it completes. A corrupt
+    /// frame is skipped: the next one starts after the next 0.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<Wire> {
+        self.pending.extend_from_slice(bytes);
+        let mut messages = Vec::new();
+        while let Some(end) = self.pending.iter().position(|&b| b == 0) {
+            let mut frame: Vec<u8> = self.pending.drain(..=end).collect();
+            if let Ok(message) = postcard::from_bytes_cobs(&mut frame) {
+                messages.push(message);
+            }
+        }
+        messages
+    }
+}
+```
+
+Keep a `Frames` in the branch's struct (`frames: Frames::default()` in
+`setup`), and in the stream edge's arm, `for message in
+self.frames.push(&packet.bytes) { … }`. Use `framing = "raw"` on the edge:
+the frames are yours to cut.
 
 ## Check it
 
-Add to the bottom of `src/wire.rs` and run `cargo test`:
+At the bottom of `src/wire.rs`:
 
 ```rust
 #[cfg(test)]
@@ -96,19 +166,40 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let msg = Wire::Reading { temp_c10: 257, humidity: 55 };
-        let mut frame = encode(&msg);
-        assert_eq!(decode(&mut frame), Some(msg));
+        let message = Wire::Alarm { temp_c10: 310 };
+        assert_eq!(encode(&message), [0, 236, 4]);
+        assert_eq!(decode(&encode(&message)), Some(message));
+    }
+
+    #[test]
+    fn frames_split_across_reads() {
+        let mut stream = encode_frame(&Wire::Limit { temp_c10: 280 });
+        stream.extend(encode_frame(&Wire::Alarm { temp_c10: 310 }));
+        let mut frames = Frames::default();
+        assert_eq!(frames.push(&stream[..3]), []);
+        assert_eq!(
+            frames.push(&stream[3..]),
+            [Wire::Limit { temp_c10: 280 }, Wire::Alarm { temp_c10: 310 }]
+        );
     }
 }
 ```
 
-## Use it
+```
+test wire::tests::frames_split_across_reads ... ok
+test wire::tests::round_trip ... ok
+```
 
-- **Byte streams (TCP, serial):** split incoming bytes at each `0` and
-  `decode` each frame. The [TCP](roots-tcp.md) and [serial](roots-serial.md)
-  guides show the loop.
-- **Datagrams (UDP):** one datagram = one frame. See the [UDP](roots-udp.md)
-  guide.
-- **Changing messages:** add new variants at the **end** of `Wire`. postcard
-  numbers variants by position, so reordering them breaks older peers.
+## Changing it
+
+Add new variants at the **end** of `Wire`. postcard numbers variants by
+position, so reordering them, or removing one from the middle, makes an
+older peer read one message as another.
+
+A program without `Vec` (a microcontroller at the other end) encodes into a
+buffer instead:
+
+```rust
+let mut buf = [0u8; 32];
+let frame: &mut [u8] = postcard::to_slice_cobs(&message, &mut buf)?;
+```

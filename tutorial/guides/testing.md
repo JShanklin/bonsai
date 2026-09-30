@@ -1,56 +1,110 @@
 # Testing
 
-Put decisions in plain functions and test them on your computer with
-`cargo test` (`cargo local-test` in a Pi tree, which otherwise builds for the Pi). The async plumbing around them is bonsai's job and is already
-tested.
+A branch's `process` does no I/O and never waits, so tests need no
+network, no timers and no hardware: hand it inputs, check what it sent. The
+core can be tested the same way, edges included.
 
-## Pi / PC trees: test in place
+**Needs:** [chapter 6](../foundations/06-order-and-tests.md).
 
-Pull the decision out of the task:
+Run the tests on your computer:
 
-```rust
-// src/branches/watchdog.rs
-fn too_hot(temp_c10: i16, limit_c10: i16) -> bool {
-    temp_c10 > limit_c10
-}
+```sh
+cargo local-test    # a Pi tree (plain `cargo test` would build them for the Pi)
+cargo test          # a host tree
 ```
 
-Use it in the arm (`if too_hot(temp_c10, limit_c10) { … }`), and test it at
-the bottom of the same file:
+## One branch
+
+Make it with `setup`, give it an input and an empty `Out`, and read
+`out.sent()`: everything it sent, oldest first, as `Msg`s (one variant per
+wire, named after the sender and what it sends: `WatchdogAlarm`,
+`WatchdogToUplink`).
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wiring::Msg;
 
     #[test]
-    fn at_the_limit_is_fine() {
-        assert!(!too_hot(300, 300));
-    }
+    fn alarms_only_above_the_limit() {
+        let mut watchdog = Watchdog::setup();
 
-    #[test]
-    fn above_the_limit_is_too_hot() {
-        assert!(too_hot(301, 300));
+        let mut out = Out::default();
+        let reading = Reading {
+            temp_c10: 300,
+            humidity: 55,
+        };
+        watchdog.process(Input::Reading(reading), &mut out);
+        assert!(out.sent().is_empty());
+
+        let mut out = Out::default();
+        let reading = Reading {
+            temp_c10: 310,
+            humidity: 55,
+        };
+        watchdog.process(Input::Reading(reading), &mut out);
+        assert!(matches!(
+            out.sent(),
+            [
+                Msg::WatchdogAlarm(Alarm { temp_c10: 310 }),
+                Msg::WatchdogToUplink(_)
+            ]
+        ));
     }
 }
 ```
 
-```sh
-cargo local-test
+Messages derive `Debug` but not `PartialEq`, so compare them with
+`matches!` and a pattern, or add `PartialEq` to a message's `#[derive(..)]`
+in `src/messages.rs` and use `assert_eq!`.
+
+A branch's state carries over between inputs, so a sequence is just a loop
+([chapter 6](../foundations/06-order-and-tests.md#test-a-branch) tests the
+sensor over eight ticks).
+
+## The whole tree
+
+`Core::new()` sets up every branch; `core.handle(event)` runs one event to
+completion, exactly as the running tree does. With no edges started, what
+branches send an edge is kept, and `core.drain_<edge>()` returns it:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use crate::bonsai::{Event, Packet, Tree};
+    use crate::wiring::{Core, EdgeIn};
+
+    #[test]
+    fn a_lower_limit_sets_off_an_alarm() {
+        let mut core = Core::new();
+        let limit = Packet::new("limit 260");
+        core.handle(Event::Edge(EdgeIn::Uplink(limit)));
+        core.handle(Event::Tick(0)); // sensor, the first branch: 26.5 °C
+        assert_eq!(
+            core.drain_uplink(),
+            [Packet::new("ok, limit 260\n"), Packet::new("alarm 265\n")]
+        );
+    }
+}
 ```
 
-```
-test branches::watchdog::tests::above_the_limit_is_too_hot ... ok
-test branches::watchdog::tests::at_the_limit_is_fine ... ok
-```
+- `Event::Edge(EdgeIn::<Edge>(value))` is something an edge received.
+  For built-in edges, `value` is a `Packet`; set `peer` to test replies
+  (`Packet { bytes: b"hello".to_vec(), peer: "10.0.0.7:5000".parse().ok() }`).
+- `Event::Tick(n)` is a tick for branch `n`, counting from 0 in
+  `bonsai.toml`'s order.
 
-## What to test
+Put tree-wide tests at the bottom of `src/main.rs`.
 
-- **Decisions:** thresholds, state machines, debouncing, rate limits.
-- **Encoding:** a [wire format](wire-format.md) round trip, including a
-  corrupt frame being rejected.
-- **Parsing:** anything that turns bytes into values.
+## Logs in tests
 
-Wiring and timing are best checked by running the tree. Use
-`BONSAI_SAP_DEBUG=1` to see lag (see
-[Paths](../foundations/06-paths.md#watching-the-paths)).
+`info!` and friends work in tests. `cargo test` captures their lines and
+shows them only for a test that fails, next to its error.
+
+## What not to test
+
+bonsai's plumbing (delivery order, edges restarting, the core loop) is
+bonsai's job; the six tests you'll see from `src/bonsai.rs` in every tree
+are its own. Test your decisions: what each branch does with each input,
+and what the tree does with a sequence of events.

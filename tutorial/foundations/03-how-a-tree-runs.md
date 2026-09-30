@@ -46,7 +46,8 @@ and no timers: hand it inputs, check what it sent.
 ## 4. Messages and wires
 
 Branches never call each other. They send **messages**: plain structs like
-`Reading { temp_c10, humidity }`. A **wire** says who sends which message to
+`Reading { temp, humidity }`, where `temp` is a `Celsius`: numbers carry
+their units, so a temperature can't be mixed up with anything else. A **wire** says who sends which message to
 whom: `sensor` sends `Reading` to `watchdog` and `display`. Wires live in
 `bonsai.toml`, one file for the whole tree, and bonsai generates the typed
 code that carries them.

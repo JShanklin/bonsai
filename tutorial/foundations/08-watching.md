@@ -11,7 +11,7 @@ You've been using them since chapter 5. `error!`, `warn!`, `info!` and
 when (UTC), how serious, and who wrote it:
 
 ```
-10:43:53.796Z  INFO watchdog: limit is now 280
+11:55:44.028Z  INFO watchdog: limit is now 28.0 °C
 ```
 
 Nothing to pass in: bonsai knows which branch is running, or which edge.
@@ -28,9 +28,9 @@ BONSAI_LOG=warn cargo local
 ```
 
 ```
-10:44:22.507Z  WARN display: too hot: 31.0 °C
-10:44:23.507Z  WARN display: too hot: 32.5 °C
-10:44:24.507Z  WARN display: too hot: 34.0 °C
+11:56:05.123Z  WARN display: too hot: 31.0 °C
+11:56:06.124Z  WARN display: too hot: 32.5 °C
+11:56:07.124Z  WARN display: too hot: 34.0 °C
 ```
 
 Only warnings, except the uplink, which tells everything:
@@ -40,8 +40,8 @@ BONSAI_LOG=warn,uplink=info cargo local
 ```
 
 ```
-10:44:25.139Z  INFO uplink: up
-10:44:28.140Z  WARN display: too hot: 31.0 °C
+11:56:07.751Z  INFO uplink: up
+11:56:10.752Z  WARN display: too hot: 31.0 °C
 ```
 
 `debug!` lines are hidden unless asked for, so leave them in:
@@ -51,21 +51,24 @@ terminal the level is coloured; set `NO_COLOR=1` to turn that off.
 ## A panic
 
 Make the display panic when it's much too hot, to see what happens. In its
-`Input::Alarm` arm, after the `warn!`, add:
+`Input::Alarm` arm, make the `warn!` a block and add an `assert!` after it:
 
 ```rust
-assert!(alarm.temp_c10 < 330, "way too hot");
+Input::Alarm(alarm) => {
+    warn!("too hot: {:.1}", alarm.temp);
+    assert!(alarm.temp < Celsius(33.0), "way too hot");
+}
 ```
 
 ```
-10:44:42.344Z  INFO display: 32.5 °C, 55% humidity
-10:44:42.344Z  WARN display: too hot: 32.5 °C
-10:44:43.344Z  INFO display: 34.0 °C, 55% humidity
-10:44:43.344Z  WARN display: too hot: 34.0 °C
-10:44:43.344Z ERROR display: panicked at src/branches/display.rs:35: way too hot
-10:44:43.344Z  WARN display: set up again after a panic
-10:44:44.345Z  INFO display: 25.0 °C, 55% humidity
-10:44:45.344Z  INFO display: 26.5 °C, 55% humidity
+11:56:28.626Z  INFO display: 32.5 °C, 55% humidity
+11:56:28.626Z  WARN display: too hot: 32.5 °C
+11:56:29.626Z  INFO display: 34.0 °C, 55% humidity
+11:56:29.626Z  WARN display: too hot: 34.0 °C
+11:56:29.626Z ERROR display: panicked at src/branches/display.rs:33: way too hot
+11:56:29.626Z  WARN display: set up again after a panic
+11:56:30.626Z  INFO display: 25.0 °C, 55% humidity
+11:56:31.625Z  INFO display: 26.5 °C, 55% humidity
 ```
 
 One line says where it panicked, and the display was set up again: its
@@ -82,26 +85,26 @@ bonsai top local
 ```
 
 ```
- greenhouse  up 12s  1 events/s  slowest event 183 µs  0 waiting
+ greenhouse  up 12s  1 events/s  slowest event 327 µs  0 waiting
 ┌ branches ──────────────────────────────────────────────────────────────────┐
 │branch                        inputs/s    sent/s    avg µs    max µs  panics│
-│sensor                             1.0       1.0         3         4       0│
-│watchdog                           1.0       2.0         4        35       0│
-│display                            2.0       0.0        30       110       2│
+│sensor                             1.0       1.0         6        25       0│
+│watchdog                           1.0       2.0         3        10       0│
+│display                            2.0       0.0        20        42       2│
 └────────────────────────────────────────────────────────────────────────────┘
 ┌ edges ─────────────────────────────────────────────────────────────────────┐
 │edge            state          in/s     out/s   dropped  restarts last error│
 │uplink          up              0.0       1.0         0         0           │
 └────────────────────────────────────────────────────────────────────────────┘
 ┌ log ───────────────────────────────────────────────────────────────────────┐
-│10:47:12.116Z  INFO display: 31.0 °C, 55% humidity                          │
-│10:47:12.116Z  WARN display: too hot: 31.0 °C                               │
-│10:47:13.116Z  INFO display: 32.5 °C, 55% humidity                          │
-│10:47:13.116Z  WARN display: too hot: 32.5 °C                               │
-│10:47:14.116Z  INFO display: 34.0 °C, 55% humidity                          │
-│10:47:14.116Z  WARN display: too hot: 34.0 °C                               │
-│10:47:14.116Z ERROR display: panicked at src/branches/display.rs:35: way too│
-│10:47:14.116Z  WARN display: set up again after a panic                     │
+│11:56:43.352Z  INFO display: 31.0 °C, 55% humidity                          │
+│11:56:43.352Z  WARN display: too hot: 31.0 °C                               │
+│11:56:44.352Z  INFO display: 32.5 °C, 55% humidity                          │
+│11:56:44.352Z  WARN display: too hot: 32.5 °C                               │
+│11:56:45.352Z  INFO display: 34.0 °C, 55% humidity                          │
+│11:56:45.352Z  WARN display: too hot: 34.0 °C                               │
+│11:56:45.352Z ERROR display: panicked at src/branches/display.rs:33: way too│
+│11:56:45.352Z  WARN display: set up again after a panic                     │
 └────────────────────────────────────────────────────────────────────────────┘
  ↑↓ select  enter show only its log  p pause  q quit
 ```
@@ -134,11 +137,11 @@ bonsai top local --once
 ```
 
 ```
-greenhouse: up 9s, 1 events/s, slowest event 183 µs, 0 waiting
+greenhouse: up 9s, 1 events/s, slowest event 327 µs, 0 waiting
 branch            inputs/s    sent/s    avg µs    max µs  panics
-sensor                 1.0       1.0         3         4       0
-watchdog               1.0       0.0         1         5       0
-display                1.0       0.0        32       110       1
+sensor                 1.0       1.0         6        25       0
+watchdog               1.0       0.0         2         9       0
+display                1.0       0.0        23        42       1
 edge                 state      in/s     out/s   dropped restarts  last error
 uplink                  up       0.0       0.0         0       0  
 ```

@@ -514,6 +514,272 @@ pub mod log {
 }
 
 // ---------------------------------------------------------------------------
+// Units
+// ---------------------------------------------------------------------------
+
+/// Numbers that carry their unit, so a temperature can't be added to a
+/// distance, and meters can't be mistaken for feet. Each is an `f32` inside
+/// (`.0` gets it out), prints with its symbol (`{:.1}` → `25.7 °C`), and
+/// converts to the others of its kind with `.into()`.
+pub mod units {
+    use std::fmt;
+    use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign};
+    use std::time::Duration;
+
+    macro_rules! unit {
+        ($name:ident, $symbol:literal, $what:literal) => {
+            #[doc = $what]
+            #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
+            pub struct $name(pub f32);
+
+            impl fmt::Display for $name {
+                fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                    match f.precision() {
+                        Some(p) => write!(f, "{:.*}{}", p, self.0, $symbol),
+                        None => write!(f, "{}{}", self.0, $symbol),
+                    }
+                }
+            }
+
+            impl Add for $name {
+                type Output = $name;
+                fn add(self, other: $name) -> $name {
+                    $name(self.0 + other.0)
+                }
+            }
+
+            impl Sub for $name {
+                type Output = $name;
+                fn sub(self, other: $name) -> $name {
+                    $name(self.0 - other.0)
+                }
+            }
+
+            impl AddAssign for $name {
+                fn add_assign(&mut self, other: $name) {
+                    self.0 += other.0;
+                }
+            }
+
+            impl SubAssign for $name {
+                fn sub_assign(&mut self, other: $name) {
+                    self.0 -= other.0;
+                }
+            }
+
+            impl Neg for $name {
+                type Output = $name;
+                fn neg(self) -> $name {
+                    $name(-self.0)
+                }
+            }
+
+            /// Scaled: `Meters(2.0) * 3.0`.
+            impl Mul<f32> for $name {
+                type Output = $name;
+                fn mul(self, by: f32) -> $name {
+                    $name(self.0 * by)
+                }
+            }
+
+            impl Mul<$name> for f32 {
+                type Output = $name;
+                fn mul(self, value: $name) -> $name {
+                    $name(self * value.0)
+                }
+            }
+
+            impl Div<f32> for $name {
+                type Output = $name;
+                fn div(self, by: f32) -> $name {
+                    $name(self.0 / by)
+                }
+            }
+
+            /// A ratio: `Meters(6.0) / Meters(2.0)` is `3.0`.
+            impl Div for $name {
+                type Output = f32;
+                fn div(self, other: $name) -> f32 {
+                    self.0 / other.0
+                }
+            }
+        };
+    }
+
+    /// `a` to `b` and back, for units of the same kind.
+    macro_rules! convert {
+        ($a:ident => $b:ident: |$x:ident| $to:expr, |$y:ident| $from:expr) => {
+            impl From<$a> for $b {
+                fn from($a($x): $a) -> $b {
+                    $b($to)
+                }
+            }
+
+            impl From<$b> for $a {
+                fn from($b($y): $b) -> $a {
+                    $a($from)
+                }
+            }
+        };
+    }
+
+    /// `a × b = c` (and `b × a`, `c ÷ a = b`, `c ÷ b = a`).
+    macro_rules! product {
+        ($a:ident * $b:ident = $c:ident) => {
+            impl Mul<$b> for $a {
+                type Output = $c;
+                fn mul(self, other: $b) -> $c {
+                    $c(self.0 * other.0)
+                }
+            }
+
+            impl Mul<$a> for $b {
+                type Output = $c;
+                fn mul(self, other: $a) -> $c {
+                    $c(self.0 * other.0)
+                }
+            }
+
+            impl Div<$a> for $c {
+                type Output = $b;
+                fn div(self, other: $a) -> $b {
+                    $b(self.0 / other.0)
+                }
+            }
+
+            impl Div<$b> for $c {
+                type Output = $a;
+                fn div(self, other: $b) -> $a {
+                    $a(self.0 / other.0)
+                }
+            }
+        };
+    }
+
+    unit!(Celsius, " °C", "A temperature in degrees Celsius.");
+    unit!(Fahrenheit, " °F", "A temperature in degrees Fahrenheit.");
+    unit!(Kelvin, " K", "A temperature in kelvins.");
+    unit!(Meters, " m", "A length in meters.");
+    unit!(Feet, " ft", "A length in feet.");
+    unit!(Kilometers, " km", "A length in kilometers.");
+    unit!(MetersPerSecond, " m/s", "A speed in meters per second.");
+    unit!(Knots, " kn", "A speed in knots.");
+    unit!(KilometersPerHour, " km/h", "A speed in km an hour.");
+    unit!(Seconds, " s", "A time in seconds.");
+    unit!(Hertz, " Hz", "A frequency: times a second.");
+    unit!(Degrees, "°", "An angle in degrees.");
+    unit!(Radians, " rad", "An angle in radians.");
+    unit!(Volts, " V", "A voltage.");
+    unit!(Amps, " A", "A current in amperes.");
+    unit!(Watts, " W", "A power in watts.");
+    unit!(Pascals, " Pa", "A pressure in pascals.");
+    unit!(Hectopascals, " hPa", "A pressure in millibars.");
+    unit!(Percent, "%", "A share of a whole, 0 to 100.");
+
+    convert!(Celsius => Fahrenheit: |c| c * 9.0 / 5.0 + 32.0, |f| (f - 32.0) * 5.0 / 9.0);
+    convert!(Celsius => Kelvin: |c| c + 273.15, |k| k - 273.15);
+    convert!(Fahrenheit => Kelvin: |f| (f - 32.0) * 5.0 / 9.0 + 273.15, |k| (k - 273.15) * 9.0 / 5.0 + 32.0);
+    convert!(Meters => Feet: |m| m / 0.3048, |ft| ft * 0.3048);
+    convert!(Meters => Kilometers: |m| m / 1000.0, |km| km * 1000.0);
+    convert!(Feet => Kilometers: |ft| ft * 0.0003048, |km| km / 0.0003048);
+    convert!(MetersPerSecond => Knots: |v| v * 3600.0 / 1852.0, |kn| kn * 1852.0 / 3600.0);
+    convert!(MetersPerSecond => KilometersPerHour: |v| v * 3.6, |kmh| kmh / 3.6);
+    convert!(Knots => KilometersPerHour: |kn| kn * 1.852, |kmh| kmh / 1.852);
+    convert!(Degrees => Radians: |d| d.to_radians(), |r| r.to_degrees());
+    convert!(Pascals => Hectopascals: |pa| pa / 100.0, |hpa| hpa * 100.0);
+
+    product!(MetersPerSecond * Seconds = Meters);
+    product!(Volts * Amps = Watts);
+
+    /// Times a second: `1.0 / Seconds(0.5)` is `Hertz(2.0)`.
+    impl Div<Seconds> for f32 {
+        type Output = Hertz;
+        fn div(self, period: Seconds) -> Hertz {
+            Hertz(self / period.0)
+        }
+    }
+
+    /// How long each: `1.0 / Hertz(2.0)` is `Seconds(0.5)`.
+    impl Div<Hertz> for f32 {
+        type Output = Seconds;
+        fn div(self, rate: Hertz) -> Seconds {
+            Seconds(self / rate.0)
+        }
+    }
+
+    impl From<Duration> for Seconds {
+        fn from(d: Duration) -> Seconds {
+            Seconds(d.as_secs_f32())
+        }
+    }
+
+    /// Negative times become zero.
+    impl From<Seconds> for Duration {
+        fn from(s: Seconds) -> Duration {
+            Duration::from_secs_f32(s.0.max(0.0))
+        }
+    }
+
+    impl Radians {
+        pub fn sin(self) -> f32 {
+            self.0.sin()
+        }
+        pub fn cos(self) -> f32 {
+            self.0.cos()
+        }
+    }
+
+    impl Degrees {
+        pub fn sin(self) -> f32 {
+            Radians::from(self).sin()
+        }
+        pub fn cos(self) -> f32 {
+            Radians::from(self).cos()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn close(a: f32, b: f32) -> bool {
+            (a - b).abs() < 1e-3
+        }
+
+        #[test]
+        fn a_kind_converts_both_ways() {
+            let f: Fahrenheit = Celsius(100.0).into();
+            assert_eq!(f, Fahrenheit(212.0));
+            assert!(close(Celsius::from(Kelvin(0.0)).0, -273.15));
+            assert!(close(Feet::from(Meters(1.0)).0, 3.28084));
+            assert!(close(Knots::from(MetersPerSecond(1.0)).0, 1.94384));
+            assert!(close(Radians::from(Degrees(180.0)).0, std::f32::consts::PI));
+            assert!(close(Degrees(90.0).sin(), 1.0));
+        }
+
+        #[test]
+        fn units_multiply_into_others() {
+            assert_eq!(Meters(120.0) / Seconds(4.0), MetersPerSecond(30.0));
+            assert_eq!(MetersPerSecond(3.0) * Seconds(2.0), Meters(6.0));
+            assert_eq!(Volts(12.0) * Amps(2.0), Watts(24.0));
+            assert_eq!(1.0 / Seconds(0.5), Hertz(2.0));
+            assert_eq!(Meters(6.0) / Meters(2.0), 3.0);
+            let mut t = Celsius(25.0);
+            t += Celsius(1.5);
+            assert!(t > Celsius(26.0));
+        }
+
+        #[test]
+        fn units_print_with_their_symbol() {
+            assert_eq!(format!("{:.1}", Celsius(25.66)), "25.7 °C");
+            assert_eq!(format!("{}", Percent(55.0)), "55%");
+            assert_eq!(format!("{:.0}", Degrees(12.4)), "12°");
+            assert_eq!(Duration::from(Seconds(-1.0)), Duration::ZERO);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Stats, and the server `bonsai top` reads them from
 // ---------------------------------------------------------------------------
 

@@ -32,32 +32,31 @@ mod tests {
 
         let mut out = Out::default();
         let reading = Reading {
-            temp_c10: 300,
-            humidity: 55,
+            temp: Celsius(30.0),
+            humidity: Percent(55.0),
         };
         watchdog.process(Input::Reading(reading), &mut out);
         assert!(out.sent().is_empty());
 
         let mut out = Out::default();
         let reading = Reading {
-            temp_c10: 310,
-            humidity: 55,
+            temp: Celsius(31.0),
+            humidity: Percent(55.0),
         };
         watchdog.process(Input::Reading(reading), &mut out);
         assert!(matches!(
             out.sent(),
-            [
-                Msg::WatchdogAlarm(Alarm { temp_c10: 310 }),
-                Msg::WatchdogToUplink(_)
-            ]
+            [Msg::WatchdogAlarm(alarm), Msg::WatchdogToUplink(_)]
+                if alarm.temp == Celsius(31.0)
         ));
     }
 }
 ```
 
 Messages derive `Debug` but not `PartialEq`, so compare them with
-`matches!` and a pattern, or add `PartialEq` to a message's `#[derive(..)]`
-in `src/messages.rs` and use `assert_eq!`.
+`matches!`, a pattern and a guard on the fields (units compare with `==`),
+or add `PartialEq` to a message's `#[derive(..)]` in `src/messages.rs` and
+use `assert_eq!`.
 
 A branch's state carries over between inputs, so a sequence is just a loop
 ([chapter 6](../foundations/06-order-and-tests.md#test-a-branch) tests the
@@ -78,12 +77,12 @@ mod tests {
     #[test]
     fn a_lower_limit_sets_off_an_alarm() {
         let mut core = Core::new();
-        let limit = Packet::new("limit 260");
+        let limit = Packet::new("limit 26");
         core.handle(Event::Edge(EdgeIn::Uplink(limit)));
         core.handle(Event::Tick(0)); // sensor, the first branch: 26.5 °C
         assert_eq!(
             core.drain_uplink(),
-            [Packet::new("ok, limit 260\n"), Packet::new("alarm 265\n")]
+            [Packet::new("ok, limit 26.0 °C\n"), Packet::new("alarm 26.5\n")]
         );
     }
 }
@@ -105,6 +104,6 @@ shows them only for a test that fails, next to its error.
 ## What not to test
 
 bonsai's plumbing (delivery order, edges restarting, the core loop) is
-bonsai's job; the six tests you'll see from `src/bonsai.rs` in every tree
+bonsai's job; the nine tests you'll see from `src/bonsai.rs` in every tree
 are its own. Test your decisions: what each branch does with each input,
 and what the tree does with a sequence of events.

@@ -139,6 +139,18 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `bonsai-top 1\t…` then `branch`/`edge`/`log` rows (tab-separated) and `end`;
   new log lines come from `log::since(n)` (the ring counts every line).
   Observation only: it never changes what a branch sends.
+  Units (`mod units`): `f32` newtypes made by `macro_rules! unit` (same-unit
+  arithmetic/compare, scaling, ratio, `Display` with the symbol and
+  precision), `convert!` (`From` both ways within a kind) and `product!`
+  (`a × b = c` and its inverses): temperature, length, speed, `Seconds`
+  (↔ `Duration`), `Hertz`, angles (`sin`/`cos`), electrical, pressure,
+  `Percent`. Every board's `src/messages.rs` has `pub use
+  crate::bonsai::units::*;`, so branches get them through `use
+  crate::messages::*`; `message add` adds that line to an older tree when a
+  field names a unit (`tree::with_units_import`, `uses_units`).
+  `tree::UNITS` lists them (reserved as message names;
+  `every_unit_is_in_the_runtime` keeps it in step: one `unit!(Name, ` line
+  each).
   Templates build with `flavor = "current_thread"` and **no**
   `panic = "abort"` (unwinding is what makes the reset possible).
 - **The generated wiring** (`src/wiring.rs`): `enum EdgeIn` (one variant per
@@ -339,10 +351,10 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
 - `README.md` explains what bonsai is. How-to material lives in `tutorial/`:
   `foundations/` (8 chapters, read in order; builds the running
   **greenhouse** project on the zero-2w template, run with `cargo local` so
-  it runs on a PC: sensor → watchdog → display, a `limit_c10` setting, a UDP
-  `uplink` edge with a text protocol, tests, logs and `bonsai top`) and
-  `guides/` (short self-contained recipes: edges over UDP/TCP/serial/MAVLink
-  and custom edges, wire format, testing, deploy, build tools, a virtual Pi
+  it runs on a PC: sensor → watchdog → display with `Celsius`/`Percent`
+  fields, a `limit` setting, a UDP `uplink` edge with a text protocol, tests,
+  logs and `bonsai top`) and `guides/` (short self-contained recipes: edges
+  over UDP/TCP/serial/MAVLink and custom edges, units, wire format, testing, deploy, build tools, a virtual Pi
   (arm64 Podman container, qemu, macvlan/ipvlan), CI, troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold

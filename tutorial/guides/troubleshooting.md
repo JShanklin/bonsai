@@ -37,6 +37,8 @@ is fine: bonsai puts it back on its own line.
 | ``non-exhaustive patterns: `wiring::display::Input::Alarm(_)` not covered`` | something new is wired to the branch | add the arm (`Input::Alarm(alarm) => …`) |
 | ``mismatched types … expected `Reading`, found `Alarm` `` at an `out.send(..)` | the branch isn't wired to send that message | `bonsai wire <branch> Alarm <to>`, or send what it is wired for |
 | ``no method named `to_uplink` found for mutable reference `&mut wiring::sensor::Out` `` | the branch isn't wired to that edge | `bonsai wire <branch> uplink` |
+| ``expected `Celsius`, found floating-point number`` | a unit compared or combined with a bare number | wrap the number: `Celsius(30.0)`; or take the number out: `temp.0` |
+| ``cannot find … `Celsius` in this scope`` (a tree planted before units) | the units aren't imported | `pub use crate::bonsai::units::*;` at the top of `src/messages.rs` (`bonsai message add` adds it when a field uses a unit) |
 | errors in `src/wiring.rs` after editing `bonsai.toml` or `src/messages.rs` by hand | the wiring is out of date | `bonsai sync` |
 | `cannot find type …` in a message's fields | the type isn't imported in `src/messages.rs` | add its `use` at the top of `src/messages.rs` |
 

@@ -54,7 +54,7 @@ use mavlink::peek_reader::PeekReader;
 use mavlink::{MavHeader, read_v2_msg, write_v2_msg};
 
 use crate::bonsai::{Branch, Packet};
-#[allow(unused_imports)] // the messages it builds to send
+#[allow(unused_imports)] // the messages it sends, and units
 use crate::messages::*;
 use crate::wiring::link::{Input, Out};
 

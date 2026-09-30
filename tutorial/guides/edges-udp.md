@@ -67,7 +67,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::bonsai::Branch;
-#[allow(unused_imports)] // the messages it builds to send
+#[allow(unused_imports)] // the messages it sends, and units
 use crate::messages::*;
 use crate::wiring::tracker::{Input, Out};
 

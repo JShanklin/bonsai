@@ -61,7 +61,7 @@ updated src/wiring.rs
 tree: greenhouse  (zero-2w (bcm2710a1))
 branches, in the order the core runs them:
   sensor  (ticks 1/s)
-  watchdog  (settings: limit_c10)
+  watchdog  (settings: limit)
   display
 edges:
   uplink  (udp 0.0.0.0:6969 → 127.0.0.1:6970)
@@ -79,8 +79,8 @@ The watchdog gained an `Input::Uplink(_uplink) => {}` arm, and an
 
 The edge moves bytes; the watchdog decides what they mean. That keeps the
 decoding in `process`, where a test can reach it. Plain text is enough to
-start: the watchdog sends `alarm 310` when it's too hot, and takes `limit
-280` to set a new limit, answering the sender. (For compact binary
+start: the watchdog sends `alarm 31.0` when it's too hot, and takes `limit
+28` to set a new limit (in °C), answering the sender. (For compact binary
 messages, see the [wire format guide](../guides/wire-format.md).)
 
 In `src/branches/watchdog.rs`, bring `Packet` in:
@@ -96,24 +96,22 @@ fn process(&mut self, input: Input, out: &mut Out) {
     match input {
         // `bonsai wire <from> <Message> watchdog` adds an arm here
         Input::Reading(reading) => {
-            if reading.temp_c10 > self.limit_c10 {
-                out.send(Alarm {
-                    temp_c10: reading.temp_c10,
-                });
-                let text = format!("alarm {}\n", reading.temp_c10);
+            if reading.temp > self.limit {
+                out.send(Alarm { temp: reading.temp });
+                let text = format!("alarm {:.1}\n", reading.temp.0);
                 out.to_uplink(Packet::new(text));
             }
         }
         Input::Uplink(packet) => {
-            // `limit 280` sets a new limit, in tenths of a degree.
+            // `limit 28` sets a new limit, in °C.
             let bytes = String::from_utf8_lossy(&packet.bytes);
             let text = bytes.trim();
             if let Some(number) = text.strip_prefix("limit ")
-                && let Ok(limit) = number.parse::<i16>()
+                && let Ok(limit) = number.parse::<f32>()
             {
-                self.limit_c10 = limit;
-                info!("limit is now {limit}");
-                out.to_uplink(packet.reply(format!("ok, limit {limit}\n")));
+                self.limit = Celsius(limit);
+                info!("limit is now {:.1}", self.limit);
+                out.to_uplink(packet.reply(format!("ok, limit {:.1}\n", self.limit)));
             } else {
                 warn!("didn't understand {text:?}");
             }
@@ -123,7 +121,9 @@ fn process(&mut self, input: Input, out: &mut Out) {
 }
 ```
 
-`Packet::new(text)` goes to the edge's `to` address. `packet.reply(..)`
+The number goes out bare (`reading.temp.0`): the other end of a text
+protocol reads numbers, not symbols. `Packet::new(text)` goes to the edge's
+`to` address. `packet.reply(..)`
 goes back to whoever sent `packet`. A packet the watchdog doesn't
 understand gets a warning, not a crash: it came from outside, so expect
 anything.
@@ -147,40 +147,41 @@ Third, send the tree a new limit once the alarms are coming in, then
 something it won't understand:
 
 ```sh
-echo "limit 280" | socat - UDP:127.0.0.1:6969
+echo "limit 28" | socat - UDP:127.0.0.1:6969
 echo "hello" | socat - UDP:127.0.0.1:6969
 ```
 
 ```
-ok, limit 280
+ok, limit 28.0 °C
 ```
 
 The listener shows the alarms: three at the old limit, then one at 29.5 °C
 under the new one:
 
 ```
-alarm 310
-alarm 325
-alarm 340
-alarm 295
+alarm 31.0
+alarm 32.5
+alarm 34.0
+alarm 29.5
 ```
 
 And the tree's log:
 
 ```
-10:43:48.340Z  INFO bonsai: running
-10:43:48.341Z  INFO uplink: up
-10:43:48.342Z  INFO display: 26.5 °C, 55% humidity
+11:55:38.570Z  INFO bonsai: running
+11:55:38.570Z  INFO uplink: up
+11:55:38.571Z  INFO display: 26.5 °C, 55% humidity
 …
-10:43:53.343Z  INFO display: 34.0 °C, 55% humidity
-10:43:53.343Z  WARN display: too hot: 34.0 °C
-10:43:53.796Z  INFO watchdog: limit is now 280
-10:43:54.303Z  WARN watchdog: didn't understand "hello"
-10:43:54.342Z  INFO display: 25.0 °C, 55% humidity
-10:43:55.343Z  INFO display: 26.5 °C, 55% humidity
-10:43:56.342Z  INFO display: 28.0 °C, 55% humidity
-10:43:57.342Z  INFO display: 29.5 °C, 55% humidity
-10:43:57.342Z  WARN display: too hot: 29.5 °C
+11:55:43.571Z  INFO display: 34.0 °C, 55% humidity
+11:55:43.571Z  WARN display: too hot: 34.0 °C
+11:55:44.028Z  INFO watchdog: limit is now 28.0 °C
+11:55:44.533Z  WARN watchdog: didn't understand "hello"
+11:55:44.572Z  INFO display: 25.0 °C, 55% humidity
+11:55:45.572Z  INFO display: 26.5 °C, 55% humidity
+11:55:46.571Z  INFO display: 28.0 °C, 55% humidity
+11:55:47.572Z  INFO display: 29.5 °C, 55% humidity
+11:55:47.572Z  WARN display: too hot: 29.5 °C
+11:55:48.051Z  INFO bonsai: stopping
 ```
 
 ## When an edge fails
@@ -190,18 +191,18 @@ open. It tries again, waiting longer each time, while the rest of the tree
 carries on. Once the port is free, it comes up:
 
 ```
-10:44:05.947Z  INFO bonsai: running
-10:44:05.948Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 100ms
-10:44:05.949Z  INFO display: 26.5 °C, 55% humidity
-10:44:06.049Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 200ms
-10:44:06.250Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 400ms
-10:44:06.651Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 800ms
-10:44:06.948Z  INFO display: 28.0 °C, 55% humidity
-10:44:07.452Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 1.6s
-10:44:07.949Z  INFO display: 29.5 °C, 55% humidity
-10:44:08.949Z  INFO display: 31.0 °C, 55% humidity
-10:44:08.949Z  WARN display: too hot: 31.0 °C
-10:44:09.054Z  INFO uplink: up
+11:55:57.792Z  INFO bonsai: running
+11:55:57.792Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 100ms
+11:55:57.793Z  INFO display: 26.5 °C, 55% humidity
+11:55:57.894Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 200ms
+11:55:58.096Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 400ms
+11:55:58.498Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 800ms
+11:55:58.794Z  INFO display: 28.0 °C, 55% humidity
+11:55:59.299Z  WARN uplink: bind 0.0.0.0:6969: Address already in use (os error 98); retrying in 1.6s
+11:55:59.793Z  INFO display: 29.5 °C, 55% humidity
+11:56:00.794Z  INFO display: 31.0 °C, 55% humidity
+11:56:00.794Z  WARN display: too hot: 31.0 °C
+11:56:00.905Z  INFO uplink: up
 ```
 
 The same happens when a TCP connection drops or a serial port is unplugged.
@@ -217,8 +218,9 @@ cargo local-test
 ```
 ---- branches::watchdog::tests::alarms_only_above_the_limit stdout ----
 
-thread 'branches::watchdog::tests::alarms_only_above_the_limit' (6702) panicked at src/branches/watchdog.rs:81:9:
-assertion failed: matches!(out.sent(), [Msg::WatchdogAlarm(Alarm { temp_c10: 310 })])
+thread 'branches::watchdog::tests::alarms_only_above_the_limit' (10700) panicked at src/branches/watchdog.rs:81:9:
+assertion failed: matches!(out.sent(), [Msg::WatchdogAlarm(alarm)] if alarm.temp ==
+    Celsius(31.0))
 ```
 
 Good: the watchdog now sends two things above the limit, and the test says
@@ -227,10 +229,8 @@ so. Update what it expects:
 ```rust
         assert!(matches!(
             out.sent(),
-            [
-                Msg::WatchdogAlarm(Alarm { temp_c10: 310 }),
-                Msg::WatchdogToUplink(_)
-            ]
+            [Msg::WatchdogAlarm(alarm), Msg::WatchdogToUplink(_)]
+                if alarm.temp == Celsius(31.0)
         ));
 ```
 
@@ -248,12 +248,12 @@ mod tests {
     #[test]
     fn a_lower_limit_sets_off_an_alarm() {
         let mut core = Core::new();
-        let limit = Packet::new("limit 260");
+        let limit = Packet::new("limit 26");
         core.handle(Event::Edge(EdgeIn::Uplink(limit)));
         core.handle(Event::Tick(0)); // sensor, the first branch: 26.5 °C
         assert_eq!(
             core.drain_uplink(),
-            [Packet::new("ok, limit 260\n"), Packet::new("alarm 265\n")]
+            [Packet::new("ok, limit 26.0 °C\n"), Packet::new("alarm 26.5\n")]
         );
     }
 }
@@ -264,7 +264,7 @@ mod tests {
 ```
 test tests::a_lower_limit_sets_off_an_alarm ... ok
 
-test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
 ```sh

@@ -11,20 +11,21 @@ let count = 3;               // a value; can't change
 let mut total = 0;           // `mut`: can change
 total += count;
 
-let temp_c10: i16 = 257;     // signed 16-bit integer (257 = 25.7 °C)
-let humidity: u8 = 55;       // unsigned 8-bit: 0..=255
-let hot: bool = temp_c10 > 300;
+let temp: f32 = 25.7;        // a 32-bit floating-point number
+let humidity: u8 = 55;       // unsigned 8-bit integer: 0..=255
+let hot: bool = temp > 30.0;
 ```
 
 Rust has exact integer sizes (`u8`, `i16`, `u32`, `i64` …) and floating
-point (`f32`, `f64`). bonsai's examples keep temperatures in tenths of a
-degree, as whole numbers, and only turn them into `f32` to print them. `as`
-converts between number types:
+point (`f32`, `f64`). `as` converts between number types:
 
 ```rust
-let temp = temp_c10 as f32 / 10.0;   // 25.7
-let limit = 300_i64 as i16;          // `as` doesn't check: keep values in range
+let limit = 30.0_f64 as f32;         // a setting (f64) as an f32
+let whole = 25.7_f32 as i16;         // 25: `as` cuts off, and doesn't check range
 ```
+
+A number that measures something is clearer with its unit attached; bonsai
+has types for that ([Units](#units), below).
 
 ## Printing and formatting
 
@@ -32,7 +33,7 @@ let limit = 300_i64 as i16;          // `as` doesn't check: keep values in range
 variable named inside the braces. `{:.1}` means one decimal place:
 
 ```rust
-let text = format!("alarm {}", temp_c10);        // "alarm 257"
+let text = format!("alarm {}", humidity);        // "alarm 55"
 let text = format!("{temp:.1} °C");              // "25.7 °C"
 ```
 
@@ -43,24 +44,24 @@ who wrote the line.
 ## Functions
 
 ```rust
-fn too_hot(temp_c10: i16, limit_c10: i16) -> bool {
-    temp_c10 > limit_c10     // the last expression is the return value
+fn too_hot(temp: f32, limit: f32) -> bool {
+    temp > limit             // the last expression is the return value
 }
 ```
 
 ## Conditions and loops
 
 ```rust
-if temp_c10 > 350 {
-    temp_c10 = 250;          // back to the start
+if temp > 35.0 {
+    temp = 25.0;             // back to the start
 } else {
-    temp_c10 += 15;
+    temp += 1.5;
 }
 
 for _ in 0..8 {              // eight times; `0..8` counts 0 to 7
     total += 1;
 }
-for temp in [265, 280, 295] {  // once for each value
+for temp in [26.5, 28.0, 29.5] {  // once for each value
     println!("{temp}");
 }
 ```
@@ -74,18 +75,18 @@ A struct is named fields together. Every message in a bonsai tree is one:
 ```rust
 #[derive(Clone, Debug)]
 pub struct Reading {
-    pub temp_c10: i16,
-    pub humidity: u8,
+    pub temp: Celsius,
+    pub humidity: Percent,
 }
 
-let r = Reading { temp_c10: 257, humidity: 55 };
-println!("{}", r.temp_c10);
+let r = Reading { temp: Celsius(25.7), humidity: Percent(55.0) };
+println!("{}", r.temp);                     // 25.7 °C
 ```
 
 `#[derive(Clone, Debug)]` asks the compiler to write two abilities for you:
 `.clone()` makes a copy (one message can go to several branches), and
-`{:?}` prints it (`Reading { temp_c10: 257, humidity: 55 }`), which logs and
-tests use. `pub` makes a field visible outside its own file.
+`{:?}` prints it (`Reading { temp: Celsius(25.7), humidity: Percent(55.0) }`),
+which logs and tests use. `pub` makes a field visible outside its own file.
 
 Some library structs have dozens of fields. When a type supports it, set the
 ones you care about and let `..Default::default()` fill the rest with zeros
@@ -97,6 +98,37 @@ let msg = ATTITUDE_DATA { roll, pitch, yaw, ..Default::default() };
 
 (`roll` alone is shorthand for `roll: roll`.)
 
+## Units
+
+`Celsius` and `Percent` above are bonsai's **units**: a number with its unit
+attached, so the compiler knows what it measures. Each is a struct with one
+unnamed field, an `f32`: `Celsius(25.7)` makes one, and `.0` reads the
+number back.
+
+```rust
+let mut temp = Celsius(25.0);
+temp += Celsius(1.5);                        // 26.5 °C
+let hot = temp > Celsius(30.0);              // compare like with like
+println!("{temp:.1}");                       // 26.5 °C: it prints its symbol
+let f: Fahrenheit = temp.into();             // 79.7 °F: `.into()` converts
+let speed = Meters(120.0) / Seconds(4.0);    // MetersPerSecond(30.0)
+```
+
+Mixing up units is a compile error, not a bug found in the field. Comparing
+a temperature with a bare number:
+
+```
+error[E0308]: mismatched types
+  --> src/branches/watchdog.rs:28:35
+   |
+28 |                 if reading.temp > 30.0 {
+   |                    ------------   ^^^^ expected `Celsius`, found floating-point number
+```
+
+Temperatures, lengths, speeds, time, frequency, angles, electrical and
+pressure units are all there; the [units guide](../guides/units.md) lists
+them.
+
 ## Methods and `impl`
 
 Functions that belong to a type go in an `impl` block. `self` is the value
@@ -104,17 +136,17 @@ the method was called on; `&mut self` lets it change it:
 
 ```rust
 pub struct Sensor {
-    temp_c10: i16,
+    temp: Celsius,
 }
 
 impl Sensor {
     fn warm_up(&mut self) {
-        self.temp_c10 += 15;
+        self.temp += Celsius(1.5);
     }
 }
 
-let mut sensor = Sensor { temp_c10: 250 };
-sensor.warm_up();                    // now 265
+let mut sensor = Sensor { temp: Celsius(25.0) };
+sensor.warm_up();                    // now 26.5 °C
 ```
 
 ## Enums and `match`
@@ -137,7 +169,7 @@ variant, which is how the compiler tells you a branch forgot one:
 ```rust
 match input {
     Input::Tick => println!("tick"),
-    Input::Reading(reading) => println!("{}", reading.temp_c10),
+    Input::Reading(reading) => println!("{}", reading.temp),
     Input::Alarm(_) => {}    // `_`: there's data, and I don't need it
 }
 ```
@@ -147,7 +179,7 @@ pattern fits *and* the condition holds:
 
 ```rust
 match input {
-    Input::Reading(reading) if reading.temp_c10 > 300 => println!("hot"),
+    Input::Reading(reading) if reading.temp > Celsius(30.0) => println!("hot"),
     _ => {}                  // everything else
 }
 ```
@@ -156,20 +188,20 @@ match input {
 `&&`, including more `let`s; the block runs only when all of them hold:
 
 ```rust
-if let Input::Reading(reading) = input && reading.temp_c10 > 300 {
+if let Input::Reading(reading) = input && reading.temp > Celsius(30.0) {
     println!("hot");
 }
 ```
 
-`matches!` asks "does this fit the pattern?" and gives a `bool`. Tests use
-it a lot. `[a, b]` is a pattern for a list of exactly two things:
+`matches!` asks "does this fit the pattern?" and gives a `bool`, and takes
+a guard too. Tests use it a lot:
 
 ```rust
-let hot = matches!(input, Input::Reading(Reading { temp_c10: 300.., .. }));
+let hot = matches!(input, Input::Reading(r) if r.temp > Celsius(30.0));
+let one_alarm = matches!(sent, [Msg::WatchdogAlarm(_)]);
 ```
 
-`300..` means "300 or more", and `..` at the end of a struct pattern means
-"and the other fields, which I don't need".
+`[a]` is a pattern for a list of exactly one thing, `[a, b]` of two.
 
 ## Traits
 
@@ -184,7 +216,7 @@ impl Branch for Sensor {
     type Out = Out;          // where it sends
 
     fn setup() -> Self {     // `Self` = the type this is for: Sensor
-        Sensor { temp_c10: 250 }
+        Sensor { temp: Celsius(25.0) }
     }
 
     fn process(&mut self, input: Input, out: &mut Out) {
@@ -287,8 +319,8 @@ mod tests {
 
     #[test]
     fn too_hot_above_the_limit() {
-        assert!(too_hot(310, 300));
-        assert_eq!(too_hot(300, 300), false);
+        assert!(too_hot(31.0, 30.0));
+        assert_eq!(too_hot(30.0, 30.0), false);
     }
 }
 ```

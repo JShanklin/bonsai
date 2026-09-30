@@ -100,7 +100,8 @@ would be overwritten. Everything else is yours.
 of each part. The bonsai commands add to it as you grow the tree, and keep
 the comments.
 
-`src/messages.rs` has no messages yet, just the line `// bonsai:message`,
+`src/messages.rs` has no messages yet: just a line that brings bonsai's
+units (`Celsius`, `Meters`…) into scope, and the line `// bonsai:message`,
 which marks where `bonsai message add` puts new ones. Each branch you add
 gets a `// bonsai:input-arm` line the same way. **Keep every `// bonsai:…`
 comment:** they're where bonsai edits your files.

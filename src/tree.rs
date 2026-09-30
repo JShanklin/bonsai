@@ -42,6 +42,32 @@ const RESERVED: &[&str] = &[
     "EdgeIn", "EdgeOut", "Edge", "Packet",
 ];
 
+/// The types in the runtime's `units` module (`src/bonsai.rs`): usable as
+/// message fields, and not as message names.
+pub const UNITS: &[&str] = &[
+    "Celsius",
+    "Fahrenheit",
+    "Kelvin",
+    "Meters",
+    "Feet",
+    "Kilometers",
+    "MetersPerSecond",
+    "Knots",
+    "KilometersPerHour",
+    "Seconds",
+    "Hertz",
+    "Degrees",
+    "Radians",
+    "Volts",
+    "Amps",
+    "Watts",
+    "Pascals",
+    "Hectopascals",
+    "Percent",
+];
+
+const UNITS_IMPORT: &str = "pub use crate::bonsai::units::*;";
+
 fn exit(msg: impl std::fmt::Display) -> ! {
     eprintln!("{msg}");
     std::process::exit(1);
@@ -646,7 +672,7 @@ pub fn message_add(name: &str, fields: &[String]) -> io::Result<()> {
             "`{name}`: a message name is an UpperCamelCase identifier"
         ));
     }
-    if RESERVED.contains(&name) {
+    if RESERVED.contains(&name) || UNITS.contains(&name) {
         usage(format!(
             "`{name}` is a name the generated code uses; pick another"
         ));
@@ -655,7 +681,12 @@ pub fn message_add(name: &str, fields: &[String]) -> io::Result<()> {
         exit(format!("there's already a message `{name}` in {MESSAGES}"));
     }
     let fields = crate::parse_fields(fields);
-    let src = read(MESSAGES);
+    let mut src = read(MESSAGES);
+    if fields.iter().any(|(_, ty)| uses_units(ty))
+        && let Some(with) = with_units_import(&src)
+    {
+        src = with;
+    }
     let new = crate::insert_before_marker(
         Path::new(MESSAGES),
         src,
@@ -665,6 +696,35 @@ pub fn message_add(name: &str, fields: &[String]) -> io::Result<()> {
     std::fs::write(MESSAGES, new)?;
     println!("added message {name} to {MESSAGES}");
     Ok(())
+}
+
+/// Whether a field type names a unit (`Celsius`, `Vec<Meters>`, `Option<Knots>`).
+fn uses_units(ty: &str) -> bool {
+    ty.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .any(|word| UNITS.contains(&word))
+}
+
+/// `src` (src/messages.rs) with the units in scope, below its doc comment;
+/// None when they already are. Trees planted before units lack the line.
+fn with_units_import(src: &str) -> Option<String> {
+    if src.lines().any(|l| l.trim() == UNITS_IMPORT) {
+        return None;
+    }
+    let docs: usize = src
+        .split_inclusive('\n')
+        .take_while(|l| l.starts_with("//!"))
+        .map(str::len)
+        .sum();
+    let (head, rest) = src.split_at(docs);
+    let blank = if head.is_empty() { "" } else { "\n" };
+    Some(format!(
+        "{head}{blank}#[allow(unused_imports)] // units (`temp: Celsius`), here and in every branch\n{UNITS_IMPORT}\n{}",
+        if rest.starts_with('\n') {
+            rest.to_string()
+        } else {
+            format!("\n{rest}")
+        }
+    ))
 }
 
 /// Take `name`'s struct out of `src`, with the attributes and doc comments
@@ -997,6 +1057,28 @@ pub fn with_macro_use(main_src: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn units_are_imported_once_when_a_field_uses_one() {
+        assert!(uses_units("Celsius") && uses_units("Vec<Meters>") && uses_units("Option<Knots>"));
+        assert!(!uses_units("f32") && !uses_units("CelsiusReading"));
+        let old = "//! doc\n//! more\n\n// bonsai:message\n";
+        let new = with_units_import(old).unwrap();
+        assert_eq!(
+            new,
+            "//! doc\n//! more\n\n#[allow(unused_imports)] // units (`temp: Celsius`), here and in every branch\n\
+             pub use crate::bonsai::units::*;\n\n// bonsai:message\n"
+        );
+        assert_eq!(with_units_import(&new), None);
+    }
+
+    #[test]
+    fn every_unit_is_in_the_runtime() {
+        for unit in UNITS {
+            assert!(RUNTIME.contains(&format!("unit!({unit}, ")), "{unit}");
+        }
+        assert_eq!(RUNTIME.matches("    unit!(").count(), UNITS.len());
+    }
 
     #[test]
     fn macro_use_is_added_once() {

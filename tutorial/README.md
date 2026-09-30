@@ -33,6 +33,7 @@ to paste, and shows how to check it works.
 | [Edges: serial](guides/edges-serial.md) | a UART or USB-serial port: a GPS, a flight controller |
 | [Edges: MAVLink](guides/edges-mavlink.md) | flight controllers and ground stations: heartbeats and telemetry |
 | [Edges: your own](guides/edges-custom.md) | the `Edge` trait, for anything the built-ins don't cover |
+| [Units](guides/units.md) | `Celsius`, `Meters`, `Knots`…: numbers the compiler won't mix up |
 | [Wire format](guides/wire-format.md) | compact binary messages (serde + postcard + COBS) |
 | [Testing](guides/testing.md) | branches and the whole tree, with no network |
 | [Deploy](guides/deploy.md) | release builds, running on a Pi, as a service |

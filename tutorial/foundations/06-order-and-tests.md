@@ -73,21 +73,21 @@ mod tests {
 
         let mut out = Out::default();
         let reading = Reading {
-            temp_c10: 300,
-            humidity: 55,
+            temp: Celsius(30.0),
+            humidity: Percent(55.0),
         };
         watchdog.process(Input::Reading(reading), &mut out);
         assert!(out.sent().is_empty());
 
         let mut out = Out::default();
         let reading = Reading {
-            temp_c10: 310,
-            humidity: 55,
+            temp: Celsius(31.0),
+            humidity: Percent(55.0),
         };
         watchdog.process(Input::Reading(reading), &mut out);
         assert!(matches!(
             out.sent(),
-            [Msg::WatchdogAlarm(Alarm { temp_c10: 310 })]
+            [Msg::WatchdogAlarm(alarm)] if alarm.temp == Celsius(31.0)
         ));
     }
 }
@@ -113,10 +113,10 @@ mod tests {
             let mut out = Out::default();
             sensor.process(Input::Tick, &mut out);
             if let [Msg::SensorReading(reading)] = out.sent() {
-                temps.push(reading.temp_c10);
+                temps.push(reading.temp.0);
             }
         }
-        assert_eq!(temps, [265, 280, 295, 310, 325, 340, 250, 265]);
+        assert_eq!(temps, [26.5, 28.0, 29.5, 31.0, 32.5, 34.0, 25.0, 26.5]);
     }
 }
 ```
@@ -129,20 +129,23 @@ cargo local-test
 ```
 
 ```
-running 8 tests
-test bonsai::log::tests::a_branch_being_processed_tags_its_lines ... ok
+running 11 tests
+test bonsai::stats::tests::a_snapshot_renders_as_tab_separated_rows ... ok
 test bonsai::log::tests::filter_takes_a_default_and_per_source_levels ... ok
+test bonsai::log::tests::a_branch_being_processed_tags_its_lines ... ok
 test bonsai::log::tests::lines_carry_utc_time_level_and_source ... ok
 test bonsai::stats::tests::the_same_name_gets_the_same_counts ... ok
-test bonsai::stats::tests::a_snapshot_renders_as_tab_separated_rows ... ok
 test bonsai::top::tests::bonsai_top_picks_the_address ... ok
+test bonsai::units::tests::a_kind_converts_both_ways ... ok
+test bonsai::units::tests::units_multiply_into_others ... ok
+test bonsai::units::tests::units_print_with_their_symbol ... ok
 test branches::sensor::tests::warms_then_starts_over ... ok
 test branches::watchdog::tests::alarms_only_above_the_limit ... ok
 
-test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-The first six are bonsai's own, in `src/bonsai.rs`. Chapter 7 adds a test
+The first nine are bonsai's own, in `src/bonsai.rs`. Chapter 7 adds a test
 that drives the whole tree. The [testing guide](../guides/testing.md) has
 more.
 

@@ -120,6 +120,17 @@ delete each other's runs: a running tree holds a lock on the `.running`
 file in its folder. The run that tidied up says so under its START
 (`removed 6 old run folder(s) (keep_runs 3, keep_days 0)`).
 
+Trees starting together in one `dir` take turns: each holds a lock on
+`dir/.bonsai-record.lock` while it makes its folder and tidies up. A
+folder is made as `.new-<pid>-<n>`, gets its `.running` lock, and only
+then takes its run's name, so no tree ever sees a run folder that isn't
+locked. A `.new-*` folder left by a tree killed at that moment is cleared
+by the next one. A tree that can't get that lock within 5 s
+(`record::DIR_LOCK_WAIT`), or can't open it, still records its run but
+deletes nothing that time, and says so under its START (`old runs not
+pruned this time: …`). So `dir` can briefly hold more than `keep_runs`,
+never fewer than the runs in use.
+
 `0` means no limit for any of the three. A tree whose `[record]` doesn't
 name them (one planted before they existed) gets the defaults.
 

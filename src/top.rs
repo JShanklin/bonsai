@@ -21,6 +21,9 @@ use ratatui::{DefaultTerminal, Frame};
 pub const PORT: u16 = 7777;
 /// Log lines top keeps.
 const KEEP: usize = 1000;
+/// Rates are taken over this long, so a branch ticking once a second doesn't
+/// flicker between 0 and 2 from one half-second report to the next.
+const WINDOW_MS: u64 = 2000;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Branch {
@@ -314,21 +317,26 @@ pub fn top(args: &[String]) -> io::Result<()> {
     result
 }
 
-/// Two snapshots half a second apart, printed as tables: for scripts, and a
+/// Snapshots two seconds apart, printed as tables: for scripts, and a
 /// terminal that can't show the live view.
 fn print_once(dest: &Option<String>, port: u16, title: &str) -> io::Result<()> {
     let (mut r, child) = connect(dest, port)?;
     let first = read_snapshot(&mut r);
-    let second = read_snapshot(&mut r);
-    if let Some(mut child) = child {
-        let why = ssh_error(&mut child);
-        if let (Err(_) | Ok(None), Some(why)) = (&first, why) {
-            return Err(bad(why));
-        }
+    if let Some(mut child) = child
+        && matches!(first, Err(_) | Ok(None))
+        && let Some(why) = ssh_error(&mut child)
+    {
+        return Err(bad(why));
     }
-    let (Some(a), Some(b)) = (first?, second?) else {
+    let Some(a) = first? else {
         return Err(bad("the tree stopped"));
     };
+    let next =
+        |r: &mut Box<dyn BufRead + Send>| read_snapshot(r)?.ok_or_else(|| bad("the tree stopped"));
+    let mut b = next(&mut r)?;
+    while b.uptime_ms < a.uptime_ms + WINDOW_MS {
+        b = next(&mut r)?;
+    }
     let ms = b.uptime_ms.saturating_sub(a.uptime_ms);
     println!(
         "{title}: up {}, {:.0} events/s, slowest event {}, {} waiting",
@@ -388,7 +396,8 @@ fn avg_us(b: &Branch) -> u64 {
 
 struct App {
     title: String,
-    before: Option<Snapshot>,
+    /// Earlier snapshots, oldest first, back to `WINDOW_MS` ago.
+    history: VecDeque<Snapshot>,
     now: Option<Snapshot>,
     logs: VecDeque<String>,
     status: Option<String>,
@@ -400,6 +409,19 @@ struct App {
 }
 
 impl App {
+    fn new(title: String) -> Self {
+        App {
+            title,
+            history: VecDeque::new(),
+            now: None,
+            logs: VecDeque::new(),
+            status: None,
+            selected: 0,
+            filter: None,
+            paused: false,
+        }
+    }
+
     fn update(&mut self, u: Update) {
         match u {
             Update::Snapshot(mut s) => {
@@ -407,6 +429,7 @@ impl App {
                 // A restarted tree starts its counts again.
                 if self.now.as_ref().is_some_and(|n| s.uptime_ms < n.uptime_ms) {
                     self.now = None;
+                    self.history.clear();
                 }
                 for line in s.logs.drain(..) {
                     if self.logs.len() == KEEP {
@@ -415,7 +438,15 @@ impl App {
                     self.logs.push_back(line);
                 }
                 if !self.paused {
-                    self.before = self.now.take();
+                    self.history.extend(self.now.take());
+                    // Keep the newest one at least WINDOW_MS older than `s`.
+                    while self
+                        .history
+                        .get(1)
+                        .is_some_and(|h| h.uptime_ms + WINDOW_MS <= s.uptime_ms)
+                    {
+                        self.history.pop_front();
+                    }
                     self.now = Some(s);
                 }
             }
@@ -459,7 +490,7 @@ impl App {
             (None, None) => header.push(Span::styled(" connecting… ", dim)),
             (None, Some(s)) => {
                 let ms = self.ms();
-                let events = self.before.as_ref().map_or(0, |b| b.events);
+                let events = self.before().map_or(0, |b| b.events);
                 header.push(Span::raw(format!(
                     " up {}  {:.0} events/s  slowest event {}  {} waiting",
                     uptime(s.uptime_ms),
@@ -486,8 +517,7 @@ impl App {
         // Branches, in the order the core runs them.
         let rows = s.branches.iter().map(|b| {
             let before = self
-                .before
-                .as_ref()
+                .before()
                 .and_then(|x| x.branches.iter().find(|x| x.name == b.name));
             let (inputs, sent) = before.map_or((b.inputs, b.sent), |x| (x.inputs, x.sent));
             let panics = if b.panics > 0 {
@@ -535,8 +565,7 @@ impl App {
         if e_rows > 0 {
             let rows = s.edges.iter().map(|e| {
                 let before = self
-                    .before
-                    .as_ref()
+                    .before()
                     .and_then(|x| x.edges.iter().find(|x| x.name == e.name));
                 let (rx, tx) = before.map_or((e.received, e.sent), |x| (x.received, x.sent));
                 let color = match e.state.as_str() {
@@ -621,9 +650,14 @@ impl App {
         );
     }
 
+    /// The snapshot rates are taken from: about `WINDOW_MS` ago.
+    fn before(&self) -> Option<&Snapshot> {
+        self.history.front()
+    }
+
     /// Milliseconds between the two snapshots rates are taken from.
     fn ms(&self) -> u64 {
-        match (&self.before, &self.now) {
+        match (self.before(), &self.now) {
             (Some(b), Some(n)) => n.uptime_ms.saturating_sub(b.uptime_ms),
             _ => 0,
         }
@@ -659,16 +693,7 @@ fn log_line(l: &str) -> Line<'_> {
 }
 
 fn run_ui(mut term: DefaultTerminal, rx: mpsc::Receiver<Update>, title: String) -> io::Result<()> {
-    let mut app = App {
-        title,
-        before: None,
-        now: None,
-        logs: VecDeque::new(),
-        status: None,
-        selected: 0,
-        filter: None,
-        paused: false,
-    };
+    let mut app = App::new(title);
     loop {
         while let Ok(u) = rx.try_recv() {
             app.update(u);
@@ -761,6 +786,25 @@ mod tests {
         assert_eq!(took(850), "850 µs");
         assert_eq!(took(12_400), "12.4 ms");
         assert_eq!(took(1_200_000), "1.2 s");
+    }
+
+    #[test]
+    fn rates_are_taken_over_about_two_seconds() {
+        let mut app = App::new("t".into());
+        let at = |ms: u64| {
+            Update::Snapshot(Snapshot {
+                uptime_ms: ms,
+                ..Default::default()
+            })
+        };
+        for ms in (0..=3000).step_by(500) {
+            app.update(at(ms));
+        }
+        assert_eq!(app.before().map(|b| b.uptime_ms), Some(1000));
+        assert_eq!(app.ms(), 2000);
+        // A restarted tree starts over.
+        app.update(at(500));
+        assert_eq!(app.ms(), 0);
     }
 
     #[test]

@@ -137,7 +137,11 @@ impl<B: Branch> Slot<B> {
         log::enter(outer);
         if result.is_err() {
             self.stats.record(took, 0, true);
-            log::write(log::Level::Warn, Some(self.name), format_args!("set up again after a panic"));
+            log::write(
+                log::Level::Warn,
+                Some(self.name),
+                format_args!("set up again after a panic"),
+            );
             return B::Out::default();
         }
         self.stats.record(took, out.count(), false);
@@ -313,7 +317,10 @@ pub mod log {
     impl Filter {
         /// The filter `spec` describes, and the words it didn't understand.
         pub fn parse(spec: &str) -> (Filter, Vec<String>) {
-            let mut filter = Filter { default: Level::Info, sources: Vec::new() };
+            let mut filter = Filter {
+                default: Level::Info,
+                sources: Vec::new(),
+            };
             let mut bad = Vec::new();
             for part in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
                 match part.split_once('=') {
@@ -390,11 +397,18 @@ pub mod log {
         if !settings.filter.allows(level, source) {
             return;
         }
-        let line = format!("{}{}", time(SystemTime::now()), line(level, source, message));
+        let line = format!(
+            "{}{}",
+            time(SystemTime::now()),
+            line(level, source, message)
+        );
         let shown = if settings.color {
             let (time, rest) = line.split_at(13);
             let (label, rest) = rest.split_at(6);
-            format!("\x1b[2m{time}\x1b[0m{}{label}\x1b[0m{rest}\n", level.color())
+            format!(
+                "\x1b[2m{time}\x1b[0m{}{label}\x1b[0m{rest}\n",
+                level.color()
+            )
         } else {
             format!("{line}\n")
         };
@@ -478,8 +492,14 @@ pub mod log {
         fn lines_carry_utc_time_level_and_source() {
             let t = UNIX_EPOCH + std::time::Duration::from_millis(86_400_000 * 3 + 50_703_123);
             assert_eq!(time(t), "14:05:03.123Z");
-            assert_eq!(line(Level::Info, "pulse", format_args!("beat")), "  INFO pulse: beat");
-            assert_eq!(line(Level::Error, "gps", format_args!("x")), " ERROR gps: x");
+            assert_eq!(
+                line(Level::Info, "pulse", format_args!("beat")),
+                "  INFO pulse: beat"
+            );
+            assert_eq!(
+                line(Level::Error, "gps", format_args!("x")),
+                " ERROR gps: x"
+            );
         }
 
         #[test]
@@ -671,7 +691,15 @@ pub mod stats {
             s.uptime_ms, s.events, s.max_event_us, s.inbox
         );
         for (name, n) in &s.branches {
-            o += &format!("branch\t{}\t{}\t{}\t{}\t{}\t{}\n", clean(name), n[0], n[1], n[2], n[3], n[4]);
+            o += &format!(
+                "branch\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                clean(name),
+                n[0],
+                n[1],
+                n[2],
+                n[3],
+                n[4]
+            );
         }
         for (name, state, n, error) in &s.edges {
             o += &format!(
@@ -759,7 +787,9 @@ pub mod top {
             let listener = match TcpListener::bind(&addr).await {
                 Ok(listener) => listener,
                 Err(e) => {
-                    warn!("top: can't listen on {addr} ({e}); set BONSAI_TOP to another port, or off");
+                    warn!(
+                        "top: can't listen on {addr} ({e}); set BONSAI_TOP to another port, or off"
+                    );
                     return;
                 }
             };
@@ -796,7 +826,10 @@ pub mod top {
             assert_eq!(address(None).as_deref(), Some(DEFAULT));
             assert_eq!(address(Some("off")), None);
             assert_eq!(address(Some("7000")).as_deref(), Some("127.0.0.1:7000"));
-            assert_eq!(address(Some("0.0.0.0:7000")).as_deref(), Some("0.0.0.0:7000"));
+            assert_eq!(
+                address(Some("0.0.0.0:7000")).as_deref(),
+                Some("0.0.0.0:7000")
+            );
         }
     }
 }

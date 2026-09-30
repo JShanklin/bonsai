@@ -5,7 +5,7 @@ Build for real, and get it onto the device.
 ## Raspberry Pi
 
 Release builds are already tuned: link-time optimization, optimized for size
-(for speed on a Pi 5), stripped, `panic = "abort"`. The tree's
+(for speed on a Pi 5), and stripped. The tree's
 `.cargo/config.toml` builds for the Pi, so the usual cargo commands do the
 right thing:
 
@@ -60,7 +60,7 @@ differ between boards: check the ones your branches open.
 ```
 
 It swaps the build target, linker, runner and release profile for the new
-board's. Branches, nutrients and `BONSAI_PI` stay. `bonsai retarget host`
+board's. Branches, messages, edges and `BONSAI_PI` stay. `bonsai retarget host`
 moves the tree to your own computer (plain `cargo run`), and back again later.
 
 **On the Pi itself,** `cargo build --release` and `cargo run --release` work as
@@ -91,16 +91,31 @@ WantedBy=multi-user.target
 
 ```sh
 sudo systemctl enable --now greenhouse
-journalctl -u greenhouse -f      # its output
+journalctl -u greenhouse -f      # its log
 ```
 
-`Restart=always` matters: with `panic = "abort"`, a panic in any thread ends
-the program, and systemd starts it again.
+The tree logs to stderr, so its lines land in the journal as they are. To
+choose what's logged, add `Environment=BONSAI_LOG=warn,uplink=info` under
+`[Service]`. `NO_COLOR` isn't needed: the level is only coloured on a
+terminal.
+
+A panic in a branch doesn't stop the tree (the branch is set up again), and
+a failing edge restarts by itself. `Restart=always` is for the rest: the
+program being killed, running out of memory, or a bug outside a branch.
+
+**Watch it** from your computer while it runs, over ssh like `cargo run`:
+
+```sh
+bonsai top
+```
+
+It needs nothing on the Pi but sshd. See [chapter 8](../foundations/08-watching.md).
 
 ## Before you ship
 
 - `cargo build --release` with no warnings, and `cargo clippy` clean.
 - `bonsai list` shows no wiring warnings.
-- Queue caps sized from a real run (`BONSAI_SAP_DEBUG=1`).
+- `bonsai top` on a real run: no edge `retrying`, nothing `dropped`, no
+  panics, and `waiting` near 0.
 - No `.unwrap()` on anything that can fail at runtime (input, I/O, parsing).
 

@@ -291,6 +291,7 @@ fn add_arm(branch: &str, variant: &str) -> io::Result<()> {
     let Ok(src) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
+    let src = crate::marker_on_own_line(&src, INPUT_ARM);
     if src.lines().any(|l| is_input_arm(l, variant)) {
         return Ok(());
     }
@@ -313,7 +314,9 @@ fn remove_arm(branch: &str, variant: &str) -> io::Result<()> {
     let Ok(src) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    if let Some(new) = crate::remove_balanced_span(&src, |l| is_input_arm(l, variant)) {
+    // Put a pulled-up marker back first, so it isn't removed with its arm.
+    let fixed = crate::marker_on_own_line(&src, INPUT_ARM);
+    if let Some(new) = crate::remove_balanced_span(&fixed, |l| is_input_arm(l, variant)) {
         std::fs::write(&path, new)?;
     }
     Ok(())
@@ -789,7 +792,12 @@ pub fn rate(branch: &str, hz: &str) -> io::Result<()> {
         } else {
             t.insert("rate", value(n));
         }
-        println!("{branch} ticks {hz} times a second: `Input::Tick` in its process");
+        let how_often = if n == 1.0 {
+            "once a second".to_string()
+        } else {
+            format!("{hz} times a second")
+        };
+        println!("{branch} ticks {how_often}: `Input::Tick` in its process");
     }
     let after = save_checked(&doc)?;
     reconcile_arms(&before, &after)?;

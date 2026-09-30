@@ -1178,24 +1178,35 @@ fn rust_value(s: &Setting) -> String {
 
 /// `src/branches/mod.rs`: one module per branch.
 pub fn render_mod(cfg: &Config) -> String {
-    let mut o = format!("//! The branches.\n{HEADER}\n");
-    for b in &cfg.branches {
-        o.push_str(&format!("pub mod {};\n", b.name));
-    }
-    o
+    let names = cfg.branches.iter().map(|b| (b.name.as_str(), "")).collect();
+    mods("//! The branches.\n", names)
 }
 
 /// `src/edges/mod.rs`: one module per custom edge, plus bonsai's serial edge
 /// while the tree has one.
 pub fn render_edges_mod(cfg: &Config) -> String {
-    let mut o = format!("//! The custom edges.\n{HEADER}\n");
+    let mut names: Vec<(&str, &str)> = cfg
+        .edges
+        .iter()
+        .filter(|e| matches!(e.kind, EdgeKind::Custom { .. }))
+        .map(|e| (e.name.as_str(), ""))
+        .collect();
     if cfg.has_serial() {
-        o.push_str("pub mod serial; // bonsai's serial edge\n");
+        names.push(("serial", " // bonsai's serial edge"));
     }
-    for e in &cfg.edges {
-        if matches!(e.kind, EdgeKind::Custom { .. }) {
-            o.push_str(&format!("pub mod {};\n", e.name));
-        }
+    mods("//! The custom edges.\n", names)
+}
+
+/// A `mod.rs` of `pub mod`s, sorted as `cargo fmt` sorts them (so it leaves
+/// the file alone).
+fn mods(title: &str, mut names: Vec<(&str, &str)>) -> String {
+    names.sort();
+    let mut o = format!("{title}{HEADER}");
+    if !names.is_empty() {
+        o.push('\n');
+    }
+    for (name, comment) in names {
+        o.push_str(&format!("pub mod {name};{comment}\n"));
     }
     o
 }
@@ -1420,7 +1431,7 @@ to = ["gcs"]
     fn mod_lists_every_branch() {
         let m = render_mod(&parse(TREE).unwrap());
         assert!(
-            m.ends_with("\npub mod pulse;\npub mod radio;\npub mod log;\n"),
+            m.ends_with("\npub mod log;\npub mod pulse;\npub mod radio;\n"),
             "{m}"
         );
     }
@@ -1639,7 +1650,7 @@ to = ["b"]
         );
         let m = render_edges_mod(&cfg);
         assert!(
-            m.ends_with("\npub mod serial; // bonsai's serial edge\npub mod radio;\n"),
+            m.ends_with("\npub mod radio;\npub mod serial; // bonsai's serial edge\n"),
             "{m}"
         );
         assert!(cfg.has_serial());

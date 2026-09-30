@@ -128,13 +128,16 @@ BONSAI_PI=virtual-pi5 cargo run --release
 ```
      Running `sh -c '[ "$(uname -m)" = aarch64 ] && exec "$@"
 …
-bonsai: beat
-bonsai: beat
+10:40:50.159Z  INFO bonsai: running
+10:40:50.161Z  INFO pulse: beat
+10:40:50.661Z  INFO pulse: beat
 ```
 
 The tree's runner copies the binary with `scp` and runs it over `ssh`, so the
 virtual Pi is just another ssh host. To make it the default, set
 `BONSAI_PI = "virtual-pi5"` in `.cargo/config.toml`. Ctrl-C stops the program.
+`bonsai top` reaches it the same way, over ssh (`BONSAI_PI=virtual-pi5
+bonsai top`).
 
 For a Zero W tree, pick zigbuild in `bonsai tools` first: it has no linker
 otherwise (see [Deploy](deploy.md)). Then `BONSAI_PI=virtual-zero-w cargo run
@@ -150,7 +153,8 @@ otherwise (see [Deploy](deploy.md)). Then `BONSAI_PI=virtual-zero-w cargo run
 | the virtual Pi, to a multicast group (`239.x.x.x`) | the LAN | goes out on `lan0` |
 
 For example, a simulator on your computer sends MAVLink to `10.89.0.2:14550`,
-and a root in the tree listens on `udpin:0.0.0.0:14550`. Check where
+and an edge in the tree binds `0.0.0.0:14550` (see
+[MAVLink](edges-mavlink.md)). Check where
 multicast goes:
 
 ```sh

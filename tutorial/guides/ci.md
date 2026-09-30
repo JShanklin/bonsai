@@ -51,11 +51,14 @@ cargo commands do everything:
 
 ## Also worth checking
 
-Add a step that fails if `src/sap.rs` isn't up to date, which happens after a
-hand edit to `bonsai.toml` or a branch without `bonsai sync`. It needs bonsai
-installed in CI:
+Add a step that fails if the generated files aren't up to date, which
+happens after a hand edit to `bonsai.toml` or `src/messages.rs` without
+`bonsai sync`. It needs bonsai installed in CI:
 
 ```yaml
       - run: cargo install --git https://github.com/JShanklin/bonsai.git
-      - run: bonsai sync && git diff --exit-code src/sap.rs
+      - run: bonsai sync && git diff --exit-code src/bonsai.rs src/wiring.rs src/settings.rs src/branches/mod.rs src/edges/
 ```
+
+bonsai's edits to your branches (a new arm, say) aren't formatted, so run
+`cargo fmt` before you commit, or the `cargo fmt --check` step fails.

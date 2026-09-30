@@ -954,6 +954,50 @@ mod tests {
     // writes from that template's own bonsai.toml and messages.rs — otherwise
     // a fresh tree would change on its first command. The branch sources and
     // messages are the same on every board.
+    /// `cargo fmt` in a tree must leave the generated files it formats as
+    /// they are (src/wiring.rs and src/settings.rs are `#[rustfmt::skip]`),
+    /// or `cargo fmt --check` fails on a new tree and `bonsai sync` undoes it.
+    #[test]
+    fn generated_files_are_rustfmt_clean() {
+        use std::io::Write;
+        let fmt = |src: &str| -> Option<String> {
+            // Its own directory: another test moves the process's cwd around.
+            let mut child = Command::new("rustfmt")
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .args(["--edition", "2024", "--emit", "stdout"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .ok()?;
+            child.stdin.take()?.write_all(src.as_bytes()).ok()?;
+            let out = child.wait_with_output().ok()?;
+            Some(String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let Some(_) = fmt("") else {
+            eprintln!("rustfmt isn't installed; skipping");
+            return;
+        };
+        let cfg = graph::parse(
+            "[branch.zeta]\n[branch.alpha]\n[edge.radio]\nkind = \"custom\"\n\
+             [edge.gps]\nkind = \"serial\"\ndevice = \"/dev/ttyS0\"\nbaud = 9600\n",
+        )
+        .unwrap();
+        let empty = graph::parse("").unwrap();
+        for (what, src) in [
+            ("the runtime", tree::RUNTIME.to_string()),
+            ("the serial edge", tree::SERIAL.to_string()),
+            ("branches/mod.rs", graph::render_mod(&cfg)),
+            ("edges/mod.rs", graph::render_edges_mod(&cfg)),
+            ("an empty edges/mod.rs", graph::render_edges_mod(&empty)),
+        ] {
+            assert_eq!(
+                fmt(&src).as_deref(),
+                Some(src.as_str()),
+                "{what} isn't rustfmt-clean"
+            );
+        }
+    }
+
     #[test]
     fn template_wiring_matches_generator() {
         for &board in &board_names() {
@@ -1060,6 +1104,34 @@ mod tests {
         assert!(
             insert_indented_before("    match input {}\n", "// bonsai:input-arm", "x").is_none()
         );
+    }
+
+    // After `cargo fmt`, the marker trails the last arm; it goes back on its
+    // own line, and new arms land above it again.
+    #[test]
+    fn marker_pulled_up_by_rustfmt_is_put_back() {
+        let m = "// bonsai:input-arm";
+        let empty_arm =
+            "        match input {\n            Input::Tick => {} // bonsai:input-arm\n        }\n";
+        let fixed = marker_on_own_line(empty_arm, m);
+        assert_eq!(
+            fixed,
+            "        match input {\n            Input::Tick => {}\n            // bonsai:input-arm\n        }\n"
+        );
+        let out = insert_indented_before(&fixed, m, "Input::Beat(_beat) => {}").unwrap();
+        assert!(out.contains("Input::Tick => {}\n            Input::Beat(_beat) => {}\n            // bonsai:input-arm\n"));
+        let block_arm = "    match input {\n        Input::Tick => {\n            go();\n        } // bonsai:input-arm\n    }\n";
+        assert_eq!(
+            marker_on_own_line(block_arm, m),
+            "    match input {\n        Input::Tick => {\n            go();\n        }\n        // bonsai:input-arm\n    }\n"
+        );
+        // Prose that mentions the marker, and the marker itself, are left alone.
+        for same in [
+            "/// keep the `// bonsai:input-arm` line\n",
+            "    // bonsai:input-arm\n",
+        ] {
+            assert_eq!(marker_on_own_line(same, m), same);
+        }
     }
 
     // A filled-in arm spanning lines comes out whole.
@@ -1210,7 +1282,10 @@ mod tests {
         assert!(read("src/branches/sensor.rs").contains("            Input::Tick => {}\n"));
         let wiring = read("src/wiring.rs");
         assert!(wiring.contains("impl Sends<Reading> for Out"), "{wiring}");
-        assert!(read("src/branches/mod.rs").contains("pub mod sensor;\npub mod display;\n"));
+        assert!(
+            read("src/branches/mod.rs")
+                .contains("pub mod display;\npub mod pulse;\npub mod sensor;\n")
+        );
 
         // A filled-in arm spanning lines is removed whole by unwire.
         let display = read("src/branches/display.rs").replace(
@@ -1298,6 +1373,33 @@ mod tests {
 
 /// Insert `content` as a line just above the whole-line `marker`, indented to
 /// match it. None if the file has no such marker.
+/// `src` with `marker` back on a line of its own where `cargo fmt` has pulled
+/// it up behind the code before it (`Input::Tick => {} // bonsai:input-arm`,
+/// or `} // bonsai:input-arm` after a block arm): rustfmt makes a comment
+/// that follows an arm with no comma into that arm's trailing comment. A
+/// line that is itself a comment is prose, and left alone.
+fn marker_on_own_line(src: &str, marker: &str) -> String {
+    let mut out = String::with_capacity(src.len() + 16);
+    for l in src.split_inclusive('\n') {
+        let body = l.trim_end_matches(['\n', '\r']);
+        if let Some(code) = body.strip_suffix(marker)
+            && code.ends_with(' ')
+            && !code.trim().is_empty()
+            && !code.trim_start().starts_with("//")
+        {
+            let indent: String = l.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+            out.push_str(code.trim_end());
+            out.push('\n');
+            out.push_str(&indent);
+            out.push_str(marker);
+            out.push_str(&l[body.len()..]);
+        } else {
+            out.push_str(l);
+        }
+    }
+    out
+}
+
 fn insert_indented_before(src: &str, marker: &str, content: &str) -> Option<String> {
     let mut offset = 0;
     for l in src.split_inclusive('\n') {

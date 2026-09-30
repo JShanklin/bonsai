@@ -100,9 +100,9 @@ fn process(&mut self, input: Input, out: &mut Out) {
 ## Learn it
 
 **[The tutorial](tutorial/README.md)** goes from no background to building
-real projects. It's being rewritten for bonsai 2: the setup and Rust chapters
-and the Pi guides apply as they are; the chapters on branches and messages
-still describe bonsai 1.
+real projects: eight chapters that grow one tree, **greenhouse**, from
+planting it to watching it with `bonsai top`, then guides for each edge
+(UDP, TCP, serial, MAVLink, your own), testing, deploying to a Pi, and CI.
 
 ## Install
 
@@ -269,7 +269,7 @@ bonsai 2 lands in steps:
    serial, configured in `bonsai.toml`, plus an `Edge` trait for your own.
 4. ✅ Logs tagged with the branch or edge that wrote them.
 5. ✅ Stats, and `bonsai top`: a live view of a running tree.
-6. The tutorial, rewritten.
+6. ✅ The tutorial, rewritten.
 
 | board | chip | target | status |
 |-------|------|--------|--------|

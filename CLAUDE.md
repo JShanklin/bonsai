@@ -22,8 +22,8 @@ old commands at their replacements.
 bonsai 2 lands as a series of PRs: 1 Linux only, 2 the deterministic core,
 3 edges (built-in UDP/TCP/serial bridges to the outside, in `bonsai.toml`,
 plus an `Edge` trait), 4 logs tagged by the branch or edge that wrote them,
-5 stats and `bonsai top` (a live TUI, over ssh for a Pi) — all done — then
-6 the tutorial rewrite.
+5 stats and `bonsai top` (a live TUI, over ssh for a Pi), 6 the tutorial
+rewrite — all done.
 
 ## Commands
 
@@ -95,8 +95,8 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   those plus `src/bonsai.rs` (`tree::RUNTIME`, from
   `templates/_tree/bonsai.rs`), only when changed; while the tree has a serial
   edge it also writes `src/edges/serial.rs` (`templates/_tree/serial.rs`) and
-  adds `tokio-serial` (default features off: no libudev, cross-builds for the
-  Zero W) with `with_dependency`, and removes both with the last one
+  adds `tokio-serial` (its defaults pull in no libudev, so it cross-builds
+  for the Zero W) with `with_dependency`, and removes both with the last one
   (`without_dependency`). Every graph command ends with it.
 - **The runtime** (`templates/_tree/bonsai.rs`, a tree's `src/bonsai.rs`):
   `trait Branch { type Input; type Out: Default; fn setup() -> Self; fn
@@ -215,9 +215,10 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   ssh's last stderr line becomes the error). A reader thread parses snapshots
   (`read_snapshot`/`parse`, pure; version in the first field, unknown row
   kinds skipped) and reconnects every second; the ratatui view shows the core,
-  branches and edges tables (rates from counter deltas over the snapshots'
-  uptime, `per_sec`) and the log tail, filterable by source (`source`).
-  `--once` prints two snapshots' worth as plain tables. The format must match
+  branches and edges tables (rates from counter deltas over the tree's
+  uptime, `per_sec`, across a `WINDOW_MS` (2 s) history of snapshots, so a
+  1 Hz branch doesn't flicker) and the log tail, filterable by source
+  (`source`). `--once` prints tables from snapshots 2 s apart. The format must match
   `templates/_tree/bonsai.rs`'s `stats::render` (both sides are unit-tested
   against the same text).
 - **`regrow`** (`regrow`): wipes the cwd back to a fresh template (destructive,
@@ -276,7 +277,17 @@ graph commands work inside a tree where `templates/` isn't present.
   commands insert. `insert_before_marker`/`insert_indented_before` match them
   as a **whole trimmed line**, so never remove them and never let a template's
   only occurrence be inside prose. A missing arm marker only prints a note
-  (the compiler still demands the arm).
+  (the compiler still demands the arm). `cargo fmt` pulls the arm marker up
+  behind the last arm (`} // bonsai:input-arm`: a comment after an arm with
+  no comma becomes its trailing comment), so `add_arm`/`remove_arm` first put
+  it back on its own line (`marker_on_own_line`; a line that is itself a
+  comment is prose and left alone).
+- **Generated files stay rustfmt-clean.** `cargo fmt` formats
+  `src/bonsai.rs`, `src/branches/mod.rs` and `src/edges/mod.rs` (only
+  `wiring`/`settings` are `#[rustfmt::skip]`), so the runtime is kept
+  formatted and `mod.rs` lists are sorted, or `cargo fmt --check` fails on a
+  new tree and `bonsai sync` undoes the formatting;
+  `generated_files_are_rustfmt_clean` checks it.
 - **Generated files are output, never input.** The sources of truth are
   `bonsai.toml` and `src/messages.rs`; branch files are scanned for nothing
   (the compiler checks them against the generated `Input`/`Out`). Arms are
@@ -323,14 +334,14 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
 
 ## Docs
 
-- `README.md` explains what bonsai is. How-to material lives in `tutorial/`,
-  which still describes bonsai 1 from chapter 3 on (flagged at its top) until
-  PR 6 rewrites it:
-  `foundations/` (read in order; builds the running **greenhouse** project on
-  the rpi zero-2w template, so it runs on a PC) and `guides/` (short
-  self-contained recipes: roots over UDP/TCP/serial/MAVLink, wire format,
-  testing, deploy, a virtual Pi (arm64 Podman container, qemu, macvlan/ipvlan), CI,
-  troubleshooting).
+- `README.md` explains what bonsai is. How-to material lives in `tutorial/`:
+  `foundations/` (8 chapters, read in order; builds the running
+  **greenhouse** project on the zero-2w template, run with `cargo local` so
+  it runs on a PC: sensor → watchdog → display, a `limit_c10` setting, a UDP
+  `uplink` edge with a text protocol, tests, logs and `bonsai top`) and
+  `guides/` (short self-contained recipes: edges over UDP/TCP/serial/MAVLink
+  and custom edges, wire format, testing, deploy, build tools, a virtual Pi
+  (arm64 Podman container, qemu, macvlan/ipvlan), CI, troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold
   comments are one short line saying what to change and why; placeholders

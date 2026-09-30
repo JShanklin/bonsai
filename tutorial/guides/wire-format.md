@@ -73,30 +73,39 @@ postcard bytes and back.
 
 ## Use it in a branch
 
-Over UDP, one datagram is one message. The watchdog's arms become (with
-`use crate::wire::{self, Wire};` at the top):
+Over UDP, one datagram is one message. Inside the tree a temperature is a
+`Celsius`; on the wire it's a whole number of tenths of a degree, which
+postcard stores in 2 bytes or less. The watchdog converts at the edge of the
+tree. With `use crate::wire::{self, Wire};` at the top, its arms become:
 
 ```rust
 Input::Reading(reading) => {
-    if reading.temp_c10 > self.limit_c10 {
-        out.send(Alarm {
-            temp_c10: reading.temp_c10,
-        });
+    if reading.temp > self.limit {
+        out.send(Alarm { temp: reading.temp });
         let alarm = Wire::Alarm {
-            temp_c10: reading.temp_c10,
+            temp_c10: tenths(reading.temp),
         };
         out.to_uplink(Packet::new(wire::encode(&alarm)));
     }
 }
 Input::Uplink(packet) => match wire::decode(&packet.bytes) {
     Some(Wire::Limit { temp_c10 }) => {
-        self.limit_c10 = temp_c10;
-        info!("limit is now {temp_c10}");
+        self.limit = Celsius(temp_c10 as f32 / 10.0);
+        info!("limit is now {:.1}", self.limit);
         let answer = Wire::LimitSet { temp_c10 };
         out.to_uplink(packet.reply(wire::encode(&answer)));
     }
     other => warn!("didn't expect {other:?}"),
 },
+```
+
+with, below the `impl`:
+
+```rust
+/// On the wire, a temperature is a whole number of tenths: 2 bytes or less.
+fn tenths(temp: Celsius) -> i16 {
+    (temp.0 * 10.0).round() as i16
+}
 ```
 
 `Wire::Limit { temp_c10: 280 }` is 3 bytes: the variant's number (1), then
@@ -111,7 +120,7 @@ printf '\x01\xb0\x04' | socat - UDP:127.0.0.1:6969 | od -An -tx1
 ```
 
 ```
-11:03:13.753Z  INFO watchdog: limit is now 280
+12:01:08.474Z  INFO watchdog: limit is now 28.0 °C
 ```
 
 ## Byte streams: TCP and serial

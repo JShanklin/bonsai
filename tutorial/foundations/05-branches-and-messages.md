@@ -26,11 +26,12 @@ Each writes `src/branches/<name>.rs` and adds a `[branch.<name>]` table to
 
 ## Messages
 
-A message is a struct with typed fields:
+A message is a struct with typed fields. Give a measurement its unit
+([chapter 2](02-rust-essentials.md#units)):
 
 ```sh
-bonsai message add Reading temp_c10:i16 humidity:u8
-bonsai message add Alarm temp_c10:i16
+bonsai message add Reading temp:Celsius humidity:Percent
+bonsai message add Alarm temp:Celsius
 ```
 
 ```
@@ -43,18 +44,19 @@ added message Alarm to src/messages.rs
 ```rust
 #[derive(Clone, Debug)]
 pub struct Reading {
-    pub temp_c10: i16,
-    pub humidity: u8,
+    pub temp: Celsius,
+    pub humidity: Percent,
 }
 
 #[derive(Clone, Debug)]
 pub struct Alarm {
-    pub temp_c10: i16,
+    pub temp: Celsius,
 }
 ```
 
 Add fields by hand whenever you like; bonsai reads the struct names, not
-their fields.
+their fields. The units come from the `pub use crate::bonsai::units::*;`
+line at the top of the file, which also brings them into every branch.
 
 ## Wires and a rate
 
@@ -146,14 +148,14 @@ error[E0004]: non-exhaustive patterns: `wiring::display::Input::Alarm(_)` not co
 ```
 
 Sending is checked the same way. The sensor is wired to send `Reading` only,
-so `out.send(Alarm { temp_c10: 400 })` in the sensor is an error:
+so `out.send(Alarm { temp: Celsius(40.0) })` in the sensor is an error:
 
 ```
 error[E0308]: mismatched types
   --> src/branches/sensor.rs:28:37
    |
-28 |             Input::Tick => out.send(Alarm { temp_c10: 400 }),
-   |                                ---- ^^^^^^^^^^^^^^^^^^^^^^^ expected `Reading`, found `Alarm`
+28 |             Input::Tick => out.send(Alarm { temp: Celsius(40.0) }),
+   |                                ---- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Reading`, found `Alarm`
 ```
 
 ## A setting
@@ -163,7 +165,7 @@ its code. Add a line to its table:
 
 ```toml
 [branch.watchdog]
-limit_c10 = 300   # too hot above 30.0 °C
+limit = 30.0   # too hot above 30 °C
 ```
 
 ```sh
@@ -179,9 +181,12 @@ Every key in a branch's table except `rate` becomes a constant in
 
 ```rust
 pub mod watchdog {
-    pub const LIMIT_C10: i64 = 300;
+    pub const LIMIT: f64 = 30.0;
 }
 ```
+
+A setting is a plain number (or text, or `true`/`false`); the branch gives
+it its unit.
 
 ## Fill them in
 
@@ -189,13 +194,13 @@ Now write what each branch decides. The state a branch keeps goes in its
 struct, and `setup` makes the starting value.
 
 `src/branches/sensor.rs`: there's no real sensor yet, so pretend. Each tick
-it gets 1.5 °C warmer, until it passes 35.0 °C and starts over. The `let _ =
+it gets 1.5 °C warmer, until it passes 35 °C and starts over. The `let _ =
 out;` line goes, since the sensor sends now:
 
 ```rust
 /// What sensor keeps between inputs.
 pub struct Sensor {
-    temp_c10: i16,
+    temp: Celsius,
 }
 
 impl Branch for Sensor {
@@ -204,7 +209,9 @@ impl Branch for Sensor {
 
     /// Setup: the starting state. Runs again if `process` panics.
     fn setup() -> Self {
-        Sensor { temp_c10: 250 }
+        Sensor {
+            temp: Celsius(25.0),
+        }
     }
 
     /// Process: decide what to do with each input, and `out.send(..)` the
@@ -214,14 +221,14 @@ impl Branch for Sensor {
         match input {
             // `bonsai wire <from> <Message> sensor` adds an arm here
             Input::Tick => {
-                // A pretend sensor: 1.5 °C warmer each time, then back to 25.0.
-                self.temp_c10 += 15;
-                if self.temp_c10 > 350 {
-                    self.temp_c10 = 250;
+                // A pretend sensor: 1.5 °C warmer each time, then back to 25.
+                self.temp += Celsius(1.5);
+                if self.temp > Celsius(35.0) {
+                    self.temp = Celsius(25.0);
                 }
                 out.send(Reading {
-                    temp_c10: self.temp_c10,
-                    humidity: 55,
+                    temp: self.temp,
+                    humidity: Percent(55.0),
                 });
             }
             // bonsai:input-arm
@@ -235,7 +242,7 @@ impl Branch for Sensor {
 
 ```rust
 pub struct Watchdog {
-    limit_c10: i16,
+    limit: Celsius,
 }
 
 impl Branch for Watchdog {
@@ -244,7 +251,7 @@ impl Branch for Watchdog {
 
     fn setup() -> Self {
         Watchdog {
-            limit_c10: settings::watchdog::LIMIT_C10 as i16,
+            limit: Celsius(settings::watchdog::LIMIT as f32),
         }
     }
 
@@ -252,10 +259,8 @@ impl Branch for Watchdog {
         match input {
             // `bonsai wire <from> <Message> watchdog` adds an arm here
             Input::Reading(reading) => {
-                if reading.temp_c10 > self.limit_c10 {
-                    out.send(Alarm {
-                        temp_c10: reading.temp_c10,
-                    });
+                if reading.temp > self.limit {
+                    out.send(Alarm { temp: reading.temp });
                 }
             }
             // bonsai:input-arm
@@ -264,8 +269,11 @@ impl Branch for Watchdog {
 }
 ```
 
+Compare `reading.temp > 30.0` instead, and the compiler stops you: a
+`Celsius` only compares with a `Celsius` (chapter 2 shows the error).
+
 `src/branches/display.rs` sends nothing, so it keeps `let _ = out;`. It logs
-instead, with `info!` and `warn!`:
+instead, with `info!` and `warn!`. Units print with their symbol:
 
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {
@@ -273,13 +281,9 @@ fn process(&mut self, input: Input, out: &mut Out) {
     match input {
         // `bonsai wire <from> <Message> display` adds an arm here
         Input::Reading(reading) => {
-            let temp = reading.temp_c10 as f32 / 10.0;
-            info!("{temp:.1} °C, {}% humidity", reading.humidity);
+            info!("{:.1}, {:.0} humidity", reading.temp, reading.humidity);
         }
-        Input::Alarm(alarm) => {
-            let temp = alarm.temp_c10 as f32 / 10.0;
-            warn!("too hot: {temp:.1} °C");
-        }
+        Input::Alarm(alarm) => warn!("too hot: {:.1}", alarm.temp),
         // bonsai:input-arm
     }
 }
@@ -292,17 +296,17 @@ cargo local
 ```
 
 ```
-11:48:05.717Z  INFO bonsai: running
-11:48:05.718Z  INFO display: 26.5 °C, 55% humidity
-11:48:06.719Z  INFO display: 28.0 °C, 55% humidity
-11:48:07.719Z  INFO display: 29.5 °C, 55% humidity
-11:48:08.718Z  INFO display: 31.0 °C, 55% humidity
-11:48:08.718Z  WARN display: too hot: 31.0 °C
-11:48:09.718Z  INFO display: 32.5 °C, 55% humidity
-11:48:09.718Z  WARN display: too hot: 32.5 °C
+11:54:50.171Z  INFO bonsai: running
+11:54:50.172Z  INFO display: 26.5 °C, 55% humidity
+11:54:51.172Z  INFO display: 28.0 °C, 55% humidity
+11:54:52.172Z  INFO display: 29.5 °C, 55% humidity
+11:54:53.173Z  INFO display: 31.0 °C, 55% humidity
+11:54:53.173Z  WARN display: too hot: 31.0 °C
+11:54:54.172Z  INFO display: 32.5 °C, 55% humidity
+11:54:54.172Z  WARN display: too hot: 32.5 °C
 ```
 
-Each line names the branch that wrote it. Notice 11:48:08.718: the reading,
+Each line names the branch that wrote it. Notice 11:54:53.173: the reading,
 *then* the alarm, both from the sensor's one tick. The core did everything
 that tick set off before taking the next event. Chapter 6 explains why
 that's guaranteed.

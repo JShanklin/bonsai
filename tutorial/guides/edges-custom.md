@@ -87,6 +87,7 @@ use std::time::Duration;
 use tokio::time::{Interval, interval};
 
 use crate::bonsai::Edge;
+use crate::bonsai::units::Celsius;
 use crate::settings::cputemp::PATH;
 
 /// What cputemp keeps open: a timer, to read the temperature once a second.
@@ -105,20 +106,20 @@ impl Cputemp {
     }
 }
 
-/// The temperature in tenths of a degree. The file holds thousandths.
-fn read(path: &str) -> io::Result<i16> {
+/// The temperature. The file holds thousandths of a degree.
+fn read(path: &str) -> io::Result<Celsius> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| io::Error::new(e.kind(), format!("{path}: {e}")))?;
     let millis: i32 = text
         .trim()
         .parse()
         .map_err(|e| io::Error::other(format!("{path}: {e}")))?;
-    Ok((millis / 100) as i16)
+    Ok(Celsius(millis as f32 / 1000.0))
 }
 
 impl Edge for Cputemp {
     /// What it receives; the branches wired from it get it as input.
-    type In = i16;
+    type In = Celsius;
     /// What branches send it with `out.to_cputemp(..)`: nothing.
     type Out = ();
 
@@ -141,13 +142,11 @@ cancel-safe, so dropping a `recv` mid-wait loses nothing. Nothing is ever
 sent to this edge, so its `Out` is `()`, "nothing", and `execute` does
 nothing.
 
-The branch receives plain numbers:
+The edge hands the branch a `Celsius`, so the branch never has to know the
+file counted thousandths:
 
 ```rust
-Input::Cputemp(temp_c10) => {
-    let temp = temp_c10 as f32 / 10.0;
-    info!("CPU at {temp:.1} °C");
-}
+Input::Cputemp(temp) => info!("CPU at {temp:.1}"),
 ```
 
 ## Try it
@@ -168,18 +167,18 @@ echo 49875 > /tmp/cputemp
 ```
 
 ```
-11:01:05.762Z  INFO bonsai: running
-11:01:05.762Z  WARN cputemp: /tmp/cputemp: No such file or directory (os error 2); retrying in 100ms
-11:01:05.864Z  WARN cputemp: /tmp/cputemp: No such file or directory (os error 2); retrying in 200ms
-11:01:06.066Z  WARN cputemp: /tmp/cputemp: No such file or directory (os error 2); retrying in 400ms
-11:01:06.468Z  INFO cputemp: up
-11:01:06.469Z  INFO thermal: CPU at 48.3 °C
-11:01:07.469Z  INFO thermal: CPU at 48.3 °C
-11:01:08.469Z  INFO thermal: CPU at 51.0 °C
-11:01:09.470Z  WARN cputemp: /tmp/cputemp: invalid digit found in string; retrying in 800ms
-11:01:10.271Z  WARN cputemp: /tmp/cputemp: invalid digit found in string; retrying in 1.6s
-11:01:11.873Z  INFO cputemp: up
-11:01:11.874Z  INFO thermal: CPU at 49.8 °C
+12:02:10.928Z  INFO bonsai: running
+12:02:10.928Z  WARN cputemp: /tmp/cputemp: No such file or directory (os error 2); retrying in 100ms
+12:02:11.031Z  WARN cputemp: /tmp/cputemp: No such file or directory (os error 2); retrying in 200ms
+12:02:11.232Z  WARN cputemp: /tmp/cputemp: No such file or directory (os error 2); retrying in 400ms
+12:02:11.633Z  INFO cputemp: up
+12:02:11.634Z  INFO thermal: CPU at 48.3 °C
+12:02:12.635Z  INFO thermal: CPU at 48.3 °C
+12:02:13.634Z  INFO thermal: CPU at 51.1 °C
+12:02:14.634Z  INFO thermal: CPU at 51.1 °C
+12:02:15.634Z  WARN cputemp: /tmp/cputemp: invalid digit found in string; retrying in 800ms
+12:02:16.436Z  INFO cputemp: up
+12:02:16.437Z  INFO thermal: CPU at 49.9 °C
 ```
 
 A missing file, then a bad value: each failure restarts only the edge, and
@@ -190,7 +189,7 @@ the branch never sees a wrong number.
 A test drives the branch with the edge's `In`, no file needed:
 
 ```rust
-core.handle(Event::Edge(EdgeIn::Cputemp(483)));
+core.handle(Event::Edge(EdgeIn::Cputemp(Celsius(48.3))));
 ```
 
 and `core.drain_cputemp()` returns what branches sent the edge.

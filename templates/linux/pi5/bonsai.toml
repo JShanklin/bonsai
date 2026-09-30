@@ -9,7 +9,7 @@
 # `bonsai branch add` writes one. For example:
 #   [branch.sensor]
 #   rate = 1          # an Input::Tick once a second
-#   limit_c10 = 300   # a setting: settings::sensor::LIMIT_C10
+#   limit = 30.0      # a setting: settings::sensor::LIMIT
 
 # Wires: `from` sends `message` to every branch in `to`, in that order
 # (`bonsai wire <from> <Message> <to…>`). For example:

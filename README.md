@@ -45,6 +45,10 @@ already works. bonsai is built to prevent those:
 - **A panic isn't the end.** A branch that panics is set up again; an edge
   that fails or panics is restarted with backoff. The rest of the tree keeps
   running, and the core never waits on an edge.
+- **Units the compiler checks.** `temp: Celsius`, `alt: Meters`, `speed:
+  Knots`: comparing a temperature with a bare number, or adding meters to
+  seconds, doesn't build. `Meters / Seconds` is `MetersPerSecond`, and each
+  prints with its symbol.
 - **Small.** tokio with only the features the runtime uses, and no macros to
   compile: the glue is generated source.
 
@@ -54,8 +58,8 @@ already works. bonsai is built to prevent those:
 bonsai                                   # plant a tree: pick a board, name it
 bonsai branch add sensor
 bonsai branch add display
-bonsai message add Reading temp_c10:i16
-bonsai message add Alarm temp_c10:i16
+bonsai message add Reading temp:Celsius
+bonsai message add Alarm temp:Celsius
 bonsai wire sensor Reading display
 bonsai wire display Alarm sensor
 bonsai rate sensor 4                     # an Input::Tick four times a second
@@ -84,8 +88,8 @@ What you write is the part that matters:
 fn process(&mut self, input: Input, out: &mut Out) {
     match input {
         Input::Reading(reading) => {
-            if reading.temp_c10 > 250 {
-                out.send(Alarm { temp_c10: reading.temp_c10 });
+            if reading.temp > Celsius(25.0) {
+                out.send(Alarm { temp: reading.temp });
             }
         }
     }
@@ -151,6 +155,7 @@ bonsai tools [<tool> …]                         build tools: sccache, mold, zi
 | **wire** | `from` sends a message to branches in `to`, or an edge's packets in or out | a `[[wire]]` in `bonsai.toml` |
 | **rate** | a branch's own clock: `Input::Tick`s per second | `rate` in its `[branch.<name>]` |
 | **settings** | a branch's values, as constants | other keys in `[branch.<name>]` → `src/settings.rs` |
+| **units** | numbers with their unit: `Celsius`, `Meters`, `Knots`… | in every tree's runtime, used in messages |
 | **wiring** | the generated `Input`/`Out` types, the edges and the core | `src/wiring.rs` (never edit) |
 
 ## Edges

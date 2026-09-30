@@ -35,7 +35,7 @@ templates/
       bonsai.toml          # the graph: branches, settings, rates, wires
       src/
         main.rs            # trunk: `bonsai::run(wiring::Core::new())`
-        messages.rs        # the message structs (has `// bonsai:message`)
+        messages.rs        # the message structs (has `// bonsai:message`), units in scope
         bonsai.rs          # GENERATED: the runtime (copy of _tree/bonsai.rs)
         wiring.rs          # GENERATED: each branch's Input/Out, and the core
         settings.rs        # GENERATED: [branch.<name>] values as constants

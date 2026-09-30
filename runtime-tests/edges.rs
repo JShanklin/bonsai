@@ -105,10 +105,10 @@ impl Edge for Flaky {
 
     async fn execute(&mut self, _: u32) -> io::Result<()> {
         let n = self.n.fetch_add(1, Relaxed) + 1;
-        if n % 11 == 0 {
+        if n.is_multiple_of(11) {
             panic!("flaky edge panics on {n}");
         }
-        if n % 7 == 0 {
+        if n.is_multiple_of(7) {
             return Err(io::Error::other("flaky"));
         }
         Ok(())

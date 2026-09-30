@@ -1,5 +1,6 @@
 //! The {{edge_name}} edge: where the tree meets something outside it.
 //! Grown by `bonsai edge add {{edge_name}} --custom`.
+//! Log with info!/warn!/debug!: lines are tagged with this edge.
 
 use std::io;
 

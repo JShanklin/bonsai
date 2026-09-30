@@ -193,6 +193,27 @@ core.handle(Event::Edge(EdgeIn::Net(Packet::new("hi"))));
 assert_eq!(core.drain_net(), [Packet::new("HI")]);
 ```
 
+## Logs
+
+Branches and edges log with `info!`, `warn!`, `error!` and `debug!`, which
+work like `println!`. Each line says when (UTC), how serious, and who wrote
+it, with nothing to pass in:
+
+```
+14:05:03.123Z  INFO bonsai: running
+14:05:03.124Z  INFO tak: up
+14:05:03.125Z  INFO pulse: beat
+14:05:04.310Z ERROR sensor: panicked at src/branches/sensor.rs:31: index out of bounds
+14:05:04.310Z  WARN sensor: set up again after a panic
+14:05:05.002Z  WARN fc: connect 127.0.0.1:5760: Connection refused (os error 111); retrying in 100ms
+```
+
+`BONSAI_LOG` picks what's shown: a level (`off`, `error`, `warn`, `info`,
+the default, or `debug`), then any branch or edge that should differ:
+`BONSAI_LOG=warn,sensor=debug`. Lines go to stderr, so a systemd service's
+land in the journal, and `cargo test` hides them unless a test fails. A panic
+is one line; set `RUST_BACKTRACE=1` for the backtrace too.
+
 ## Status
 
 bonsai 2 lands in steps:
@@ -201,7 +222,7 @@ bonsai 2 lands in steps:
 2. ✅ The deterministic core: branches, messages, wires, rates, settings.
 3. ✅ Edges: built-in UDP (with multicast), TCP (client and server) and
    serial, configured in `bonsai.toml`, plus an `Edge` trait for your own.
-4. Logs tagged with the branch that wrote them.
+4. ✅ Logs tagged with the branch or edge that wrote them.
 5. Stats, and `bonsai top`: a live view of a running tree.
 6. The tutorial, rewritten.
 

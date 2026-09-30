@@ -20,6 +20,7 @@ impl Branch for {{BranchName}} {
 
     /// Process: decide what to do with each input, and `out.send(..)` the
     /// result. No I/O and no waiting, so the same inputs give the same outputs.
+    /// Log with info!/warn!/debug!: lines are tagged with this branch.
     fn process(&mut self, input: Input, out: &mut Out) {
         let _ = out; // delete once it sends
         match input {

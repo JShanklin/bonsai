@@ -21,8 +21,9 @@ old commands at their replacements.
 
 bonsai 2 lands as a series of PRs: 1 Linux only, 2 the deterministic core,
 3 edges (built-in UDP/TCP/serial bridges to the outside, in `bonsai.toml`,
-plus an `Edge` trait) — all done — then 4 logs tagged by branch, 5 stats and
-`bonsai top` (a live TUI over ssh), 6 the tutorial rewrite.
+plus an `Edge` trait), 4 logs tagged by the branch or edge that wrote them —
+all done — then 5 stats and `bonsai top` (a live TUI over ssh), 6 the
+tutorial rewrite.
 
 ## Commands
 
@@ -116,6 +117,18 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out) and
   `Tcp` (client, reconnect = restart; server with per-client reader tasks,
   send to `peer` or all), `Framed<S>` (raw / lines) shared with `Serial`;
   all carry `Packet { bytes, peer }`.
+  Logs: `error!`/`warn!`/`info!`/`debug!` are `macro_rules!` at the top of
+  the runtime, in scope everywhere through `#[macro_use] mod bonsai;` (first
+  in `main.rs`; `sync` adds it to older trees, `tree::with_macro_use`).
+  `mod log`: each line is `HH:MM:SS.mmmZ LEVEL source: msg` on stderr
+  (`write_all`, so a closed stderr can't panic; `eprint!` under
+  `cfg(test)`, which `cargo test` captures; level coloured
+  on a terminal unless `NO_COLOR`); the source is the edge's `task_local!`
+  `EDGE` (set by `spawn_edge` on every task of an edge), else the thread-local
+  branch `Slot::process` sets, else `bonsai`. `BONSAI_LOG` (`warn,gps=debug`,
+  default `info`) is read once. The last `KEEP` lines stay for `recent()`
+  (for `bonsai top`). `run()` installs a panic hook: one `ERROR` line, and
+  the backtrace only when `RUST_BACKTRACE` asks.
   Templates build with `flavor = "current_thread"` and **no**
   `panic = "abort"` (unwinding is what makes the reset possible).
 - **The generated wiring** (`src/wiring.rs`): `enum EdgeIn` (one variant per
@@ -245,7 +258,8 @@ graph commands work inside a tree where `templates/` isn't present.
 - **Determinism.** `process` must stay sync and I/O-free, and the core must
   deliver in `bonsai.toml` order, run-to-completion per event. Anything that
   talks to the outside world belongs on an edge, never in `process`; the core
-  never awaits an edge (`EdgeOut::send` is `try_send`).
+  never awaits an edge (`EdgeOut::send` is `try_send`). Logging is the one
+  side effect `process` may have: it changes nothing a branch sends.
 - **The board list** — `BOARDS` in `src/main.rs` (board, chip, description) —
   is the single place the CLI encodes supported hardware. Adding a board means
   editing it **and** adding `templates/linux/<board>/`; `bonsai.toml`,

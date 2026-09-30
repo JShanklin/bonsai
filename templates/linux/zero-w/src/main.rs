@@ -1,6 +1,7 @@
 //! {{project-name}} — Raspberry Pi Zero W Linux application.
 //! The trunk: it starts the core, which runs every branch (see src/bonsai.rs).
 
+#[macro_use]
 mod bonsai;
 mod branches;
 mod edges;

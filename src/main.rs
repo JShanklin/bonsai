@@ -986,6 +986,12 @@ mod tests {
                 "{}",
                 stale("src/edges/mod.rs")
             );
+            let main = file("src/main.rs");
+            assert!(
+                main.contains("#[macro_use]\nmod bonsai;\n")
+                    && tree::with_macro_use(main).is_none(),
+                "linux/{board}/src/main.rs needs `#[macro_use]` right above `mod bonsai;`"
+            );
             for f in ["bonsai.toml", "src/messages.rs", "src/branches/pulse.rs"] {
                 assert_eq!(
                     file(f),

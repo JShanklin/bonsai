@@ -24,6 +24,6 @@ To move the tree to a Raspberry Pi, run `bonsai retarget <board>` (`pi5`,
 copies the binary to the Pi over ssh.
 
 Grow it with `bonsai branch add <name>`, `bonsai message add <Name>` and
-`bonsai wire <from> <Message> <to>`; `bonsai list` shows the graph. Each
+`bonsai link <from> <Message> <to>`; `bonsai list` shows the graph. Each
 branch's `process` decides what to do with its inputs, with no I/O, so it can
 be tested on its own.

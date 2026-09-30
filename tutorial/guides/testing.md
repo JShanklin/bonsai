@@ -17,7 +17,7 @@ cargo test          # a host tree
 
 Make it with `setup`, give it an input and an empty `Out`, and read
 `out.sent()`: everything it sent, oldest first, as `Msg`s (one variant per
-wire, named after the sender and what it sends: `WatchdogAlarm`,
+link, named after the sender and what it sends: `WatchdogAlarm`,
 `WatchdogToUplink`).
 
 ```rust

@@ -32,8 +32,8 @@ impl Edge for MyEdge {
 - **`execute`** carries out one thing a branch sent. An `Err` restarts it
   too.
 - **`In` and `Out`** can be any type that is `Clone + Debug + Send`: bytes,
-  a number, your own struct. Branches wired from the edge get `In` as
-  input; branches wired to it send `Out` with `out.to_<edge>(..)`.
+  a number, your own struct. Branches linked from the edge get `In` as
+  input; branches linked to it send `Out` with `out.to_<edge>(..)`.
 
 **`recv` must be cancel-safe.** While it waits, a branch may send the edge
 something, and bonsai then drops the `recv` in progress to `execute` it,
@@ -54,12 +54,12 @@ once a second gives the greenhouse a real sensor:
 ```sh
 bonsai edge add cputemp --custom
 bonsai branch add thermal
-bonsai wire cputemp thermal
+bonsai link cputemp thermal
 ```
 
 ```
 added edge cputemp: src/edges/cputemp.rs
-wire it with `bonsai wire cputemp <branch>` (what it receives) and `bonsai wire <branch> cputemp` (what it sends)
+link it one way or both: `bonsai link cputemp <branch>` (what it receives), `bonsai link <branch> cputemp` (what it sends)
 updated src/wiring.rs, src/edges/mod.rs
 …
 cputemp --> thermal: what cputemp receives arrives as `Input::Cputemp(..)`
@@ -118,7 +118,7 @@ fn read(path: &str) -> io::Result<Celsius> {
 }
 
 impl Edge for Cputemp {
-    /// What it receives; the branches wired from it get it as input.
+    /// What it receives; the branches linked from it get it as input.
     type In = Celsius;
     /// What branches send it with `out.to_cputemp(..)`: nothing.
     type Out = ();

@@ -122,8 +122,8 @@ Every branch is a square box and every edge a round one, laid out left to
 right the way messages flow, each with its inputs (or packets) a second.
 Colour shows state: green when busy, grey when idle, red for a branch that
 panicked in the last 10 seconds (the display, here) or an edge that's
-retrying, yellow for an edge starting up. Arrows are the wires, labelled
-with the message and how many a second, and brighter while busy; a wire
+retrying, yellow for an edge starting up. Arrows are the links, labelled
+with the message and how many a second, and brighter while busy; a link
 that closes a loop (the watchdog answering the uplink) runs back underneath.
 The strip at the bottom is the selected node: its numbers and latest lines.
 
@@ -167,7 +167,7 @@ bonsai top: ssh: Could not resolve hostname raspberrypi.local: Name or service n
 ```
 
 `--once` prints the numbers instead of the live view, for scripts, the
-wires included:
+links included:
 
 ```sh
 bonsai top local --once
@@ -181,7 +181,7 @@ watchdog               1.0       0.0         2         7       0
 display                1.0       0.0        21        32       1
 edge                 state      in/s     out/s   dropped restarts  last error
 uplink                  up       0.0       0.0         0       0  
-wire                                                msgs/s
+link                                                msgs/s
 sensor --Reading--> watchdog, display                  1.0
 watchdog --Alarm--> display                            0.0
 uplink --> watchdog                                    0.0
@@ -203,5 +203,5 @@ Now delete the `assert!` from the display, and commit.
 The greenhouse is done: three branches, two messages, an edge, tests, and a
 way to watch it. From here, pick a guide from the
 [tutorial's index](../README.md#guides-pick-what-you-need): put it
-[on a Pi](../guides/deploy.md), talk [MAVLink](../guides/edges-mavlink.md),
-or write [your own edge](../guides/edges-custom.md).
+[on a Pi](../guides/deploy.md), add a [serial](../guides/edges-serial.md)
+sensor, or write [your own edge](../guides/edges-custom.md).

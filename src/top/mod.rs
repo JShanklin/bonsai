@@ -40,9 +40,9 @@ pub struct Edge {
     pub error: String,
 }
 
-/// A wire in bonsai.toml, and how many deliveries it has carried.
+/// A link in bonsai.toml, and how many deliveries it has carried.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct Wire {
+pub struct Link {
     pub from: String,
     /// The message; empty when an edge is at one end.
     pub label: String,
@@ -63,7 +63,7 @@ pub struct Sys {
 }
 
 /// One report from the tree: its counts, and the log lines since the last.
-/// A tree from before `wire` and `sys` rows sends none of either.
+/// A tree from before `link` and `sys` rows sends none of either.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub uptime_ms: u64,
@@ -72,7 +72,7 @@ pub struct Snapshot {
     pub inbox: u64,
     pub branches: Vec<Branch>,
     pub edges: Vec<Edge>,
-    pub wires: Vec<Wire>,
+    pub links: Vec<Link>,
     pub sys: Option<Sys>,
     pub logs: Vec<String>,
 }
@@ -137,7 +137,7 @@ pub fn parse(lines: &[String]) -> io::Result<Snapshot> {
                 restarts: num(f.next())?,
                 error: f.next().unwrap_or_default().to_string(),
             }),
-            Some("wire") => s.wires.push(Wire {
+            Some("link" | "wire") => s.links.push(Link {
                 from: f.next().unwrap_or_default().to_string(),
                 label: f.next().unwrap_or_default().to_string(),
                 to: f
@@ -423,18 +423,18 @@ fn print_once(dest: &Option<String>, port: u16, title: &str) -> io::Result<()> {
             );
         }
     }
-    if !b.wires.is_empty() {
-        println!("{:<48} {:>9}", "wire", "msgs/s");
-        for (i, w) in b.wires.iter().enumerate() {
-            let before = a.wires.get(i).map_or(0, |x| x.count);
-            println!("{:<48} {:>9.1}", wire_text(w), per_sec(before, w.count, ms));
+    if !b.links.is_empty() {
+        println!("{:<48} {:>9}", "link", "msgs/s");
+        for (i, w) in b.links.iter().enumerate() {
+            let before = a.links.get(i).map_or(0, |x| x.count);
+            println!("{:<48} {:>9.1}", link_text(w), per_sec(before, w.count, ms));
         }
     }
     Ok(())
 }
 
-/// `sensor --Reading--> watchdog, display`, as `bonsai list` shows a wire.
-pub(crate) fn wire_text(w: &Wire) -> String {
+/// `sensor --Reading--> watchdog, display`, as `bonsai list` shows a link.
+pub(crate) fn link_text(w: &Link) -> String {
     let arrow = if w.label.is_empty() {
         "-->".to_string()
     } else {

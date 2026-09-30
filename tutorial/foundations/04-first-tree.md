@@ -79,7 +79,7 @@ greenhouse/
 ├── .cargo/
 │   └── config.toml   # builds for the Pi; `cargo local` runs here instead
 ├── Cargo.toml        # name, dependencies, build settings
-├── bonsai.toml       # the graph: branches, edges, wires (bonsai edits it for you)
+├── bonsai.toml       # the graph: branches, edges, links (bonsai edits it for you)
 └── src/
     ├── main.rs       # the trunk: starts the core
     ├── messages.rs   # the messages branches send each other
@@ -115,7 +115,7 @@ bonsai list
 ```
 tree: greenhouse  (zero-2w (bcm2710a1))
 branches: none yet (`bonsai branch add <name>`)
-wires: none yet (`bonsai wire <from> <Message> <to>`)
+links: none yet (`bonsai link <from> <Message> <to>`)
 ```
 
 ## Save your progress

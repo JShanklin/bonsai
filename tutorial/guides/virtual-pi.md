@@ -3,7 +3,7 @@
 Run a Pi tree on your computer as if it were on a Raspberry Pi. You deploy
 the real ARM build with `cargo run --release`, to a machine with its own
 address on your network. Use it when the Pi isn't at hand, or to test a
-companion computer against a simulator (SITL) and a phone before it flies.
+tree against a simulator and a phone before it runs on the real board.
 
 **Needs:** a Pi tree that builds for the Pi (see [Deploy](deploy.md)), Linux
 with systemd, Podman, and a clone of the bonsai repository (the setup lives in
@@ -18,7 +18,7 @@ systemd keeps it running. It has two network links:
 ```
              host link: 10.89.0.2           LAN: 192.168.1.250
 your computer ─────────────── virtual Pi ─────────────── phone, other computers
- (ssh, cargo run, SITL)                   (a ground station, a phone app)
+ (ssh, cargo run, a simulator)            (a phone app, other devices)
 ```
 
 - **The host link** is how your computer reaches it: ssh, `cargo run`, and a
@@ -77,14 +77,14 @@ trusts its key, so ssh doesn't ask.
 
 **On Wi-Fi** the LAN link works differently. Access points drop traffic from
 any device address (MAC) but your computer's, so on Wi-Fi the board shares your
-computer's MAC (ipvlan) instead of having its own (macvlan, used on a wire).
+computer's MAC (ipvlan) instead of having its own (macvlan, used on a link).
 The script picks by itself and says so:
 
 ```
 virtual-pi5: wlan0 is Wi-Fi: the LAN link uses ipvlan
 ```
 
-Moving between Wi-Fi and a wire? Run the install again; it rebuilds the LAN
+Moving between Wi-Fi and a link? Run the install again; it rebuilds the LAN
 link for the new connection and restarts the boards on it. Guest networks and
 phone hotspots may still keep devices from reaching each other. To use another
 interface, LAN address or driver:
@@ -111,7 +111,7 @@ virtual-zero-w: relaying 239.2.3.2:6969 from wlan0 to the board
 
 Each group runs as a service (`systemctl status bonsai-relay@virtual-zero-w-1`),
 started at boot. Separate several groups with spaces. A later install keeps
-them; `VIRTUAL_PI_RELAY=` (empty) or an install on a wire removes them. If
+them; `VIRTUAL_PI_RELAY=` (empty) or an install on a link removes them. If
 `ufw` is on, let the port in: `sudo ufw allow 6969/udp`. Your program needs no
 change as long as its socket is bound to `0.0.0.0:<port>`; the relayed packets
 arrive on the host link. Only incoming multicast needs this: the board's own
@@ -145,15 +145,14 @@ otherwise (see [Deploy](deploy.md)). Then `BONSAI_PI=virtual-zero-w cargo run
 
 | from | to | use |
 |------|----|-----|
-| your computer (ssh, a simulator, a ground station) | the virtual Pi | its host link, `10.89.0.2` |
+| your computer (ssh, a simulator, a test client) | the virtual Pi | its host link, `10.89.0.2` |
 | the virtual Pi | your computer | `10.89.0.1` |
 | a phone or another computer | the virtual Pi | its LAN address, `192.168.1.250` |
 | the virtual Pi, to a multicast group (`239.x.x.x`) | the LAN | goes out on `lan0` |
 
-For example, a simulator on your computer sends MAVLink to `10.89.0.2:14550`,
-and an edge in the tree binds `0.0.0.0:14550` (see
-[MAVLink](edges-mavlink.md)). Check where
-multicast goes:
+For example, a simulator on your computer sends to `10.89.0.2:6969`, and
+a UDP edge in the tree binds `0.0.0.0:6969` (see [UDP](edges-udp.md)).
+Check where multicast goes:
 
 ```sh
 ssh virtual-pi5 ip route get 239.1.2.3
@@ -212,6 +211,6 @@ To start your own program at boot (your tree, say), add a unit file under
 | `unable to find network with name or ID systemd-bonsai-host` (in `journalctl -u virtual-<board>`) | the shared network was deleted while its unit still counted as done: `sudo systemctl restart bonsai-host-network.service bonsai-lan-network.service`, then `sudo systemctl reset-failed virtual-<board>` and `sudo systemctl restart virtual-<board>`. `install.sh` does this itself now |
 | `the board didn't answer on 10.89.0.2` | `journalctl -u virtual-pi5` shows why it didn't start |
 | `tcpdump: can't get TPACKET_V3 header len` inside | tcpdump can't capture under emulation; run your computer's in the board's network: `sudo nsenter -t "$(sudo podman inspect -f '{{.State.Pid}}' virtual-pi5)" -n tcpdump -ni any udp port 14550` |
-| the phone can't see it | a guest network or hotspot keeping devices apart (see step 2), you changed between Wi-Fi and a wire without installing again, or a firewall on your computer blocking the LAN address |
+| the phone can't see it | a guest network or hotspot keeping devices apart (see step 2), you changed between Wi-Fi and a link without installing again, or a firewall on your computer blocking the LAN address |
 | on Wi-Fi, `tcpdump -ni wlan0` on your computer shows the phone's multicast but the board's `lan0` doesn't | the Wi-Fi driver drops it on the way to the board: relay the group (`VIRTUAL_PI_RELAY`, step 2) |
-| `netavark … has no ipvlan` while installing | Podman's network helper is older than 1.5: update podman and netavark, or use a wire |
+| `netavark … has no ipvlan` while installing | Podman's network helper is older than 1.5: update podman and netavark, or use a link |

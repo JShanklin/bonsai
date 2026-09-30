@@ -25,7 +25,7 @@ your messages as they are:
 |---|---|---|
 | between | branches in one tree | your tree and the other end |
 | travels as | Rust values in memory | postcard bytes on an edge |
-| changing it | free: bonsai rewires, everything recompiles | both ends must agree |
+| changing it | free: bonsai regenerates the wiring, everything recompiles | both ends must agree |
 | contains | everything, including messages only branches use | only what the other end should see |
 
 The other end is rarely rebuilt from the same commit as the tree, so the

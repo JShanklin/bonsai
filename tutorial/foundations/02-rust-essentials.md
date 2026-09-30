@@ -153,7 +153,7 @@ sensor.warm_up();                    // now 26.5 °C
 
 An `enum` is one of several variants, and each variant can carry data. What
 a branch receives is one: bonsai generates an `Input` enum for each branch,
-with a variant for each thing wired to it:
+with a variant for each thing linked to it:
 
 ```rust
 enum Input {

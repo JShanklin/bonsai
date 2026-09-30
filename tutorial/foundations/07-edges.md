@@ -27,9 +27,9 @@ bonsai edge add uplink udp --bind 0.0.0.0:6969 --to 127.0.0.1:6970
 
 ```
 added udp edge uplink
-wire it with `bonsai wire uplink <branch>` (what it receives) and `bonsai wire <branch> uplink` (what it sends)
+link it one way or both: `bonsai link uplink <branch>` (what it receives), `bonsai link <branch> uplink` (what it sends)
 updated src/wiring.rs
-warning: edge uplink isn't wired: `bonsai wire uplink <branch>` to hear it, `bonsai wire <branch> uplink` to send
+warning: edge uplink isn't linked: `bonsai link uplink <branch>` to hear it, `bonsai link <branch> uplink` to send
 ```
 
 It listens on port 6969, and sends to port 6970 on this computer (in real
@@ -42,14 +42,14 @@ bind = "0.0.0.0:6969"
 to = "127.0.0.1:6970"
 ```
 
-## Wire it
+## Link it
 
-A wire with an edge at one end carries its packets, so it takes no message
+A link with an edge at one end carries its packets, so it takes no message
 name:
 
 ```sh
-bonsai wire uplink watchdog
-bonsai wire watchdog uplink
+bonsai link uplink watchdog
+bonsai link watchdog uplink
 bonsai list
 ```
 
@@ -65,7 +65,7 @@ branches, in the order the core runs them:
   display
 edges:
   uplink  (udp 0.0.0.0:6969 → 127.0.0.1:6970)
-wires:
+links:
   sensor --Reading--> watchdog, display
   watchdog --Alarm--> display
   uplink --> watchdog
@@ -94,7 +94,7 @@ and fill in `process`:
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {
     match input {
-        // `bonsai wire <from> <Message> watchdog` adds an arm here
+        // `bonsai link <from> <Message> watchdog` adds an arm here
         Input::Reading(reading) => {
             if reading.temp > self.limit {
                 out.send(Alarm { temp: reading.temp });
@@ -277,8 +277,6 @@ git add -A && git commit -m "An uplink"
 - [TCP](../guides/edges-tcp.md): a client that reconnects, or a server for
   several clients.
 - [Serial](../guides/edges-serial.md): a UART or USB-serial adapter.
-- [MAVLink](../guides/edges-mavlink.md): flight controllers and ground
-  stations.
 - [Custom](../guides/edges-custom.md): an edge of your own.
 
 Next: [Watching a tree](08-watching.md).

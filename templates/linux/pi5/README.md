@@ -40,7 +40,7 @@ recent [rppal] (0.22 or later). Older code that maps GPIO registers directly
 doesn't work on it.
 
 Grow it with `bonsai branch add <name>`, `bonsai message add <Name>` and
-`bonsai wire <from> <Message> <to>`; `bonsai list` shows the graph. Each
+`bonsai link <from> <Message> <to>`; `bonsai list` shows the graph. Each
 branch's `process` decides what to do with its inputs, with no I/O, so it can
 be tested on its own.
 

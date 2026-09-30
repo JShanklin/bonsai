@@ -17,7 +17,7 @@ bonsai branch add display
 ```
 added branch sensor: src/branches/sensor.rs
 updated src/wiring.rs, src/branches/mod.rs
-warning: sensor has no inputs, so its process never runs: wire something to it, or give it a rate
+warning: sensor has no inputs, so its process never runs: link something to it, or give it a rate
 …
 ```
 
@@ -58,14 +58,14 @@ Add fields by hand whenever you like; bonsai reads the struct names, not
 their fields. The units come from the `pub use crate::bonsai::units::*;`
 line at the top of the file, which also brings them into every branch.
 
-## Wires and a rate
+## Links and a rate
 
-A wire says who sends a message to whom. List every receiver; the core
+A link says who sends a message to whom. List every receiver; the core
 delivers to them in that order:
 
 ```sh
-bonsai wire sensor Reading watchdog display
-bonsai wire watchdog Alarm display
+bonsai link sensor Reading watchdog display
+bonsai link watchdog Alarm display
 bonsai rate sensor 1
 ```
 
@@ -89,12 +89,12 @@ rate = 1
 
 [branch.display]
 
-[[wire]]
+[[link]]
 from = "sensor"
 message = "Reading"
 to = ["watchdog", "display"]
 
-[[wire]]
+[[link]]
 from = "watchdog"
 message = "Alarm"
 to = ["display"]
@@ -113,21 +113,21 @@ branches, in the order the core runs them:
   sensor  (ticks 1/s)
   watchdog
   display
-wires:
+links:
   sensor --Reading--> watchdog, display
   watchdog --Alarm--> display
 ```
 
 ## What each branch receives
 
-Each wire also added an arm to its receivers' `match input`. The display's
+Each link also added an arm to its receivers' `match input`. The display's
 `process` now reads:
 
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {
     let _ = out; // delete once it sends
     match input {
-        // `bonsai wire <from> <Message> display` adds an arm here
+        // `bonsai link <from> <Message> display` adds an arm here
         Input::Reading(_reading) => {}
         Input::Alarm(_alarm) => {}
         // bonsai:input-arm
@@ -135,7 +135,7 @@ fn process(&mut self, input: Input, out: &mut Out) {
 }
 ```
 
-`Input` is generated (in `src/wiring.rs`) with exactly what's wired to the
+`Input` is generated (in `src/wiring.rs`) with exactly what's linked to the
 branch. The compiler holds you to it. Delete the `Input::Alarm` arm and
 `cargo local` refuses to build:
 
@@ -147,7 +147,7 @@ error[E0004]: non-exhaustive patterns: `wiring::display::Input::Alarm(_)` not co
     |               ^^^^^ pattern `wiring::display::Input::Alarm(_)` not covered
 ```
 
-Sending is checked the same way. The sensor is wired to send `Reading` only,
+Sending is checked the same way. The sensor is linked to send `Reading` only,
 so `out.send(Alarm { temp: Celsius(40.0) })` in the sensor is an error:
 
 ```
@@ -219,7 +219,7 @@ impl Branch for Sensor {
     /// Log with info!/warn!/debug!: lines are tagged with this branch.
     fn process(&mut self, input: Input, out: &mut Out) {
         match input {
-            // `bonsai wire <from> <Message> sensor` adds an arm here
+            // `bonsai link <from> <Message> sensor` adds an arm here
             Input::Tick => {
                 // A pretend sensor: 1.5 °C warmer each time, then back to 25.
                 self.temp += Celsius(1.5);
@@ -257,7 +257,7 @@ impl Branch for Watchdog {
 
     fn process(&mut self, input: Input, out: &mut Out) {
         match input {
-            // `bonsai wire <from> <Message> watchdog` adds an arm here
+            // `bonsai link <from> <Message> watchdog` adds an arm here
             Input::Reading(reading) => {
                 if reading.temp > self.limit {
                     out.send(Alarm { temp: reading.temp });
@@ -279,7 +279,7 @@ instead, with `info!` and `warn!`. Units print with their symbol:
 fn process(&mut self, input: Input, out: &mut Out) {
     let _ = out; // delete once it sends
     match input {
-        // `bonsai wire <from> <Message> display` adds an arm here
+        // `bonsai link <from> <Message> display` adds an arm here
         Input::Reading(reading) => {
             info!("{:.1}, {:.0} humidity", reading.temp, reading.humidity);
         }

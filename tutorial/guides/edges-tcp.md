@@ -6,7 +6,7 @@ number of clients.
 **Needs:** [chapter 7](../foundations/07-edges.md).
 
 TCP fits when every message must arrive, in order, over a link that can
-drop: a base station, a server, a flight controller's TCP port, a web of
+drop: a base station, a server, a device's TCP port, a web of
 companion tools.
 
 ## Settings
@@ -20,7 +20,7 @@ bonsai edge add <name> tcp --listen ADDR:PORT [--framing lines]    # a server
 |-----|-------|
 | `connect` | a client: connect there; when the connection drops or fails, try again (0.1 s, 0.2 s, … up to 5 s apart) |
 | `listen` | a server: accept clients there, as many as connect |
-| `framing` | `raw` (the default): each read is one packet, for protocols that frame themselves, like MAVLink; `lines`: one packet per line, without its newline, and a newline added to each packet sent |
+| `framing` | `raw` (the default): each read is one packet, for protocols that frame themselves; `lines`: one packet per line, without its newline, and a newline added to each packet sent |
 
 A **client**'s packets carry the server's address as `peer`. A **server**'s
 carry the client that sent them; a packet out goes to its `peer`, or to
@@ -36,9 +36,9 @@ clients:
 bonsai edge add hub tcp --listen 0.0.0.0:7000 --framing lines
 bonsai edge add station tcp --connect 127.0.0.1:7100 --framing lines
 bonsai branch add relay
-bonsai wire hub relay
-bonsai wire station relay
-bonsai wire relay hub station
+bonsai link hub relay
+bonsai link station relay
+bonsai link relay hub station
 ```
 
 ```
@@ -68,7 +68,7 @@ Packet};`):
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {
     match input {
-        // `bonsai wire <from> <Message> relay` adds an arm here
+        // `bonsai link <from> <Message> relay` adds an arm here
         Input::Hub(line) => {
             let text = String::from_utf8_lossy(&line.bytes);
             if let Some(from) = line.peer {
@@ -149,5 +149,4 @@ The hub, the relay and the clients carry on the whole time.
 - A client that disconnects from a server edge is simply forgotten; sends
   to it are skipped.
 - For binary protocols, keep `framing = "raw"` and put the parsing in
-  `process`; see the [wire format](wire-format.md) and
-  [MAVLink](edges-mavlink.md) guides.
+  `process`; see the [wire format](wire-format.md) guide.

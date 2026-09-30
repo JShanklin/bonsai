@@ -13,12 +13,15 @@ this distinction in mind: editing `src/main.rs` changes the CLI; editing
 `templates/**` changes what the CLI emits. Microcontroller support (Pico,
 ESP32, defmt, `bonsai ide`) was removed: bonsai is a Linux tool.
 
-Vocabulary (tree / trunk / branch / message / wire / edge / rate / wiring) is
+Vocabulary (tree / trunk / branch / message / link / edge / rate / wiring) is
 defined in `README.md`'s Concepts table. A tree is a deterministic core on
 tokio: branches decide, edges do the I/O. The old (Embassy) bonsai's
 vocabulary (nutrient, sap, tap/release, feed/starve, graft/snip, roots,
 paths) is gone; `renamed()` in `main.rs` points its commands at their
-replacements, and the commands refuse its trees. A new tree has no branches
+replacements, and the commands refuse its trees. Links were once called
+wires: `renamed()` maps `wire`/`unwire`, and `require_tree` renames an older
+tree's `[[wire]]` headers to `[[link]]` (`tree::with_links`); `graph::parse`
+refuses `[[wire]]`. "Wire format" (bytes on the wire) keeps its name. A new tree has no branches
 (there's no built-in heartbeat: it logs `INFO bonsai: running`, and any
 branch can have a `rate`).
 
@@ -29,20 +32,20 @@ cargo build                 # build the CLI
 cargo run                   # launch the interactive wizard (plant a tree)
 cargo run -- init           # the wizard, planting into the cwd (no new folder)
 cargo run -- branch add <name>            # add a branch (needs a bonsai tree in cwd)
-cargo run -- branch remove <name>         # remove it and every wire from/to it
+cargo run -- branch remove <name>         # remove it and every link from/to it
 cargo run -- branch         # no name → interactive TUI (name)
 cargo run -- message add <Name> [field:type ...]   # a struct in src/messages.rs
-cargo run -- message remove <Name>        # refused while wired
+cargo run -- message remove <Name>        # refused while linked
 cargo run -- message        # no args → interactive TUI (name + fields)
 cargo run -- edge add <name> udp|tcp|serial [--bind A --to A --join G --reply --connect A --listen A --device D --baud N --framing lines]
 cargo run -- edge add <name> --custom     # src/edges/<name>.rs, an Edge of your own
-cargo run -- edge remove <name>           # and every wire from/to it
-cargo run -- wire <from> <Message> <to> [<to> ...]  # branch → branches, a [[wire]] in bonsai.toml
-cargo run -- wire <from> <to> [<to> ...]  # an edge at one end: no message
-cargo run -- unwire <from> [<Message>] [<to> ...]   # all receivers when none named
+cargo run -- edge remove <name>           # and every link from/to it
+cargo run -- link <from> <Message> <to> [<to> ...]  # branch → branches, a [[link]] in bonsai.toml
+cargo run -- link <from> <to> [<to> ...]  # an edge at one end: no message
+cargo run -- unlink <from> [<Message>] [<to> ...]   # all receivers when none named
 cargo run -- rate <branch> <hz|off>       # Input::Tick at that rate
 cargo run -- sync           # regenerate src/{bonsai,wiring,settings}.rs, branches/ and edges/mod.rs
-cargo run -- list           # branches, wires, errors and warnings
+cargo run -- list           # branches, links, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
 cargo run -- top [user@host|local] [--port N] [--once]   # watch a running tree
 cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs, top/)
@@ -79,15 +82,17 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
 - **The tree model.** A tree's graph is `bonsai.toml`: `[branch.<name>]`
   tables (in core order; `rate` → `Input::Tick`s per second; every other key a
   setting), `[edge.<name>]` tables (`kind` = udp/tcp/serial/custom; built-in
-  kinds' keys are checked when parsed, `graph::EDGE_KINDS`; a custom edge's
-  other keys are settings) and `[[wire]]`s (`from`, optional `message`,
+  kinds' keys are checked when parsed, `graph::EDGE_KINDS`, and
+  bind/to/connect/listen must be HOST:PORT, `is_address`; a UDP edge takes
+  `bind`, `to` or both: send only binds `0.0.0.0:0`; a custom edge's
+  other keys are settings) and `[[link]]`s (`from`, optional `message`,
   `to = [..]`: with a message, branch → branches; without, an edge at exactly
   one end: edge → branches, or branch → edges). Messages are
   top-level `pub struct`s in `src/messages.rs` (`graph::parse_messages`).
   `graph::parse` → `graph::check` (errors refuse generation: unknown
-  names, self-wire, duplicates, bad names, `Tick`, the wire rules above, an
+  names, self-link, duplicates, bad names, `Tick`, the link rules above, an
   edge whose CamelCase name is a message's; warnings: loops via `cycles`,
-  branches with no inputs and no rate, unwired edges) → `render_wiring`,
+  branches with no inputs and no rate, unlinked edges) → `render_wiring`,
   `render_settings`, `render_mod`, `render_edges_mod`. `tree::sync_tree` writes
   those plus `src/bonsai.rs` (`tree::RUNTIME`, from
   `templates/_tree/bonsai.rs`), only when changed; while the tree has a serial
@@ -136,10 +141,10 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `EdgeOut::send`), and the core's events/slowest/inbox (`run`). `mod top`:
   `run()` serves them on `BONSAI_TOP` (default `127.0.0.1:7777`, a bare port,
   or `off`; a bind failure is one WARN) as `stats::render` text every 500 ms:
-  `bonsai-top 1\t…` then `branch`/`edge`/`wire`/`sys`/`log` rows
-  (tab-separated) and `end`. Wires: the generated `Core::new` registers a
-  `WIRES` table (from, message or `""`, to…; `stats::wires`, first call
-  wins) and `deliver`/`handle` bump `stats::wire(i)` per message wire,
+  `bonsai-top 1\t…` then `branch`/`edge`/`link`/`sys`/`log` rows
+  (tab-separated) and `end`. Links: the generated `Core::new` registers a
+  `WIRES` table (from, message or `""`, to…; `stats::links`, first call
+  wins) and `deliver`/`handle` bump `stats::link(i)` per message link,
   edge→branch event and branch→edge send (lock-free counters in a
   `OnceLock`). `sys`: `parse_sys` over /proc/self/status, /proc/self/stat,
   /proc/loadavg and /proc/meminfo, read only while a client is connected;
@@ -160,12 +165,12 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   Templates build with `flavor = "current_thread"` and **no**
   `panic = "abort"` (unwinding is what makes the reset possible).
 - **The generated wiring** (`src/wiring.rs`): `enum EdgeIn` (one variant per
-  edge, its CamelCase name), `enum Msg` (per message wire `<FromCamel><Message>`,
+  edge, its CamelCase name), `enum Msg` (per message link `<FromCamel><Message>`,
   per branch → edge `<FromCamel>To<EdgeCamel>`), and per branch `mod <name> {
-  enum Input (in `graph::input_variants` order: Tick if rated, then each wired
+  enum Input (in `graph::input_variants` order: Tick if rated, then each linked
   message or edge); struct Out { sent: Vec<Msg> } }` with an inherent generic
   `out.send(m)` bounded on `Sends<M>` (implemented only for that branch's
-  message wires) and `out.to_<edge>(v)` per edge it's wired to. Built-in edges'
+  message links) and `out.to_<edge>(v)` per edge it's linked to. Built-in edges'
   settings become `UdpConfig`/`TcpConfig`/`SerialConfig` consts. `Core` holds a
   `Slot` per branch and an `EdgeOut` per edge, delivers each `Msg` and each
   `Event::Edge` to its `to` list in order (cloning for all but the last), and
@@ -176,19 +181,21 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   reserved message names (`tree::RESERVED`), and `serial` an edge/branch name.
 - **Graph commands** (`src/tree.rs`): `branch add` writes the scaffold
   (`templates/_branch/branch.rs`, `{{branch_name}}`/`{{BranchName}}` by plain
-  replace) and an empty `[branch.x]`; `branch remove` also drops its wires,
-  takes it out of `to` lists, and removes arms no longer fed. `wire` merges
-  into an existing (from, message) wire and inserts `Input::M(_m) => {}` at
+  replace) and an empty `[branch.x]`; `branch remove` also drops its links,
+  takes it out of `to` lists, and removes arms no longer fed. `link` merges
+  into an existing (from, message) link and inserts `Input::M(_m) => {}` at
   `// bonsai:input-arm` in each new receiver. Arms follow one rule
   (`reconcile_arms`): every command that edits the graph compares each
   branch's `input_variants` before and after, adds an arm for each gained and
   removes (`remove_balanced_span`, so filled-in multi-line arms go whole) each
-  lost — so `unwire`, `rate`, `branch remove` and `edge remove` all stay in
-  step. `edge add` builds the table from `--key value` flags (`--reply`,
-  repeatable `--join`) and saves only if `graph::parse` accepts it;
+  lost — so `unlink`, `rate`, `branch remove` and `edge remove` all stay in
+  step. `edge add` builds the table from `--key value` flags (the pure
+  `edge_table`: `--reply`, repeatable `--join`, a flag followed by nothing or
+  another flag refused with what it takes, `wants`) and saves only if
+  `graph::parse` accepts it; an edge may be linked one way only;
   `--custom` writes `templates/_edge/edge.rs` to `src/edges/<name>.rs`.
   `message add` inserts a `#[derive(Clone, Debug)]` struct above
-  `// bonsai:message`; `message remove` (refused while wired) takes it with
+  `// bonsai:message`; `message remove` (refused while linked) takes it with
   its attributes/docs (`without_struct`). toml_edit keeps `bonsai.toml`'s
   comments; the fs round-trip test checks every file comes back byte-identical.
   `require_tree` refuses the old bonsai's trees (`src/sap.rs` or
@@ -250,9 +257,9 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   for a panic in the last 10 s or a retrying edge); a `Canvas` joins line
   segments into box-drawing junctions; next-column links run through the
   gap, longer ones over lanes above the boxes, back links along lanes
-  below. A tree without `wire`/`sys` rows (older runtime) shows nodes
+  below. A tree without `link`/`sys` rows (older runtime) shows nodes
   without arrows and a hint to `bonsai sync`. `--once` prints tables (and
-  the wires) from snapshots 2 s apart. The format must match
+  the links) from snapshots 2 s apart. The format must match
   `templates/_tree/bonsai.rs`'s `stats::render` (both sides are unit-tested
   against the same text).
 - **`regrow`** (`regrow`): wipes the cwd back to a fresh template (destructive,
@@ -346,7 +353,7 @@ Not part of the CLI: shell + Podman Quadlet files that run a virtual Pi as a
 rootful container (`sudo containers/install.sh <board> [remove]`). One shared
 `Containerfile`, `board.container` template, and two shared networks
 (`bonsai-host` bridge 10.89.0.0/24 for the host, `bonsai-lan` for the LAN:
-macvlan on a wire, ipvlan on Wi-Fi, since access points drop frames from other
+macvlan on a link, ipvlan on Wi-Fi, since access points drop frames from other
 MACs; `install.sh` fills in `@DRIVER@`, falls back to macvlan when netavark is
 older than 1.5, and recreates the network, restarting its boards, when its
 driver/parent/subnet changed). On Wi-Fi, incoming multicast often never
@@ -354,7 +361,7 @@ reaches an ipvlan board (the driver drops it), so `VIRTUAL_PI_RELAY="group:port
 …"` makes one `bonsai-relay@<board>-<n>` host service each (socat joins the
 group on the Wi-Fi interface and sends every datagram to the board's host
 link; settings in `/etc/bonsai/relay-*.env`, kept across installs when the
-variable is unset, removed by an empty value, a wired install or `remove`); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
+variable is unset, removed by an empty value, a linked install or `remove`); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
 named after the Pi boards in `BOARDS`. `install.sh` also adds the qemu `C`
 binfmt flag (sudo inside), builds with `--network host`, and writes the ssh
 config + known_hosts entry. Boards boot systemd (`CMD /sbin/init`): the
@@ -374,7 +381,7 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
   it runs on a PC: sensor → watchdog → display with `Celsius`/`Percent`
   fields, a `limit` setting, a UDP `uplink` edge with a text protocol, tests,
   logs and `bonsai top`) and `guides/` (short self-contained recipes: edges
-  over UDP/TCP/serial/MAVLink and custom edges, units, wire format, testing, deploy, build tools, a virtual Pi
+  over UDP/TCP/serial and custom edges, units, wire format, testing, deploy, build tools, a virtual Pi
   (arm64 Podman container, qemu, macvlan/ipvlan), CI, troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold

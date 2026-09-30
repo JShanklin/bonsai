@@ -11,9 +11,9 @@
 #   rate = 1          # an Input::Tick once a second
 #   limit = 30.0      # a setting: settings::sensor::LIMIT
 
-# Wires: `from` sends `message` to every branch in `to`, in that order
-# (`bonsai wire <from> <Message> <to…>`). For example:
-#   [[wire]]
+# Links: `from` sends `message` to every branch in `to`, in that order
+# (`bonsai link <from> <Message> <to…>`). For example:
+#   [[link]]
 #   from = "sensor"
 #   message = "Reading"
 #   to = ["display", "logger"]

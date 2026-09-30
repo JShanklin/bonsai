@@ -2,7 +2,7 @@
 
 Virtual boards: a Raspberry Pi that runs on your computer, reached over ssh
 and deployed to with `cargo run --release` like the real one. Each has its own
-address on your LAN, so a phone or ground station sees a separate machine.
+address on your LAN, so a phone or another computer sees a separate machine.
 The walkthrough is in [the virtual Pi guide](../tutorial/guides/virtual-pi.md).
 
 ```sh

@@ -194,7 +194,7 @@ if [ -e "/sys/class/net/$dev/wireless" ] && [ -n "$relays" ]; then
         say "ufw is on: let the relayed ports in, e.g. sudo ufw allow ${port}/udp"
     fi
 elif [ -e "/sys/class/net/$dev/wireless" ]; then
-    say "tip: if multicast from the LAN (ATAK, a GCS) doesn't reach the board, relay its groups:"
+    say "tip: if multicast from the LAN (discovery, telemetry) doesn't reach the board, relay its groups:"
     say "     sudo VIRTUAL_PI_RELAY=\"239.2.3.2:6969\" containers/install.sh $board"
 fi
 

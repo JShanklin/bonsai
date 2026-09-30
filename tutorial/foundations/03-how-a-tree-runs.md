@@ -5,14 +5,14 @@ Six ideas explain every bonsai tree.
 ## 1. Parts that decide, and parts that talk
 
 A program on a companion computer or a sensor hub does several things: read
-a sensor, decide whether it's too hot, tell a ground station. bonsai splits
+a sensor, decide whether it's too hot, tell a server. bonsai splits
 it into two kinds of part:
 
 - **Branches** decide. Each keeps its own state and turns each input into
   what it sends next. A branch never touches the network, a file or a
   clock.
 - **Edges** talk to the outside world: a UDP socket, a TCP connection, a
-  serial port. What an edge receives goes to the branches wired to it, and
+  serial port. What an edge receives goes to the branches linked to it, and
   what branches send it, it carries out.
 
 ## 2. One event at a time
@@ -27,7 +27,7 @@ events:  tick(sensor)   packet(uplink)   tick(sensor)   …
 core:    sensor ─Reading─▶ watchdog ─Alarm─▶ display    (all of it, then the next event)
 ```
 
-The core hands the event to the branches wired to it, then delivers every
+The core hands the event to the branches linked to it, then delivers every
 message they send, and every message *those* send, until nothing is left.
 Only then does it take the next event. This is **run to completion**.
 
@@ -43,18 +43,18 @@ same outputs, in the same order. That's what **deterministic** means here,
 and it's why a test can drive a branch, or the whole tree, with no network
 and no timers: hand it inputs, check what it sent.
 
-## 4. Messages and wires
+## 4. Messages and links
 
 Branches never call each other. They send **messages**: plain structs like
 `Reading { temp, humidity }`, where `temp` is a `Celsius`: numbers carry
-their units, so a temperature can't be mixed up with anything else. A **wire** says who sends which message to
-whom: `sensor` sends `Reading` to `watchdog` and `display`. Wires live in
+their units, so a temperature can't be mixed up with anything else. A **link** says who sends which message to
+whom: `sensor` sends `Reading` to `watchdog` and `display`. Links live in
 `bonsai.toml`, one file for the whole tree, and bonsai generates the typed
 code that carries them.
 
 The compiler checks the wiring. Each branch gets an `Input` enum with exactly
-what's wired to it, so a new wire doesn't build until the branch handles it.
-`out.send(m)` builds only for messages the branch is wired to send.
+what's linked to it, so a new link doesn't build until the branch handles it.
+`out.send(m)` builds only for messages the branch is linked to send.
 
 ## 5. Edges run on their own
 
@@ -85,13 +85,13 @@ bonsai names the parts of your program after a tree:
 | **branch** | a part: its state, and `setup` + `process` | `src/branches/<name>.rs` |
 | **message** | what branches send each other | a struct in `src/messages.rs` |
 | **edge** | a bridge to the outside: its I/O, restarted on failure | an `[edge.<name>]` in `bonsai.toml` |
-| **wire** | who sends what to whom | a `[[wire]]` in `bonsai.toml` |
+| **link** | who sends what to whom | a `[[link]]` in `bonsai.toml` |
 | **rate** | a branch's own clock: `Input::Tick`s per second | `rate` in its `[branch.<name>]` |
 | **settings** | a branch's values, as constants | other keys in `[branch.<name>]` → `src/settings.rs` |
 | **wiring** | the generated `Input`/`Out` types, the edges and the core | `src/wiring.rs` (never edit) |
 
 The `bonsai` command does the plumbing: it adds branches, messages and
-edges, wires them, and regenerates the wiring. You write what each branch
+edges, links them, and regenerates the wiring. You write what each branch
 decides.
 
 Next: [Your first tree](04-first-tree.md).

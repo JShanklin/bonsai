@@ -32,7 +32,7 @@ templates/
       cargo-generate.toml
       Cargo.toml
       .cargo/config.toml   # the build target and runner (none for host)
-      bonsai.toml          # the graph: branches, settings, rates, wires
+      bonsai.toml          # the graph: branches, settings, rates, links
       src/
         main.rs            # trunk: `bonsai::run(wiring::Core::new())`
         messages.rs        # the message structs (has `// bonsai:message`), units in scope
@@ -72,9 +72,9 @@ impl Branch for Display {
 }
 ```
 
-`Input` has one variant per message wired to the branch (plus `Tick` with a
-`rate`), so the compiler makes a branch handle each new wire. `out.send(m)`
-compiles only for messages the branch is wired to send. The struct is
+`Input` has one variant per message linked to the branch (plus `Tick` with a
+`rate`), so the compiler makes a branch handle each new link. `out.send(m)`
+compiles only for messages the branch is linked to send. The struct is
 `branches::<name>::<CamelName>`, which the generated core refers to.
 
 `info!`, `warn!`, `error!` and `debug!` log a line tagged with the branch (or
@@ -89,8 +89,8 @@ The generated `Out` implements `bonsai::Outbox`, so the core can count sends.
 Two markers, matched as whole lines (a comment mentioning one in prose isn't
 mistaken for it), keep them intact:
 
-- `// bonsai:input-arm` inside each branch's `match input`: `bonsai wire` and
-  `bonsai rate` add an arm above it; `unwire` and `rate … off` remove it.
+- `// bonsai:input-arm` inside each branch's `match input`: `bonsai link` and
+  `bonsai rate` add an arm above it; `unlink` and `rate … off` remove it.
 - `// bonsai:message` in `src/messages.rs`: `bonsai message add` puts a struct
   above it.
 

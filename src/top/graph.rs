@@ -11,27 +11,27 @@ pub struct Node {
     pub edge: bool,
 }
 
-/// One arrow: from node to node, for wire `wire`.
+/// One arrow: from node to node, for link `link`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Link {
+pub struct Arrow {
     pub from: usize,
     pub to: usize,
-    pub wire: usize,
+    pub link: usize,
 }
 
-/// The arrows the wires make, one per receiver; wires naming a node that
+/// The arrows the links make, one per receiver; links naming a node that
 /// isn't there are skipped.
-pub fn links(nodes: &[Node], wires: &[(String, Vec<String>)]) -> Vec<Link> {
+pub fn arrows(nodes: &[Node], links: &[(String, Vec<String>)]) -> Vec<Arrow> {
     let at = |name: &str| nodes.iter().position(|n| n.name == name);
     let mut out = Vec::new();
-    for (i, (from, to)) in wires.iter().enumerate() {
+    for (i, (from, to)) in links.iter().enumerate() {
         let Some(f) = at(from) else { continue };
         for t in to {
             if let Some(t) = at(t) {
-                out.push(Link {
+                out.push(Arrow {
                     from: f,
                     to: t,
-                    wire: i,
+                    link: i,
                 });
             }
         }
@@ -40,42 +40,42 @@ pub fn links(nodes: &[Node], wires: &[(String, Vec<String>)]) -> Vec<Link> {
 }
 
 /// Each node's column, left to right: a node goes one column right of the
-/// furthest node that feeds it. Links that close a loop don't count (they're
+/// furthest node that feeds it. Arrows that close a loop don't count (they're
 /// drawn going back), and edges the tree only sends to go at least as far
 /// right as the last branch.
-pub fn columns(nodes: &[Node], links: &[Link]) -> Vec<usize> {
+pub fn columns(nodes: &[Node], arrows: &[Arrow]) -> Vec<usize> {
     let n = nodes.len();
-    let back = back_links(nodes, links);
-    // Longest path over the forward links, in an order where every node
+    let back = back_arrows(nodes, arrows);
+    // Longest path over the forward arrows, in an order where every node
     // comes after the nodes feeding it.
-    let order = topo_order(n, links, &back);
+    let order = topo_order(n, arrows, &back);
     let mut col = vec![0; n];
     for &v in &order {
-        for (i, l) in links.iter().enumerate() {
+        for (i, l) in arrows.iter().enumerate() {
             if l.to == v && !back[i] && l.from != l.to {
                 col[v] = col[v].max(col[l.from] + 1);
             }
         }
     }
-    let sink = |v: usize| nodes[v].edge && !links.iter().any(|l| l.from == v);
+    let sink = |v: usize| nodes[v].edge && !arrows.iter().any(|l| l.from == v);
     let last = (0..n).filter(|&v| !sink(v)).map(|v| col[v]).max();
     for (v, c) in col.iter_mut().enumerate() {
-        if sink(v) && links.iter().any(|l| l.to == v) {
+        if sink(v) && arrows.iter().any(|l| l.to == v) {
             *c = last.unwrap_or(0).max(*c);
         }
     }
     col
 }
 
-/// Which links close a loop: a depth-first walk from the edges that feed the
-/// tree (then the nodes nothing feeds, then the rest) finds each as a link
+/// Which arrows close a loop: a depth-first walk from the edges that feed the
+/// tree (then the nodes nothing feeds, then the rest) finds each as a arrow
 /// back to a node still being walked.
-pub fn back_links(nodes: &[Node], links: &[Link]) -> Vec<bool> {
+pub fn back_arrows(nodes: &[Node], arrows: &[Arrow]) -> Vec<bool> {
     let n = nodes.len();
-    let mut back = vec![false; links.len()];
+    let mut back = vec![false; arrows.len()];
     let mut state = vec![0u8; n]; // 0 new, 1 being walked, 2 done
-    let fed = |v: usize| links.iter().any(|l| l.to == v && l.from != v);
-    let feeds = |v: usize| links.iter().any(|l| l.from == v);
+    let fed = |v: usize| arrows.iter().any(|l| l.to == v && l.from != v);
+    let feeds = |v: usize| arrows.iter().any(|l| l.from == v);
     let mut starts: Vec<usize> = (0..n).filter(|&v| nodes[v].edge && feeds(v)).collect();
     starts.extend((0..n).filter(|&v| !fed(v)));
     starts.extend(0..n);
@@ -83,11 +83,11 @@ pub fn back_links(nodes: &[Node], links: &[Link]) -> Vec<bool> {
         if state[s] != 0 {
             continue;
         }
-        // (node, next link index to look at)
+        // (node, next arrow index to look at)
         let mut stack = vec![(s, 0usize)];
         state[s] = 1;
         while let Some(&mut (v, ref mut next)) = stack.last_mut() {
-            if let Some((i, l)) = links
+            if let Some((i, l)) = arrows
                 .iter()
                 .enumerate()
                 .skip(*next)
@@ -111,9 +111,9 @@ pub fn back_links(nodes: &[Node], links: &[Link]) -> Vec<bool> {
     back
 }
 
-fn topo_order(n: usize, links: &[Link], back: &[bool]) -> Vec<usize> {
+fn topo_order(n: usize, arrows: &[Arrow], back: &[bool]) -> Vec<usize> {
     let mut indegree = vec![0; n];
-    for (i, l) in links.iter().enumerate() {
+    for (i, l) in arrows.iter().enumerate() {
         if !back[i] && l.from != l.to {
             indegree[l.to] += 1;
         }
@@ -123,7 +123,7 @@ fn topo_order(n: usize, links: &[Link], back: &[bool]) -> Vec<usize> {
     while !ready.is_empty() {
         let v = ready.remove(0);
         order.push(v);
-        for (i, l) in links.iter().enumerate() {
+        for (i, l) in arrows.iter().enumerate() {
             if l.from == v && !back[i] && l.from != l.to {
                 indegree[l.to] -= 1;
                 if indegree[l.to] == 0 {
@@ -144,7 +144,7 @@ const RIGHT: u8 = 8;
 #[derive(Default)]
 pub struct Canvas {
     cells: HashMap<(i32, i32), u8>,
-    /// How busy each cell's line is: the busiest wire through it wins.
+    /// How busy each cell's line is: the busiest link through it wins.
     heat: HashMap<(i32, i32), u8>,
 }
 
@@ -239,7 +239,7 @@ mod tests {
             .collect()
     }
 
-    fn wires(w: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+    fn links(w: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
         w.iter()
             .map(|(f, t)| (f.to_string(), t.iter().map(|t| t.to_string()).collect()))
             .collect()
@@ -248,11 +248,11 @@ mod tests {
     #[test]
     fn a_chain_and_a_fan_out_go_left_to_right() {
         let n = nodes(&[("sensor", false), ("watchdog", false), ("display", false)]);
-        let w = wires(&[
+        let w = links(&[
             ("sensor", &["watchdog", "display"]),
             ("watchdog", &["display"]),
         ]);
-        let l = links(&n, &w);
+        let l = arrows(&n, &w);
         assert_eq!(l.len(), 3);
         assert_eq!(columns(&n, &l), [0, 1, 2]);
     }
@@ -266,14 +266,14 @@ mod tests {
             ("display", false),
             ("uplink", true),
         ]);
-        let w = wires(&[
+        let w = links(&[
             ("sensor", &["watchdog", "display"]),
             ("watchdog", &["display"]),
             ("uplink", &["watchdog"]),
             ("watchdog", &["uplink"]),
         ]);
-        let l = links(&n, &w);
-        let back = back_links(&n, &l);
+        let l = arrows(&n, &w);
+        let back = back_arrows(&n, &l);
         // Only watchdog → uplink closes the loop.
         let closing: Vec<(usize, usize)> = l
             .iter()
@@ -293,8 +293,8 @@ mod tests {
             ("log", true),
             ("display", false),
         ]);
-        let w = wires(&[("gps", &["position"]), ("position", &["log", "display"])]);
-        assert_eq!(columns(&n, &links(&n, &w)), [0, 1, 2, 2]);
+        let w = links(&[("gps", &["position"]), ("position", &["log", "display"])]);
+        assert_eq!(columns(&n, &arrows(&n, &w)), [0, 1, 2, 2]);
     }
 
     #[test]

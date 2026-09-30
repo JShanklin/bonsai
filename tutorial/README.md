@@ -14,7 +14,7 @@ computer, so you don't need hardware yet.
 |---|---------|-----------|
 | 1 | [Setup](foundations/01-setup.md) | install Rust, bonsai and an editor |
 | 2 | [Rust essentials](foundations/02-rust-essentials.md) | just enough Rust to read and write bonsai code |
-| 3 | [How a tree runs](foundations/03-how-a-tree-runs.md) | branches, messages, wires, edges, and the core that runs them one event at a time |
+| 3 | [How a tree runs](foundations/03-how-a-tree-runs.md) | branches, messages, links, edges, and the core that runs them one event at a time |
 | 4 | [Your first tree](foundations/04-first-tree.md) | plant a tree, run it, tour its files |
 | 5 | [Branches and messages](foundations/05-branches-and-messages.md) | split the work into branches that send each other messages |
 | 6 | [Order and tests](foundations/06-order-and-tests.md) | why the order is fixed, and testing branches with no runtime |
@@ -30,8 +30,7 @@ to paste, and shows how to check it works.
 |-------|-----|
 | [Edges: UDP](guides/edges-udp.md) | datagrams: unicast, replies, multicast groups |
 | [Edges: TCP](guides/edges-tcp.md) | a client that reconnects by itself, or a server for many clients |
-| [Edges: serial](guides/edges-serial.md) | a UART or USB-serial port: a GPS, a flight controller |
-| [Edges: MAVLink](guides/edges-mavlink.md) | flight controllers and ground stations: heartbeats and telemetry |
+| [Edges: serial](guides/edges-serial.md) | a UART or USB-serial port: a GPS, a microcontroller |
 | [Edges: your own](guides/edges-custom.md) | the `Edge` trait, for anything the built-ins don't cover |
 | [Units](guides/units.md) | `Celsius`, `Meters`, `Knots`…: numbers the compiler won't mix up |
 | [Wire format](guides/wire-format.md) | compact binary messages (serde + postcard + COBS) |

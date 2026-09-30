@@ -200,14 +200,14 @@ impl App {
         0.0
     }
 
-    fn wire_rate(&self, i: usize) -> f64 {
+    fn link_rate(&self, i: usize) -> f64 {
         let Some(now) = &self.now else { return 0.0 };
-        let Some(w) = now.wires.get(i) else {
+        let Some(w) = now.links.get(i) else {
             return 0.0;
         };
         let was = self
             .before()
-            .and_then(|b| b.wires.get(i))
+            .and_then(|b| b.links.get(i))
             .map_or(w.count, |x| x.count);
         per_sec(was, w.count, self.ms())
     }
@@ -342,21 +342,21 @@ impl App {
             );
             return;
         }
-        let wires: Vec<(String, Vec<String>)> = now
-            .wires
+        let links: Vec<(String, Vec<String>)> = now
+            .links
             .iter()
             .map(|w| (w.from.clone(), w.to.clone()))
             .collect();
-        let links = graph::links(&nodes, &wires);
-        let back = graph::back_links(&nodes, &links);
-        let cols = graph::columns(&nodes, &links);
+        let conns = graph::arrows(&nodes, &links);
+        let back = graph::back_arrows(&nodes, &conns);
+        let cols = graph::columns(&nodes, &conns);
 
         // The detail strip takes the bottom; the graph the rest.
         let [space, detail] =
             Layout::vertical([Constraint::Min(3), Constraint::Length(6)]).areas(inner);
         if now.sys.is_none() {
-            // A tree from before bonsai top drew graphs reports no wires.
-            let hint = " this tree reports no wires: run `bonsai sync` in it to see them";
+            // A tree from before bonsai top drew graphs reports no links.
+            let hint = " this tree reports no links: run `bonsai sync` in it to see them";
             let at = Rect::new(
                 space.x,
                 space.y + space.height.saturating_sub(1),
@@ -395,7 +395,7 @@ impl App {
         }
         // Links that skip a column run along lanes above the boxes, and each
         // row of labels sits above the boxes' first row: make room for both.
-        let long = links
+        let long = conns
             .iter()
             .enumerate()
             .filter(|(k, l)| !back[*k] && cols[l.to] > cols[l.from] + 1)
@@ -414,17 +414,17 @@ impl App {
         let mut canvas = Canvas::default();
         let mut labels: Vec<(i32, i32, String, bool)> = Vec::new();
         let mut arrows: Vec<(i32, i32, char, bool)> = Vec::new();
-        // Each wire gets its own vertical in the gap to its sender's right
-        // (a wire to several nodes shares one).
+        // Each link gets its own vertical in the gap to its sender's right
+        // (a link to several nodes shares one).
         let mut verticals: HashMap<(usize, usize), i32> = HashMap::new();
         let mut in_gap = vec![0i32; ncols];
         let mut long_lanes = 0i32;
         let mut back_lanes = 0i32;
-        for (k, l) in links.iter().enumerate() {
+        for (k, l) in conns.iter().enumerate() {
             let (a, b) = (boxes[l.from], boxes[l.to]);
-            let rate = self.wire_rate(l.wire);
+            let rate = self.link_rate(l.link);
             let heat = if rate > 0.0 { 2 } else { 1 };
-            let label = match now.wires.get(l.wire) {
+            let label = match now.links.get(l.link) {
                 Some(w) if !w.label.is_empty() => format!("{} {rate:.1}/s", w.label),
                 _ => format!("{rate:.1}/s"),
             };
@@ -432,10 +432,10 @@ impl App {
             let yb = b.y as i32 + 1;
             let right = (a.x + a.width) as i32;
             if !back[k] && cols[l.to] > cols[l.from] {
-                let first = !verticals.contains_key(&(l.from, l.wire));
+                let first = !verticals.contains_key(&(l.from, l.link));
                 let gap = cols[l.from];
                 let gap_x = (col_x[gap] + col_width[gap]) as i32;
-                let vx = *verticals.entry((l.from, l.wire)).or_insert_with(|| {
+                let vx = *verticals.entry((l.from, l.link)).or_insert_with(|| {
                     in_gap[gap] += 1;
                     gap_x + 1 + (in_gap[gap] - 1).min(4) * 2
                 });
@@ -860,12 +860,12 @@ impl App {
     fn step_column(&mut self, dir: i32) {
         let Some(now) = &self.now else { return };
         let nodes = self.nodes();
-        let wires: Vec<(String, Vec<String>)> = now
-            .wires
+        let links: Vec<(String, Vec<String>)> = now
+            .links
             .iter()
             .map(|w| (w.from.clone(), w.to.clone()))
             .collect();
-        let cols = graph::columns(&nodes, &graph::links(&nodes, &wires));
+        let cols = graph::columns(&nodes, &graph::arrows(&nodes, &links));
         let Some(&here) = cols.get(self.selected) else {
             return;
         };
@@ -1008,7 +1008,7 @@ pub fn run(mut term: DefaultTerminal, rx: mpsc::Receiver<Update>, title: String)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::top::{Branch, Wire};
+    use crate::top::{Branch, Link};
 
     fn snapshot(ms: u64) -> Update {
         Update::Snapshot(Snapshot {
@@ -1098,7 +1098,7 @@ mod tests {
                     panics,
                     ..Default::default()
                 }],
-                wires: vec![Wire::default()],
+                links: vec![Link::default()],
                 ..Default::default()
             })
         };

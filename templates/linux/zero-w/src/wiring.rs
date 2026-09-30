@@ -19,13 +19,13 @@ use crate::messages::*;
 pub enum EdgeIn {
 }
 
-/// Every message in flight: one variant per wire.
+/// Every message in flight: one variant per link.
 #[derive(Debug)]
 pub enum Msg {
 }
 
-/// The wires, in bonsai.toml order (from, message, to): for `bonsai top`.
-const WIRES: &[crate::bonsai::stats::WireInfo] = &[
+/// The links, in bonsai.toml order (from, message, to): for `bonsai top`.
+const LINKS: &[crate::bonsai::stats::LinkInfo] = &[
 ];
 
 /// Every branch and edge, set up and waiting for events.
@@ -35,13 +35,13 @@ pub struct Core {
 
 impl Core {
     pub fn new() -> Self {
-        crate::bonsai::stats::wires(WIRES);
+        crate::bonsai::stats::links(LINKS);
         Core {
             queue: VecDeque::new(),
         }
     }
 
-    /// Hand one message to every branch or edge wired to it, in
+    /// Hand one message to every branch or edge linked to it, in
     /// bonsai.toml's order.
     fn deliver(&mut self, message: Msg, queue: &mut VecDeque<Msg>) {
         match message {

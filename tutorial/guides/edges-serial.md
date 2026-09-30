@@ -15,7 +15,7 @@ bonsai edge add <name> serial --device /dev/serial0 --baud 9600 [--framing lines
 |-----|-------|
 | `device` | the port: `/dev/serial0` (a Pi's UART), `/dev/ttyUSB0` or `/dev/ttyACM0` (USB adapters and boards) |
 | `baud` | its speed, as the device expects it: 9600 for most GPS receivers, 57600 or 115200 for flight controllers |
-| `framing` | `raw` (the default): whatever each read returns, for protocols with their own framing (MAVLink); `lines`: one packet per line, without its `\r\n`, and a newline added to each packet sent |
+| `framing` | `raw` (the default): whatever each read returns, for protocols with their own framing; `lines`: one packet per line, without its `\r\n`, and a newline added to each packet sent |
 
 A serial packet's `peer` is always `None`.
 
@@ -32,14 +32,14 @@ receiver whether it's there:
 ```sh
 bonsai edge add gps serial --device /dev/serial0 --baud 9600 --framing lines
 bonsai branch add position
-bonsai wire gps position
-bonsai wire position gps
+bonsai link gps position
+bonsai link position gps
 bonsai rate position 0.5
 ```
 
 ```
 added serial edge gps
-wire it with `bonsai wire gps <branch>` (what it receives) and `bonsai wire <branch> gps` (what it sends)
+link it one way or both: `bonsai link gps <branch>` (what it receives), `bonsai link <branch> gps` (what it sends)
 updated src/wiring.rs, src/edges/mod.rs, src/edges/serial.rs, Cargo.toml (+tokio-serial)
 …
 position ticks 0.5 times a second: `Input::Tick` in its process
@@ -50,7 +50,7 @@ position ticks 0.5 times a second: `Input::Tick` in its process
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {
     match input {
-        // `bonsai wire <from> <Message> position` adds an arm here
+        // `bonsai link <from> <Message> position` adds an arm here
         Input::Gps(line) => {
             let text = String::from_utf8_lossy(&line.bytes);
             if text.starts_with("$GPGGA") {
@@ -121,5 +121,5 @@ reopens the port when it's back.
   logs `Permission denied` and keeps retrying.
 - **Check the device first:** `ls -l /dev/serial0` shows which UART it is;
   `sudo cat /dev/serial0` shows whether anything is arriving at all.
-- **Binary protocols** (MAVLink, UBX): keep `framing = "raw"` and parse in
-  `process`; see the [MAVLink guide](edges-mavlink.md).
+- **Binary protocols** (UBX, your own): keep `framing = "raw"` and parse in
+  `process`; see the [wire format guide](wire-format.md).

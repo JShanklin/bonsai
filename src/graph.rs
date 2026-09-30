@@ -1,7 +1,7 @@
 //! A tree's graph and the code generated from it. Pure: text in, text out.
 //!
 //! `bonsai.toml` holds the graph: the branches (with their settings and
-//! `rate`), the edges (the tree's bridges to the outside world) and the wires
+//! `rate`), the edges (the tree's bridges to the outside world) and the links
 //! between them. `src/messages.rs` holds the message types. From those,
 //! `bonsai sync` writes `src/wiring.rs` (the typed inputs, outputs and core),
 //! `src/settings.rs`, `src/branches/mod.rs` and `src/edges/mod.rs`.
@@ -16,7 +16,7 @@ pub struct Config {
     /// In the file's order, which is the order the core runs them in.
     pub branches: Vec<BranchCfg>,
     pub edges: Vec<EdgeCfg>,
-    pub wires: Vec<Wire>,
+    pub links: Vec<Link>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -77,7 +77,10 @@ impl EdgeKind {
                 reply,
                 ..
             } => {
-                let mut s = format!("udp {bind}");
+                let mut s = match bind.as_str() {
+                    "0.0.0.0:0" => "udp, send only".to_string(),
+                    _ => format!("udp {bind}"),
+                };
                 if let Some(to) = to {
                     s.push_str(&format!(" → {to}"));
                 } else if *reply {
@@ -121,7 +124,7 @@ pub enum Setting {
 /// `from` sends `message` to every branch in `to`. With no message, one end
 /// is an edge: an edge's input to branches, or a branch's output to edges.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Wire {
+pub struct Link {
     pub from: String,
     pub message: Option<String>,
     pub to: Vec<String>,
@@ -175,38 +178,41 @@ pub fn parse(src: &str) -> Result<Config, String> {
         });
     }
 
-    if let Some(wires) = doc.get("wire") {
-        let wires = wires
+    if doc.contains_key("wire") {
+        return Err("bonsai.toml: [[wire]] is [[link]] now: run `bonsai sync`".to_string());
+    }
+    if let Some(links) = doc.get("link") {
+        let links = links
             .as_array_of_tables()
-            .ok_or("bonsai.toml: wires are [[wire]] tables")?;
-        for (i, wire) in wires.iter().enumerate() {
+            .ok_or("bonsai.toml: links are [[link]] tables")?;
+        for (i, link) in links.iter().enumerate() {
             let text = |key: &str| -> Result<Option<String>, String> {
-                match wire.get(key) {
+                match link.get(key) {
                     None => Ok(None),
                     Some(item) => item
                         .as_str()
                         .map(|s| Some(s.to_string()))
-                        .ok_or_else(|| format!("bonsai.toml: wire {}: `{key}` is a string", i + 1)),
+                        .ok_or_else(|| format!("bonsai.toml: link {}: `{key}` is a string", i + 1)),
                 }
             };
             let from = text("from")?
-                .ok_or_else(|| format!("bonsai.toml: wire {} needs `from = \"…\"`", i + 1))?;
+                .ok_or_else(|| format!("bonsai.toml: link {} needs `from = \"…\"`", i + 1))?;
             let message = text("message")?;
-            let to = wire
+            let to = link
                 .get("to")
                 .and_then(Item::as_array)
-                .ok_or_else(|| format!("bonsai.toml: wire {} needs `to = [\"…\"]`", i + 1))?
+                .ok_or_else(|| format!("bonsai.toml: link {} needs `to = [\"…\"]`", i + 1))?
                 .iter()
                 .map(|v| {
                     v.as_str().map(str::to_string).ok_or_else(|| {
                         format!(
-                            "bonsai.toml: wire {}: `to` lists branch or edge names",
+                            "bonsai.toml: link {}: `to` lists branch or edge names",
                             i + 1
                         )
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            cfg.wires.push(Wire { from, message, to });
+            cfg.links.push(Link { from, message, to });
         }
     }
     Ok(cfg)
@@ -477,8 +483,8 @@ impl Config {
     }
 }
 
-/// How a wire reads: `a --Msg--> b, c` or `tak --> atak`.
-pub fn describe(w: &Wire) -> String {
+/// How a link reads: `a --Msg--> b, c` or `beacon --> planner`.
+pub fn describe(w: &Link) -> String {
     match &w.message {
         Some(m) => format!("{} --{m}--> {}", w.from, w.to.join(", ")),
         None => format!("{} --> {}", w.from, w.to.join(", ")),
@@ -544,33 +550,33 @@ pub fn check(cfg: &Config, messages: &[String]) -> Report {
         }
     }
 
-    for (i, w) in cfg.wires.iter().enumerate() {
-        let wire = format!("wire {}", describe(w));
+    for (i, w) in cfg.links.iter().enumerate() {
+        let link = format!("link {}", describe(w));
         let from_edge = cfg.edge(&w.from).is_some();
         if !cfg.is_branch(&w.from) && !from_edge {
             r.errors
-                .push(format!("{wire}: no branch or edge `{}`", w.from));
+                .push(format!("{link}: no branch or edge `{}`", w.from));
         }
         match &w.message {
             Some(m) => {
                 if !messages.contains(m) {
                     r.errors
-                        .push(format!("{wire}: no message `{m}` in src/messages.rs"));
+                        .push(format!("{link}: no message `{m}` in src/messages.rs"));
                 }
                 if m == "Tick" {
                     r.errors.push(format!(
-                        "{wire}: `Tick` is the input a branch's rate makes; rename the message"
+                        "{link}: `Tick` is the input a branch's rate makes; rename the message"
                     ));
                 }
                 if from_edge {
                     r.errors.push(format!(
-                        "{wire}: an edge sends what it receives, not a message; drop `message`"
+                        "{link}: an edge sends what it receives, not a message; drop `message`"
                     ));
                 }
                 for to in &w.to {
                     if cfg.edge(to).is_some() {
                         r.errors.push(format!(
-                            "{wire}: to send to edge `{to}`, wire without a message (out.to_{to}(..))"
+                            "{link}: to send to edge `{to}`, link without a message (out.to_{to}(..))"
                         ));
                     }
                 }
@@ -579,7 +585,7 @@ pub fn check(cfg: &Config, messages: &[String]) -> Report {
                 for to in &w.to {
                     if cfg.edge(to).is_some() {
                         r.errors.push(format!(
-                            "{wire}: edges don't wire to edges; put a branch between them"
+                            "{link}: edges don't link to edges; put a branch between them"
                         ));
                     }
                 }
@@ -588,55 +594,55 @@ pub fn check(cfg: &Config, messages: &[String]) -> Report {
                 for to in &w.to {
                     if cfg.is_branch(to) {
                         r.errors.push(format!(
-                            "{wire}: a wire between branches carries a message; add `message`"
+                            "{link}: a link between branches carries a message; add `message`"
                         ));
                     }
                 }
             }
         }
         if w.to.is_empty() {
-            r.errors.push(format!("{wire}: `to` is empty"));
+            r.errors.push(format!("{link}: `to` is empty"));
         }
         for (j, to) in w.to.iter().enumerate() {
             if !cfg.is_branch(to) && cfg.edge(to).is_none() {
-                r.errors.push(format!("{wire}: no branch or edge `{to}`"));
+                r.errors.push(format!("{link}: no branch or edge `{to}`"));
             }
             if *to == w.from {
                 r.errors.push(format!(
-                    "{wire}: a branch can't send to itself; keep that state in the branch"
+                    "{link}: a branch can't send to itself; keep that state in the branch"
                 ));
             }
             if w.to[..j].contains(to) {
-                r.errors.push(format!("{wire}: `{to}` is listed twice"));
+                r.errors.push(format!("{link}: `{to}` is listed twice"));
             }
         }
-        if cfg.wires[..i]
+        if cfg.links[..i]
             .iter()
             .any(|o| o.from == w.from && o.message == w.message)
         {
             r.errors.push(format!(
-                "{wire}: wired twice; put every receiver in one `to` list"
+                "{link}: linked twice; put every receiver in one `to` list"
             ));
         }
     }
 
     for b in &cfg.branches {
-        let fed = cfg.wires.iter().any(|w| w.to.contains(&b.name));
+        let fed = cfg.links.iter().any(|w| w.to.contains(&b.name));
         if !fed && b.rate.is_none() {
             r.warnings.push(format!(
-                "{} has no inputs, so its process never runs: wire something to it, or give it a rate",
+                "{} has no inputs, so its process never runs: link something to it, or give it a rate",
                 b.name
             ));
         }
     }
     for e in &cfg.edges {
         if !cfg
-            .wires
+            .links
             .iter()
             .any(|w| w.from == e.name || w.to.contains(&e.name))
         {
             r.warnings.push(format!(
-                "edge {} isn't wired: `bonsai wire {} <branch>` to hear it, `bonsai wire <branch> {}` to send",
+                "edge {} isn't linked: `bonsai link {} <branch>` to hear it, `bonsai link <branch> {}` to send",
                 e.name, e.name, e.name
             ));
         }
@@ -656,7 +662,7 @@ fn cycles(cfg: &Config) -> Vec<Vec<String>> {
     let names: Vec<&str> = cfg.branches.iter().map(|b| b.name.as_str()).collect();
     let next = |from: &str| -> Vec<&str> {
         let mut to: Vec<&str> = cfg
-            .wires
+            .links
             .iter()
             .filter(|w| w.from == from)
             .flat_map(|w| w.to.iter().map(String::as_str))
@@ -693,7 +699,7 @@ fn cycles(cfg: &Config) -> Vec<Vec<String>> {
 }
 
 /// A branch's input variants, in order: `Tick` with a rate, then each
-/// message or edge wired to it (by the edge's CamelCase name), without
+/// message or edge linked to it (by the edge's CamelCase name), without
 /// repeats. The arms its `match input` needs.
 pub fn input_variants(cfg: &Config, branch: &str) -> Vec<String> {
     let mut variants: Vec<String> = Vec::new();
@@ -705,7 +711,7 @@ pub fn input_variants(cfg: &Config, branch: &str) -> Vec<String> {
         variants.push("Tick".to_string());
     }
     for w in cfg
-        .wires
+        .links
         .iter()
         .filter(|w| w.to.iter().any(|t| t == branch))
     {
@@ -737,8 +743,8 @@ fn edge_types(e: &EdgeCfg) -> (String, String) {
     }
 }
 
-/// A wire's variant in `Msg`: `SensorReading` for sensor sending Reading,
-/// `AtakToTak` for atak sending to the tak edge (one per edge it feeds).
+/// A link's variant in `Msg`: `SensorReading` for sensor sending Reading,
+/// `PlannerToBeacon` for planner sending to the beacon edge (one per edge it feeds).
 fn msg_variant(from: &str, message: &str) -> String {
     format!("{}{}", camel(from), message)
 }
@@ -776,8 +782,8 @@ pub enum EdgeIn {
     for e in &cfg.edges {
         o.push_str(&format!("    {}({}),\n", camel(&e.name), edge_types(e).0));
     }
-    o.push_str("}\n\n/// Every message in flight: one variant per wire.\n#[derive(Debug)]\npub enum Msg {\n");
-    for w in &cfg.wires {
+    o.push_str("}\n\n/// Every message in flight: one variant per link.\n#[derive(Debug)]\npub enum Msg {\n");
+    for w in &cfg.links {
         match &w.message {
             Some(m) => o.push_str(&format!(
                 "    /// {}\n    {}({m}),\n",
@@ -836,7 +842,7 @@ pub mod {name} {{
     }}
 
     impl Out {{
-        /// Send `message` down its wire. Only what {name} is wired to send
+        /// Send `message` down its link. Only what {name} is linked to send
         /// compiles.
         pub fn send<M>(&mut self, message: M)
         where
@@ -848,7 +854,7 @@ pub mod {name} {{
             name = b.name
         ));
         for w in cfg
-            .wires
+            .links
             .iter()
             .filter(|w| w.from == b.name && w.message.is_none())
         {
@@ -882,7 +888,7 @@ pub mod {name} {{
     }
 ",
         );
-        for w in cfg.wires.iter().filter(|w| w.from == b.name) {
+        for w in cfg.links.iter().filter(|w| w.from == b.name) {
             if let Some(m) = &w.message {
                 o.push_str(&format!(
                     "
@@ -973,9 +979,9 @@ pub mod {name} {{
     }
 
     o.push_str(
-        "\n/// The wires, in bonsai.toml order (from, message, to): for `bonsai top`.\nconst WIRES: &[crate::bonsai::stats::WireInfo] = &[\n",
+        "\n/// The links, in bonsai.toml order (from, message, to): for `bonsai top`.\nconst LINKS: &[crate::bonsai::stats::LinkInfo] = &[\n",
     );
-    for w in &cfg.wires {
+    for w in &cfg.links {
         let to: Vec<String> = w.to.iter().map(|t| format!("\"{t}\"")).collect();
         o.push_str(&format!(
             "    (\"{}\", \"{}\", &[{}]),\n",
@@ -998,7 +1004,7 @@ pub mod {name} {{
         o.push_str(&format!("    {}: EdgeOut<{}>,\n", e.name, edge_types(e).1));
     }
     o.push_str(
-        "    queue: VecDeque<Msg>,\n}\n\nimpl Core {\n    pub fn new() -> Self {\n        crate::bonsai::stats::wires(WIRES);\n        Core {\n",
+        "    queue: VecDeque<Msg>,\n}\n\nimpl Core {\n    pub fn new() -> Self {\n        crate::bonsai::stats::links(LINKS);\n        Core {\n",
     );
     for b in &cfg.branches {
         o.push_str(&format!(
@@ -1028,17 +1034,17 @@ pub mod {name} {{
     }
     o.push_str(
         "
-    /// Hand one message to every branch or edge wired to it, in
+    /// Hand one message to every branch or edge linked to it, in
     /// bonsai.toml's order.
     fn deliver(&mut self, message: Msg, queue: &mut VecDeque<Msg>) {
         match message {
 ",
     );
-    for (i, w) in cfg.wires.iter().enumerate() {
+    for (i, w) in cfg.links.iter().enumerate() {
         match &w.message {
             Some(m) => {
                 o.push_str(&format!(
-                    "            Msg::{}(message) => {{\n                crate::bonsai::stats::wire({i});\n",
+                    "            Msg::{}(message) => {{\n                crate::bonsai::stats::link({i});\n",
                     msg_variant(&w.from, m)
                 ));
                 deliveries(&mut o, &w.to, m, "message");
@@ -1047,7 +1053,7 @@ pub mod {name} {{
             None if cfg.is_branch(&w.from) => {
                 for to in &w.to {
                     o.push_str(&format!(
-                        "            Msg::{}(value) => {{\n                crate::bonsai::stats::wire({i});\n                self.{to}.send(value);\n            }}\n",
+                        "            Msg::{}(value) => {{\n                crate::bonsai::stats::link({i});\n                self.{to}.send(value);\n            }}\n",
                         edge_msg_variant(&w.from, to)
                     ));
                 }
@@ -1129,7 +1135,7 @@ impl Tree for Core {
     for e in &cfg.edges {
         let c = camel(&e.name);
         let to: Vec<String> = cfg
-            .wires
+            .links
             .iter()
             .filter(|w| w.from == e.name)
             .flat_map(|w| w.to.clone())
@@ -1142,10 +1148,10 @@ impl Tree for Core {
             o.push_str(&format!(
                 "            Event::Edge(EdgeIn::{c}(value)) => {{\n"
             ));
-            for (i, w) in cfg.wires.iter().enumerate() {
+            for (i, w) in cfg.links.iter().enumerate() {
                 if w.from == e.name {
                     o.push_str(&format!(
-                        "                crate::bonsai::stats::wire({i});\n"
+                        "                crate::bonsai::stats::link({i});\n"
                     ));
                 }
             }
@@ -1288,12 +1294,12 @@ groups = ["239.2.3.1", "239.2.3.2"]
 
 [branch.log]
 
-[[wire]]
+[[link]]
 from = "pulse"
 message = "Beat"
 to = ["radio", "log"]
 
-[[wire]]
+[[link]]
 from = "radio"
 message = "Frame"
 to = ["log"]
@@ -1304,7 +1310,7 @@ to = ["log"]
     }
 
     #[test]
-    fn parses_branches_settings_and_wires() {
+    fn parses_branches_settings_and_links() {
         let cfg = parse(TREE).unwrap();
         let names: Vec<&str> = cfg.branches.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(names, ["pulse", "radio", "log"]);
@@ -1326,8 +1332,8 @@ to = ["log"]
             ]
         );
         assert_eq!(
-            cfg.wires[0],
-            Wire {
+            cfg.links[0],
+            Link {
                 from: "pulse".to_string(),
                 message: Some("Beat".to_string()),
                 to: vec!["radio".to_string(), "log".to_string()],
@@ -1342,7 +1348,7 @@ to = ["log"]
         assert!(err.contains("[branch.a] rate"), "{err}");
         let err = parse("[branch.a]\nx = [1, \"b\"]\n").unwrap_err();
         assert!(err.contains("[branch.a] x"), "{err}");
-        let err = parse("[[wire]]\nmessage = \"M\"\nto = [\"b\"]\n").unwrap_err();
+        let err = parse("[[link]]\nmessage = \"M\"\nto = [\"b\"]\n").unwrap_err();
         assert!(err.contains("from"), "{err}");
     }
 
@@ -1353,11 +1359,11 @@ to = ["log"]
 [branch.a]
 [branch.b]
 [branch.Bad]
-[[wire]]
+[[link]]
 from = "a"
 message = "Nope"
 to = ["b", "b", "a", "ghost"]
-[[wire]]
+[[link]]
 from = "a"
 message = "Nope"
 to = ["b"]
@@ -1372,7 +1378,7 @@ to = ["b"]
             "`b` is listed twice",
             "can't send to itself",
             "no branch or edge `ghost`",
-            "wired twice",
+            "linked twice",
         ] {
             assert!(all.contains(expected), "missing {expected:?} in:\n{all}");
         }
@@ -1382,18 +1388,18 @@ to = ["b"]
     fn warns_about_loops_and_branches_that_never_run() {
         let cfg = parse(
             r#"
-[branch.gcs]
+[branch.pilot]
 rate = 1
-[branch.atak]
+[branch.planner]
 [branch.idle]
-[[wire]]
-from = "gcs"
+[[link]]
+from = "pilot"
 message = "Beat"
-to = ["atak"]
-[[wire]]
-from = "atak"
+to = ["planner"]
+[[link]]
+from = "planner"
 message = "Frame"
-to = ["gcs"]
+to = ["pilot"]
 "#,
         )
         .unwrap();
@@ -1401,7 +1407,7 @@ to = ["gcs"]
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         assert_eq!(r.warnings.len(), 2, "{:?}", r.warnings);
         assert!(r.warnings[0].starts_with("idle has no inputs"));
-        assert!(r.warnings[1].starts_with("gcs → atak → gcs"));
+        assert!(r.warnings[1].starts_with("pilot → planner → pilot"));
     }
 
     #[test]
@@ -1415,7 +1421,7 @@ to = ["gcs"]
     #[test]
     fn names() {
         assert_eq!(camel("radio_link"), "RadioLink");
-        assert_eq!(camel("gcs2"), "Gcs2");
+        assert_eq!(camel("pilot2"), "Pilot2");
         assert!(is_branch_name("radio_link"));
         assert!(!is_branch_name("Radio") && !is_branch_name("match") && !is_branch_name("2x"));
     }
@@ -1423,7 +1429,7 @@ to = ["gcs"]
     #[test]
     fn wiring_types_each_branch_and_delivers_in_order() {
         let w = render_wiring(&parse(TREE).unwrap());
-        // Inputs: the rate's Tick, then each wired message.
+        // Inputs: the rate's Tick, then each linked message.
         assert!(w.contains("pub mod pulse {"), "{w}");
         assert!(w.contains("        Tick,\n    }"), "{w}");
         assert!(w.contains("pub mod log {"), "{w}");
@@ -1431,7 +1437,7 @@ to = ["gcs"]
             w.contains("        Beat(Beat),\n        Frame(Frame),\n    }"),
             "{w}"
         );
-        // A branch can send only what it's wired to send.
+        // A branch can send only what it's linked to send.
         assert!(w.contains("impl Sends<Beat> for Out"), "{w}");
         assert!(
             w.contains("self.sent.push(Msg::PulseBeat(message));"),
@@ -1495,11 +1501,11 @@ to = ["gcs"]
     }
 
     const EDGES: &str = r#"
-[branch.atak]
-[branch.gcs]
+[branch.planner]
+[branch.pilot]
 rate = 1
 
-[edge.tak]
+[edge.beacon]
 kind = "udp"
 bind = "0.0.0.0:6969"
 to = "100.125.26.5:6970"
@@ -1516,7 +1522,7 @@ device = "/dev/serial0"
 baud = 921600
 framing = "lines"
 
-[edge.link]
+[edge.mesh]
 kind = "tcp"
 connect = "10.0.0.2:5760"
 
@@ -1524,37 +1530,37 @@ connect = "10.0.0.2:5760"
 kind = "custom"
 channel = 7
 
-[[wire]]
-from = "tak"
-to = ["atak"]
+[[link]]
+from = "beacon"
+to = ["planner"]
 
-[[wire]]
+[[link]]
 from = "fc"
-to = ["gcs", "atak"]
+to = ["pilot", "planner"]
 
-[[wire]]
-from = "atak"
-to = ["tak", "fc"]
+[[link]]
+from = "planner"
+to = ["beacon", "fc"]
 
-[[wire]]
-from = "gcs"
+[[link]]
+from = "pilot"
 message = "Beat"
-to = ["atak"]
+to = ["planner"]
 
-[[wire]]
+[[link]]
 from = "gps"
-to = ["gcs"]
+to = ["pilot"]
 
-[[wire]]
-from = "gcs"
-to = ["link", "radio"]
+[[link]]
+from = "pilot"
+to = ["mesh", "radio"]
 "#;
 
     #[test]
     fn edges_parse_with_their_kinds() {
         let cfg = parse(EDGES).unwrap();
         let kinds: Vec<&str> = cfg.edges.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(kinds, ["tak", "fc", "gps", "link", "radio"]);
+        assert_eq!(kinds, ["beacon", "fc", "gps", "mesh", "radio"]);
         assert_eq!(
             cfg.edges[0].kind,
             EdgeKind::Udp {
@@ -1579,10 +1585,10 @@ to = ["link", "radio"]
                 settings: vec![("channel".to_string(), Setting::Int(7))]
             }
         );
-        assert_eq!(cfg.wires[0].message, None);
+        assert_eq!(cfg.links[0].message, None);
         assert_eq!(check(&cfg, &messages()), Report::default());
-        assert_eq!(input_variants(&cfg, "atak"), ["Tak", "Fc", "Beat"]);
-        assert_eq!(input_variants(&cfg, "gcs"), ["Tick", "Fc", "Gps"]);
+        assert_eq!(input_variants(&cfg, "planner"), ["Beacon", "Fc", "Beat"]);
+        assert_eq!(input_variants(&cfg, "pilot"), ["Tick", "Fc", "Gps"]);
     }
 
     #[test]
@@ -1619,7 +1625,7 @@ to = ["link", "radio"]
     }
 
     #[test]
-    fn wires_with_edges_follow_the_rules() {
+    fn links_with_edges_follow_the_rules() {
         let cfg = parse(
             r#"
 [branch.a]
@@ -1631,18 +1637,18 @@ bind = "0.0.0.0:1"
 kind = "custom"
 [edge.beat]
 kind = "custom"
-[[wire]]
+[[link]]
 from = "x"
 to = ["y"]
-[[wire]]
+[[link]]
 from = "x"
 message = "Beat"
 to = ["a"]
-[[wire]]
+[[link]]
 from = "a"
 message = "Beat"
 to = ["x"]
-[[wire]]
+[[link]]
 from = "a"
 to = ["b"]
 "#,
@@ -1650,10 +1656,10 @@ to = ["b"]
         .unwrap();
         let all = check(&cfg, &messages()).errors.join("\n");
         for expected in [
-            "edges don't wire to edges",
+            "edges don't link to edges",
             "an edge sends what it receives, not a message",
-            "to send to edge `x`, wire without a message",
-            "a wire between branches carries a message",
+            "to send to edge `x`, link without a message",
+            "a link between branches carries a message",
             "edge `beat`: its input is called Beat, like a message",
         ] {
             assert!(all.contains(expected), "missing {expected:?} in:\n{all}");
@@ -1665,7 +1671,7 @@ to = ["b"]
         let w = render_wiring(&parse(EDGES).unwrap());
         // What edges receive, and the settings they're started with.
         assert!(
-            w.contains("pub enum EdgeIn {\n    Tak(crate::bonsai::Packet),\n"),
+            w.contains("pub enum EdgeIn {\n    Beacon(crate::bonsai::Packet),\n"),
             "{w}"
         );
         assert!(
@@ -1673,10 +1679,10 @@ to = ["b"]
             "{w}"
         );
         assert!(w.contains(
-            "const TAK: crate::bonsai::UdpConfig = crate::bonsai::UdpConfig {\n    bind: \"0.0.0.0:6969\",\n    to: Some(\"100.125.26.5:6970\"),\n    join: &[\"239.2.3.2\"],\n    iface: \"0.0.0.0\",\n    reply: false,\n};"
+            "const BEACON: crate::bonsai::UdpConfig = crate::bonsai::UdpConfig {\n    bind: \"0.0.0.0:6969\",\n    to: Some(\"100.125.26.5:6970\"),\n    join: &[\"239.2.3.2\"],\n    iface: \"0.0.0.0\",\n    reply: false,\n};"
         ), "{w}");
         assert!(w.contains("framing: crate::bonsai::Framing::Lines,"), "{w}");
-        assert!(w.contains("let tx = spawn_edge(\"tak\", || crate::bonsai::Udp::setup(TAK), events.clone(), EdgeIn::Tak);"), "{w}");
+        assert!(w.contains("let tx = spawn_edge(\"beacon\", || crate::bonsai::Udp::setup(BEACON), events.clone(), EdgeIn::Beacon);"), "{w}");
         assert!(
             w.contains("spawn_edge(\"gps\", || crate::edges::serial::Serial::setup(GPS),"),
             "{w}"
@@ -1687,30 +1693,30 @@ to = ["b"]
         );
         // Branches receive an edge as its CamelCase input, fanned out in order.
         assert!(
-            w.contains("        /// From the tak edge.\n        Tak(crate::bonsai::Packet),"),
+            w.contains("        /// From the beacon edge.\n        Beacon(crate::bonsai::Packet),"),
             "{w}"
         );
-        assert!(w.contains("            Event::Edge(EdgeIn::Fc(value)) => {\n                crate::bonsai::stats::wire("), "{w}");
+        assert!(w.contains("            Event::Edge(EdgeIn::Fc(value)) => {\n                crate::bonsai::stats::link("), "{w}");
         assert!(w.contains(
-            "                queue.extend(self.gcs.process(gcs::Input::Fc(value.clone())).sent);\n                queue.extend(self.atak.process(atak::Input::Fc(value)).sent);\n"
+            "                queue.extend(self.pilot.process(pilot::Input::Fc(value.clone())).sent);\n                queue.extend(self.planner.process(planner::Input::Fc(value)).sent);\n"
         ), "{w}");
-        // bonsai top draws the wires and counts what goes down each.
+        // bonsai top draws the links and counts what goes down each.
         assert!(
-            w.contains("const WIRES: &[crate::bonsai::stats::WireInfo] = &[\n"),
+            w.contains("const LINKS: &[crate::bonsai::stats::LinkInfo] = &[\n"),
             "{w}"
         );
-        assert!(w.contains("crate::bonsai::stats::wires(WIRES);"), "{w}");
+        assert!(w.contains("crate::bonsai::stats::links(LINKS);"), "{w}");
         // ...and send to edges with out.to_<edge>, one Msg variant per edge.
-        assert!(w.contains("pub fn to_tak(&mut self, value: crate::bonsai::Packet) {\n            self.sent.push(Msg::AtakToTak(value));"), "{w}");
+        assert!(w.contains("pub fn to_beacon(&mut self, value: crate::bonsai::Packet) {\n            self.sent.push(Msg::PlannerToBeacon(value));"), "{w}");
         assert!(
-            w.contains("Msg::AtakToFc(value) => {\n                crate::bonsai::stats::wire("),
+            w.contains("Msg::PlannerToFc(value) => {\n                crate::bonsai::stats::link("),
             "{w}"
         );
         assert!(w.contains("                self.fc.send(value);\n"), "{w}");
         assert!(w.contains("pub fn to_radio(&mut self, value: <crate::edges::radio::Radio as crate::bonsai::Edge>::Out)"), "{w}");
         // Tests can see what the core sent an edge.
         assert!(
-            w.contains("pub fn drain_tak(&mut self) -> Vec<crate::bonsai::Packet> {"),
+            w.contains("pub fn drain_beacon(&mut self) -> Vec<crate::bonsai::Packet> {"),
             "{w}"
         );
     }
@@ -1735,7 +1741,7 @@ to = ["b"]
         ] {
             assert!(!is_address(bad), "{bad}");
         }
-        let err = parse("[edge.gcs]\nkind = \"udp\"\nbind = \"--to\"\n").unwrap_err();
+        let err = parse("[edge.pilot]\nkind = \"udp\"\nbind = \"--to\"\n").unwrap_err();
         assert!(
             err.contains("bind \"--to\": an address is HOST:PORT"),
             "{err}"

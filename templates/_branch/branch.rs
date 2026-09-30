@@ -24,7 +24,7 @@ impl Branch for {{BranchName}} {
     fn process(&mut self, input: Input, out: &mut Out) {
         let _ = out; // delete once it sends
         match input {
-            // `bonsai wire <from> <Message> {{branch_name}}` adds an arm here
+            // `bonsai link <from> <Message> {{branch_name}}` adds an arm here
             // bonsai:input-arm
         }
     }

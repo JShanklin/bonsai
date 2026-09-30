@@ -8,7 +8,7 @@ order things happen in, and how to test a branch without running the tree.
 When the sensor ticks, the core:
 
 1. hands `Input::Tick` to the sensor, which sends a `Reading`;
-2. delivers that `Reading` to each branch in its wire's `to` list, in order:
+2. delivers that `Reading` to each branch in its link's `to` list, in order:
    the watchdog first, which sends an `Alarm`, then the display;
 3. delivers the `Alarm` to the display;
 4. finds nothing left, and takes the next event.
@@ -18,7 +18,7 @@ reading before the alarm. Nothing else runs in between: not another tick,
 not a packet from the network. The same inputs, in the same order, always
 give the same outputs.
 
-Branches run in the order of `bonsai.toml`'s tables, and each wire's
+Branches run in the order of `bonsai.toml`'s tables, and each link's
 receivers in the order of its `to` list. Change the order there (and run
 `bonsai sync`) to change it in the tree.
 
@@ -28,7 +28,7 @@ A branch can send to a branch that sends back. bonsai allows it, but warns,
 because a loop where every send is unconditional never ends:
 
 ```sh
-bonsai wire display Alarm sensor
+bonsai link display Alarm sensor
 ```
 
 ```
@@ -39,18 +39,18 @@ warning: sensor → watchdog → display → sensor send to each other in a loop
 ```
 
 The greenhouse's sends are conditional (the watchdog only alarms above the
-limit), but it doesn't need this wire, so take it out again:
+limit), but it doesn't need this link, so take it out again:
 
 ```sh
-bonsai unwire display Alarm sensor
+bonsai unlink display Alarm sensor
 ```
 
 ```
-unwired display from sensor; take its `out.send(Alarm ..)` out of display
+unlinked display from sensor; take its `out.send(Alarm ..)` out of display
 updated src/wiring.rs
 ```
 
-`unwire` also removed the `Input::Alarm` arm it had added to the sensor. If
+`unlink` also removed the `Input::Alarm` arm it had added to the sensor. If
 a loop does run away, the core stops it after 10,000 messages from one
 event, logs an error, and goes on with the next event.
 
@@ -93,8 +93,8 @@ mod tests {
 }
 ```
 
-What a branch sends is a list of `Msg`s, one variant per wire, named after
-the sender and the message: `WatchdogAlarm` is the watchdog's `Alarm` wire.
+What a branch sends is a list of `Msg`s, one variant per link, named after
+the sender and the message: `WatchdogAlarm` is the watchdog's `Alarm` link.
 
 And one for the sensor, at the bottom of `src/branches/sensor.rs`. Its state
 carries over from one input to the next, so drive it for several ticks:

@@ -17,7 +17,7 @@ impl {{EdgeName}} {
 }
 
 impl Edge for {{EdgeName}} {
-    /// What it receives; the branches wired from it get it as input.
+    /// What it receives; the branches linked from it get it as input.
     type In = Vec<u8>;
     /// What branches send it with `out.to_{{edge_name}}(..)`.
     type Out = Vec<u8>;

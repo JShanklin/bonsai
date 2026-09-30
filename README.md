@@ -5,7 +5,7 @@ add one at a time.**
 
 bonsai is a command-line tool for building Linux applications (a drone's
 companion computer, a robot, a sensor hub) out of independent parts. You
-describe the parts and how they're wired, and bonsai writes and maintains the
+describe the parts and how they're linked, and bonsai writes and maintains the
 structure. You write what each part decides.
 
 - **Branches** are the parts: a sensor, a controller, a radio link. Each keeps
@@ -13,7 +13,7 @@ structure. You write what each part decides.
 - **Messages** are plain structs branches send each other. Branches never
   call each other, so any branch can be added, removed or rewritten without
   touching the rest.
-- **Wires** say who sends what to whom. They live in `bonsai.toml`, one file
+- **Links** say who sends what to whom. They live in `bonsai.toml`, one file
   for the whole graph, and bonsai generates the typed code that carries them.
 - **Edges** are the bridges to the outside world: UDP (with multicast), TCP
   and serial ports, configured in `bonsai.toml` with no code, or your own.
@@ -36,11 +36,11 @@ already works. bonsai is built to prevent those:
   waits. The core feeds it one input at a time, in a fixed order. A test can
   drive a branch, or the whole core, with no runtime and no sockets.
 - **The compiler checks the wiring.** Each branch gets an `Input` enum with
-  exactly the messages wired to it. Wire in a new one and the build fails
+  exactly the messages linked to it. Link in a new one and the build fails
   until the branch handles it; `out.send(m)` compiles only for messages the
-  branch is wired to send.
+  branch is linked to send.
 - **One file is the graph.** Branches, their settings and rates, and every
-  wire are in `bonsai.toml`, edited by commands or by hand. `bonsai list`
+  link are in `bonsai.toml`, edited by commands or by hand. `bonsai list`
   shows it, and flags loops and branches nothing reaches.
 - **A panic isn't the end.** A branch that panics is set up again; an edge
   that fails or panics is restarted with backoff. The rest of the tree keeps
@@ -60,11 +60,11 @@ bonsai branch add sensor
 bonsai branch add display
 bonsai message add Reading temp:Celsius
 bonsai message add Alarm temp:Celsius
-bonsai wire sensor Reading display
-bonsai wire display Alarm sensor
+bonsai link sensor Reading display
+bonsai link display Alarm sensor
 bonsai rate sensor 4                     # an Input::Tick four times a second
 bonsai edge add net udp --bind 0.0.0.0:6969 --to 10.0.0.2:6970
-bonsai wire display net                  # display sends readings out: out.to_net(..)
+bonsai link display net                  # display sends readings out: out.to_net(..)
 bonsai list
 ```
 
@@ -75,7 +75,7 @@ branches, in the order the core runs them:
   display
 edges:
   net  (udp 0.0.0.0:6969 → 10.0.0.2:6970)
-wires:
+links:
   sensor --Reading--> display
   display --Alarm--> sensor
   display --> net
@@ -101,7 +101,7 @@ fn process(&mut self, input: Input, out: &mut Out) {
 **[The tutorial](tutorial/README.md)** goes from no background to building
 real projects: eight chapters that grow one tree, **greenhouse**, from
 planting it to watching it with `bonsai top`, then guides for each edge
-(UDP, TCP, serial, MAVLink, your own), testing, deploying to a Pi, and CI.
+(UDP, TCP, serial, your own), testing, deploying to a Pi, and CI.
 
 ## Install
 
@@ -129,10 +129,10 @@ bonsai branch add|remove <name>                 add or remove a branch
 bonsai message add <Name> [field:type …]        add a message type (remove undoes)
 bonsai edge add <name> udp|tcp|serial [--key value …]   a bridge to the outside (remove undoes)
 bonsai edge add <name> --custom                 an edge of your own, in src/edges/<name>.rs
-bonsai wire <from> <Message> <to> [<to> …]      from sends it to each (unwire undoes)
-bonsai wire <from> <to> [<to> …]                with an edge at one end: no message
+bonsai link <from> <Message> <to> [<to> …]      from sends it to each (unlink undoes)
+bonsai link <from> <to> [<to> …]                with an edge at one end: no message
 bonsai rate <branch> <hz|off>                   tick a branch this many times a second
-bonsai list                                     branches, wires, warnings
+bonsai list                                     branches, links, warnings
 bonsai sync                                     regenerate the wiring after editing bonsai.toml
 bonsai top [user@host] [--once]                 watch a running tree, here or on a Pi
 bonsai update                                   refresh template crates and Cargo.lock
@@ -152,7 +152,7 @@ bonsai tools [<tool> …]                         build tools: sccache, mold, zi
 | **branch** | a part: its state, and `setup` + `process` | `src/branches/<name>.rs` |
 | **message** | what branches send each other | a struct in `src/messages.rs` |
 | **edge** | a bridge to the outside: its I/O, restarted on failure | an `[edge.<name>]` in `bonsai.toml` |
-| **wire** | `from` sends a message to branches in `to`, or an edge's packets in or out | a `[[wire]]` in `bonsai.toml` |
+| **link** | `from` sends a message to branches in `to`, or an edge's packets in or out | a `[[link]]` in `bonsai.toml` |
 | **rate** | a branch's own clock: `Input::Tick`s per second | `rate` in its `[branch.<name>]` |
 | **settings** | a branch's values, as constants | other keys in `[branch.<name>]` → `src/settings.rs` |
 | **units** | numbers with their unit: `Celsius`, `Meters`, `Knots`… | in every tree's runtime, used in messages |
@@ -161,13 +161,13 @@ bonsai tools [<tool> …]                         build tools: sccache, mold, zi
 ## Edges
 
 ```toml
-[edge.tak]                    # bonsai edge add tak udp --bind … --to … --join …
+[edge.net]                    # bonsai edge add net udp --bind … --to … --join …
 kind = "udp"
 bind = "0.0.0.0:6969"
 to = "100.125.26.5:6970"      # where sends go (or `reply = true`: back to the last sender)
 join = ["239.2.3.2"]          # multicast groups
 
-[edge.fc]
+[edge.hub]
 kind = "tcp"
 connect = "127.0.0.1:5760"    # a client that reconnects; `listen = "…"` for a server
 
@@ -180,8 +180,8 @@ framing = "lines"             # a packet per line; "raw" (the default) passes ea
 
 Built-in edges carry `Packet { bytes, peer }`: `peer` is who sent it, and on
 the way out who gets it (`packet.reply(bytes)` answers the sender). A branch
-wired from an edge gets `Input::Tak(packet)`; one wired to it sends with
-`out.to_tak(packet)`. Decoding (MAVLink, a protobuf) belongs in `process`, so
+linked from an edge gets `Input::Net(packet)`; one linked to it sends with
+`out.to_net(packet)`. Decoding (a binary format, a protobuf) belongs in `process`, so
 it stays testable. For anything else, `bonsai edge add <name> --custom`
 scaffolds an `Edge` with typed `In`/`Out`, `setup`, `recv` and `execute`.
 
@@ -220,7 +220,7 @@ is one line; set `RUST_BACKTRACE=1` for the backtrace too.
 `bonsai top`, run in a tree's folder while it runs, shows it live, in five
 tabs you switch with their number, `Tab` or a click: the **graph** (every
 branch and edge as a box coloured by its state: green busy, grey idle, red
-after a panic or while retrying; every wire an arrow with its message and
+after a panic or while retrying; every link an arrow with its message and
 rate), **branches** (inputs and sends a second, time per input, panics),
 **edges** (up or retrying, packets in and out, drops, restarts, the last
 error), the **log** (scroll, search, filter by level or by who wrote it)

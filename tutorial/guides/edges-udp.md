@@ -1,7 +1,7 @@
 # Edges: UDP
 
 Send and receive datagrams: unicast to a fixed address, replies to whoever
-sent, and multicast groups (ATAK's situational awareness, many discovery
+sent, and multicast groups (many discovery and telemetry
 protocols).
 
 **Needs:** [chapter 7](../foundations/07-edges.md).
@@ -14,11 +14,12 @@ one datagram is one `Packet`.
 
 ```sh
 bonsai edge add <name> udp --bind 0.0.0.0:6969 [--to HOST:PORT] [--reply] [--join GROUP …] [--iface ADDR]
+bonsai edge add <name> udp --to HOST:PORT     # send only
 ```
 
 | key | means |
 |-----|-------|
-| `bind` | the local address and port it listens on (`0.0.0.0` = every interface) |
+| `bind` | the local address and port it listens on (`0.0.0.0` = every interface); leave it out for an edge that only sends (`reply` and `join` need it) |
 | `to` | where a packet goes when it names no `peer` |
 | `reply` | with no `to`, send back to whoever sent last |
 | `join` | multicast groups to join (repeat `--join` for several) |
@@ -28,6 +29,10 @@ A packet out goes to its `peer` if it has one (`packet.reply(..)` sets it to
 the sender), else to `to`, else to the last sender when `reply = true`, else
 nowhere.
 
+An edge can go one way: link it only from its branches (`bonsai link <branch>
+<edge>`) to only send, or only to them (`bonsai link <edge> <branch>`) to only
+receive.
+
 ## Multicast in, replies out
 
 A tracker that hears everyone on a multicast group and answers each sender
@@ -36,8 +41,8 @@ directly:
 ```sh
 bonsai edge add sa udp --bind 0.0.0.0:6969 --join 239.2.3.1
 bonsai branch add tracker
-bonsai wire sa tracker
-bonsai wire tracker sa
+bonsai link sa tracker
+bonsai link tracker sa
 ```
 
 ```
@@ -89,7 +94,7 @@ impl Branch for Tracker {
 
     fn process(&mut self, input: Input, out: &mut Out) {
         match input {
-            // `bonsai wire <from> <Message> tracker` adds an arm here
+            // `bonsai link <from> <Message> tracker` adds an arm here
             Input::Sa(packet) => {
                 if let Some(from) = packet.peer {
                     let count = self.heard.entry(from).or_insert(0);

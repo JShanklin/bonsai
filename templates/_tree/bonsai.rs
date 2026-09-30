@@ -3,7 +3,7 @@
 //! it; don't edit it.
 //!
 //! Every branch runs in one core loop, one event at a time. An event (a tick,
-//! or something an edge received) goes to the branches wired to it, and every
+//! or something an edge received) goes to the branches linked to it, and every
 //! message they send is delivered, in order, before the next event is taken.
 //! The same events in always give the same messages out.
 //!
@@ -61,7 +61,7 @@ use tokio::time::MissedTickBehavior;
 
 /// A branch: its state, and what it decides for each input.
 pub trait Branch: Sized {
-    /// What it receives: one variant per wire into it, plus `Tick` when it
+    /// What it receives: one variant per link into it, plus `Tick` when it
     /// has a `rate`. Generated as `crate::wiring::<branch>::Input`.
     type Input;
     /// Where it sends: `crate::wiring::<branch>::Out`.
@@ -76,7 +76,7 @@ pub trait Branch: Sized {
     fn process(&mut self, input: Self::Input, out: &mut Self::Out);
 }
 
-/// `out.send(message)`: there's one for each message a branch is wired to send.
+/// `out.send(message)`: there's one for each message a branch is linked to send.
 pub trait Sends<M> {
     fn send(&mut self, message: M);
 }
@@ -474,12 +474,12 @@ pub mod log {
 
         #[test]
         fn filter_takes_a_default_and_per_source_levels() {
-            let (f, bad) = Filter::parse("warn, gps=debug,tak=off");
+            let (f, bad) = Filter::parse("warn, gps=debug,beacon=off");
             assert!(bad.is_empty());
             assert!(f.allows(Level::Error, "sensor"));
             assert!(!f.allows(Level::Info, "sensor"));
             assert!(f.allows(Level::Debug, "gps"));
-            assert!(!f.allows(Level::Error, "tak"));
+            assert!(!f.allows(Level::Error, "beacon"));
             let (f, bad) = Filter::parse("");
             assert!(bad.is_empty());
             assert!(f.allows(Level::Info, "sensor") && !f.allows(Level::Debug, "sensor"));
@@ -904,25 +904,25 @@ pub mod stats {
         pub branches: Vec<(String, [u64; 5])>,
         /// name, state, received, sent, dropped, restarts, last error
         pub edges: Vec<(String, &'static str, [u64; 4], String)>,
-        /// from, message (empty for an edge's wire), to, deliveries
-        pub wires: Vec<(&'static str, &'static str, &'static [&'static str], u64)>,
+        /// from, message (empty for an edge's link), to, deliveries
+        pub links: Vec<(&'static str, &'static str, &'static [&'static str], u64)>,
         pub sys: Option<Sys>,
     }
 
-    /// A wire in bonsai.toml: from, message (`""` when an edge is at one
+    /// A link in bonsai.toml: from, message (`""` when an edge is at one
     /// end), to. The generated core registers them all.
-    pub type WireInfo = (&'static str, &'static str, &'static [&'static str]);
+    pub type LinkInfo = (&'static str, &'static str, &'static [&'static str]);
 
-    static WIRES: OnceLock<(&'static [WireInfo], Box<[AtomicU64]>)> = OnceLock::new();
+    static LINKS: OnceLock<(&'static [LinkInfo], Box<[AtomicU64]>)> = OnceLock::new();
 
-    /// The tree's wires, in bonsai.toml order (the first call wins).
-    pub fn wires(list: &'static [WireInfo]) {
-        WIRES.get_or_init(|| (list, list.iter().map(|_| AtomicU64::new(0)).collect()));
+    /// The tree's links, in bonsai.toml order (the first call wins).
+    pub fn links(list: &'static [LinkInfo]) {
+        LINKS.get_or_init(|| (list, list.iter().map(|_| AtomicU64::new(0)).collect()));
     }
 
-    /// One delivery down wire `i`.
-    pub fn wire(i: usize) {
-        if let Some(count) = WIRES.get().and_then(|(_, counts)| counts.get(i)) {
+    /// One delivery down link `i`.
+    pub fn link(i: usize) {
+        if let Some(count) = LINKS.get().and_then(|(_, counts)| counts.get(i)) {
             count.fetch_add(1, Relaxed);
         }
     }
@@ -1022,7 +1022,7 @@ pub mod stats {
                     (name.to_string(), state, n, error)
                 })
                 .collect(),
-            wires: WIRES.get().map_or(Vec::new(), |(list, counts)| {
+            links: LINKS.get().map_or(Vec::new(), |(list, counts)| {
                 list.iter()
                     .zip(counts.iter())
                     .map(|((from, label, to), n)| (*from, *label, *to, n.load(Relaxed)))
@@ -1062,8 +1062,8 @@ pub mod stats {
                 clean(error)
             );
         }
-        for (from, label, to, n) in &s.wires {
-            o += &format!("wire\t{from}\t{label}\t{}\t{n}\n", to.join(","));
+        for (from, label, to, n) in &s.links {
+            o += &format!("link\t{from}\t{label}\t{}\t{n}\n", to.join(","));
         }
         if let Some(sys) = &s.sys {
             o += &format!(
@@ -1095,7 +1095,7 @@ pub mod stats {
                 inbox: 0,
                 branches: vec![("sensor".into(), [3, 0, 0, 12, 5])],
                 edges: vec![("net".into(), "retrying", [1, 2, 0, 1], "bind\tx".into())],
-                wires: vec![("sensor", "Reading", &["net", "log"], 3)],
+                links: vec![("sensor", "Reading", &["net", "log"], 3)],
                 sys: Some(Sys {
                     rss_kb: 2048,
                     cpu_ms: 30,
@@ -1110,7 +1110,7 @@ pub mod stats {
                 "bonsai-top 1\t1500\t3\t40\t0\n\
                  branch\tsensor\t3\t0\t0\t12\t5\n\
                  edge\tnet\tretrying\t1\t2\t0\t1\tbind x\n\
-                 wire\tsensor\tReading\tnet,log\t3\n\
+                 link\tsensor\tReading\tnet,log\t3\n\
                  sys\t2048\t30\t1\t12\t4000\t3000\n\
                  log\ta line\n\
                  end\n"
@@ -1240,7 +1240,7 @@ pub mod top {
 /// It's opened by an `async fn setup() -> io::Result<Self>` of its own
 /// (built-in edges take their config); an `Err` there is retried with backoff.
 pub trait Edge: Sized + Send + 'static {
-    /// What it receives, handed to the branches wired from it.
+    /// What it receives, handed to the branches linked from it.
     type In: Clone + Debug + Send + 'static;
     /// What branches send it to carry out.
     type Out: Clone + Debug + Send + 'static;
@@ -1428,7 +1428,7 @@ fn invalid(what: impl std::fmt::Display) -> io::Error {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Framing {
     /// Whatever each read returns: for protocols that frame themselves
-    /// (MAVLink, anything with its own parser).
+    /// (a protocol with its own parser).
     Raw,
     /// One packet per line, without its `\n` (or `\r\n`); sends get a `\n`.
     Lines,

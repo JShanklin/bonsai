@@ -1,0 +1,24 @@
+# `cargo build --release` builds for the Pi; `cargo run --release` copies the
+# binary to the Pi and runs it there. `cargo local` runs on this computer.
+
+[build]
+target = "aarch64-unknown-linux-gnu"
+
+[target.aarch64-unknown-linux-gnu]
+# The linker for the Pi's CPU: `sudo apt install gcc-aarch64-linux-gnu`, or zig
+# (`bonsai tools`, pick zigbuild), which needs no cross toolchain.
+linker = "aarch64-linux-gnu-gcc"
+# Copy to the Pi and run over ssh. On the Pi itself (or any 64-bit ARM Linux), run in place.
+runner = ["sh", "-c", '''
+[ "$(uname -m)" = aarch64 ] && exec "$@"
+bin="$1"; shift
+scp -q "$bin" "$BONSAI_PI:/tmp/" && exec ssh -t "$BONSAI_PI" "/tmp/${bin##*/}" "$@"
+''', "run-on-pi"]
+
+[env]
+# Your Pi, as ssh sees it (user@host). `BONSAI_PI=... cargo run` overrides it once.
+BONSAI_PI = "pi@raspberrypi.local"
+
+[alias]
+local = "run --target host-tuple"        # run on this computer instead
+local-test = "test --target host-tuple"  # tests on this computer

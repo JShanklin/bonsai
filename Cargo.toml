@@ -1,0 +1,10 @@
+[package]
+name = "bonsai"
+version = "0.1.0"
+edition = "2024"
+description = "Grow embedded firmware as a tree: a trunk, and branches you add"
+
+[dependencies]
+ratatui = "0.30"
+include_dir = "0.7"
+toml_edit = "0.25"

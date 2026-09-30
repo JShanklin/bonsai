@@ -1,0 +1,216 @@
+# Virtual Pi
+
+Run a Pi tree on your computer as if it were on a Raspberry Pi. You deploy
+the real ARM build with `cargo run --release`, to a machine with its own
+address on your network. Use it when the Pi isn't at hand, or to test a
+tree against a simulator and a phone before it runs on the real board.
+
+**Needs:** a Pi tree that builds for the Pi (see [Deploy](deploy.md)), Linux
+with systemd, Podman, and a clone of the bonsai repository (the setup lives in
+its [`containers/`](../../containers/README.md) folder).
+
+## How it fits together
+
+A virtual Pi is a container running Debian, the system Raspberry Pi OS is
+built on, for the board's CPU. qemu runs its ARM code on your computer, and
+systemd keeps it running. It has two network links:
+
+```
+             host link: 10.89.0.2           LAN: 192.168.1.250
+your computer ─────────────── virtual Pi ─────────────── phone, other computers
+ (ssh, cargo run, a simulator)            (a phone app, other devices)
+```
+
+- **The host link** is how your computer reaches it: ssh, `cargo run`, and a
+  simulator running on your computer. From inside, your computer is
+  `10.89.0.1`.
+- **The LAN address** makes it a separate machine to every other device, with
+  its own IP. Your computer can't use this one: a LAN address like this is
+  hidden from the computer that hosts it, which is why there are two links.
+
+A distrobox can't do this. It shares your computer's network and hostname, so
+it never has an address of its own.
+
+There's one virtual board per Pi, each with the real board's memory and cores:
+
+| board | CPU | memory | cores | host link | LAN address |
+|-------|-----|--------|-------|-----------|-------------|
+| `pi5` | 64-bit ARM | 4 GB | 4 | `10.89.0.2` | `.250` |
+| `zero-2w` | 64-bit ARM | 512 MB | 4 | `10.89.0.3` | `.251` |
+| `zero-w` | 32-bit ARM | 512 MB | 1 | `10.89.0.4` | `.252` |
+
+To change them (a Pi 5 with 8 GB, say), see
+[`containers/README.md`](../../containers/README.md#changing-a-boards-specs).
+
+## 1. Emulation
+
+Install Podman and qemu's ARM emulation:
+
+```sh
+sudo pacman -S podman qemu-user-static qemu-user-static-binfmt   # Arch, CachyOS
+sudo dnf install podman qemu-user-static                         # Fedora
+sudo apt install podman qemu-user-static                         # Debian, Ubuntu
+```
+
+On Arch, `qemu-user-static-binfmt` is the part that registers the emulation
+with the kernel; without it, ARM programs fail with `exec format error`.
+
+## 2. Install a board
+
+From your bonsai folder, with the board your tree is for:
+
+```sh
+sudo containers/install.sh pi5
+```
+
+```
+virtual-pi5: building the image (emulated, so a few minutes the first time)
+…
+virtual-pi5: ready: ssh virtual-pi5, or BONSAI_PI=virtual-pi5 cargo run --release
+virtual-pi5: host link 10.89.0.2, LAN address 192.168.1.250 on enp3s0
+```
+
+It reads your network from the default route, builds the image with your ssh
+key, and hands the board to systemd. From then on it starts at boot, with
+nothing to run. It also adds a `virtual-pi5` host to `~/.ssh/config` and
+trusts its key, so ssh doesn't ask.
+
+**On Wi-Fi** the LAN link works differently. Access points drop traffic from
+any device address (MAC) but your computer's, so on Wi-Fi the board shares your
+computer's MAC (ipvlan) instead of having its own (macvlan, used on a link).
+The script picks by itself and says so:
+
+```
+virtual-pi5: wlan0 is Wi-Fi: the LAN link uses ipvlan
+```
+
+Moving between Wi-Fi and a link? Run the install again; it rebuilds the LAN
+link for the new connection and restarts the boards on it. Guest networks and
+phone hotspots may still keep devices from reaching each other. To use another
+interface, LAN address or driver:
+
+```sh
+sudo VIRTUAL_PI_LAN_DEV=enp4s0 VIRTUAL_PI_LAN_IP=192.168.1.40 containers/install.sh pi5
+sudo VIRTUAL_PI_LAN_DRIVER=macvlan containers/install.sh pi5
+```
+
+**Multicast from the LAN on Wi-Fi.** Many Wi-Fi drivers drop incoming
+multicast on its way into the board's link: the phone's packets reach your
+computer's Wi-Fi but never the board. Name the groups the board listens to, and
+your computer joins them itself and forwards every packet to the board over the
+host link:
+
+```sh
+sudo pacman -S socat          # the relay runs socat (dnf/apt install socat)
+sudo VIRTUAL_PI_RELAY="239.2.3.2:6969" containers/install.sh zero-w
+```
+
+```
+virtual-zero-w: relaying 239.2.3.2:6969 from wlan0 to the board
+```
+
+Each group runs as a service (`systemctl status bonsai-relay@virtual-zero-w-1`),
+started at boot. Separate several groups with spaces. A later install keeps
+them; `VIRTUAL_PI_RELAY=` (empty) or an install on a link removes them. If
+`ufw` is on, let the port in: `sudo ufw allow 6969/udp`. Your program needs no
+change as long as its socket is bound to `0.0.0.0:<port>`; the relayed packets
+arrive on the host link. Only incoming multicast needs this: the board's own
+multicast goes out on its LAN link as usual.
+
+## 3. Deploy
+
+In the tree:
+
+```sh
+BONSAI_PI=virtual-pi5 cargo run --release
+```
+
+```
+     Running `sh -c '[ "$(uname -m)" = aarch64 ] && exec "$@"
+…
+11:47:26.319Z  INFO bonsai: running
+```
+
+The tree's runner copies the binary with `scp` and runs it over `ssh`, so the
+virtual Pi is just another ssh host. To make it the default, set
+`BONSAI_PI = "virtual-pi5"` in `.cargo/config.toml`. Ctrl-C stops the program.
+`bonsai top` reaches it the same way, over ssh (`BONSAI_PI=virtual-pi5
+bonsai top`).
+
+For a Zero W tree, pick zigbuild in `bonsai tools` first: it has no linker
+otherwise (see [Deploy](deploy.md)). Then `BONSAI_PI=virtual-zero-w cargo run
+--release` works the same way.
+
+## Who reaches what
+
+| from | to | use |
+|------|----|-----|
+| your computer (ssh, a simulator, a test client) | the virtual Pi | its host link, `10.89.0.2` |
+| the virtual Pi | your computer | `10.89.0.1` |
+| a phone or another computer | the virtual Pi | its LAN address, `192.168.1.250` |
+| the virtual Pi, to a multicast group (`239.x.x.x`) | the LAN | goes out on `lan0` |
+
+For example, a simulator on your computer sends to `10.89.0.2:6969`, and
+a UDP edge in the tree binds `0.0.0.0:6969` (see [UDP](edges-udp.md)).
+Check where multicast goes:
+
+```sh
+ssh virtual-pi5 ip route get 239.1.2.3
+```
+
+```
+multicast 239.1.2.3 dev lan0 src 192.168.1.250 …
+```
+
+## Day to day
+
+```sh
+systemctl status virtual-pi5          # running?
+sudo systemctl restart virtual-pi5    # a fresh start (keeps /home/pi)
+journalctl -u virtual-pi5             # its log, if it won't start
+sudo containers/install.sh pi5        # after editing containers/: rebuild and restart
+sudo containers/install.sh pi5 remove # delete it
+```
+
+Everything outside `/home/pi` resets when the board restarts. Keep your files
+in `/home/pi`, add system packages to the `apt-get` line in
+`containers/Containerfile`, and put services under `containers/rootfs/`, then
+run the install again.
+
+## Services
+
+The board boots systemd, like Raspberry Pi OS, so a service runs the same way
+it will on the real Pi. It comes with one example, which logs a line at each
+boot:
+
+```sh
+ssh virtual-pi5 systemctl status example
+ssh virtual-pi5 journalctl -u example
+```
+
+To start your own program at boot (your tree, say), add a unit file under
+`containers/rootfs/`; see
+[`containers/README.md`](../../containers/README.md#services).
+
+## How it differs from a real Pi
+
+- **Speed:** emulated ARM runs several times slower than the real board.
+  Memory and core count match; speed doesn't. Timing and CPU load don't carry
+  over; logic and networking do.
+- **Hardware:** no GPIO, I2C, SPI or camera.
+- **System:** Debian, not Raspberry Pi OS. The packages and C library match;
+  the Pi-only tools (`raspi-config`, the camera stack) are missing.
+
+## If something fails
+
+| message | fix |
+|---------|-----|
+| `no emulation for linux/arm64 yet` | step 1: install qemu (on Arch, both packages) |
+| `sudo: effective uid is not 0` inside | rerun `install.sh`: it turns on the emulation setting `sudo` needs |
+| `Unable to locate package` while building | a network hiccup; the build already uses host networking, so run it again |
+| `unable to find network with name or ID systemd-bonsai-host` (in `journalctl -u virtual-<board>`) | the shared network was deleted while its unit still counted as done: `sudo systemctl restart bonsai-host-network.service bonsai-lan-network.service`, then `sudo systemctl reset-failed virtual-<board>` and `sudo systemctl restart virtual-<board>`. `install.sh` does this itself now |
+| `the board didn't answer on 10.89.0.2` | `journalctl -u virtual-pi5` shows why it didn't start |
+| `tcpdump: can't get TPACKET_V3 header len` inside | tcpdump can't capture under emulation; run your computer's in the board's network: `sudo nsenter -t "$(sudo podman inspect -f '{{.State.Pid}}' virtual-pi5)" -n tcpdump -ni any udp port 14550` |
+| the phone can't see it | a guest network or hotspot keeping devices apart (see step 2), you changed between Wi-Fi and a link without installing again, or a firewall on your computer blocking the LAN address |
+| on Wi-Fi, `tcpdump -ni wlan0` on your computer shows the phone's multicast but the board's `lan0` doesn't | the Wi-Fi driver drops it on the way to the board: relay the group (`VIRTUAL_PI_RELAY`, step 2) |
+| `netavark … has no ipvlan` while installing | Podman's network helper is older than 1.5: update podman and netavark, or use a link |

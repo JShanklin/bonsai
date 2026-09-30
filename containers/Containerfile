@@ -1,0 +1,21 @@
+# A virtual Raspberry Pi: Debian (what Raspberry Pi OS is built on) for the
+# board's CPU, booting systemd and reached over ssh like the real one.
+# Add packages your Pi needs to the apt-get line, and files (services, their
+# configs) under rootfs/, then rerun install.sh <board>.
+FROM docker.io/library/debian:bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        systemd systemd-sysv dbus openssh-server sudo iproute2 iputils-ping tcpdump socat \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -s /bin/bash -G sudo,adm,systemd-journal pi \
+    && echo 'pi ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/pi
+COPY --chown=pi:pi authorized_keys /home/pi/.ssh/authorized_keys
+# Your services and their configs, from rootfs/. Every unit there is enabled,
+# so it starts each time the board boots. Links there are aliases packages
+# already enabled (Debian's sshd.service).
+COPY rootfs/ /
+RUN for unit in /etc/systemd/system/*.service; do \
+        [ -L "$unit" ] || systemctl enable "$(basename "$unit")"; \
+    done \
+    && systemctl enable ssh
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

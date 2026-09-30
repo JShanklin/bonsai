@@ -1,0 +1,19 @@
+# The tree's graph, read by the `bonsai` CLI (not by cargo). `bonsai sync`
+# generates src/wiring.rs, src/settings.rs and src/branches/mod.rs from it and
+# src/messages.rs. The bonsai commands edit it for you and keep its comments;
+# after editing it by hand, run `bonsai sync`.
+
+# One table per branch, in the order the core runs them. Its keys become
+# constants in src/settings.rs (`settings::<branch>::KEY`), except `rate`:
+# ticks per second, each an `Input::Tick` for the branch (`bonsai rate`).
+# `bonsai branch add` writes one. For example:
+#   [branch.sensor]
+#   rate = 1          # an Input::Tick once a second
+#   limit = 30.0      # a setting: settings::sensor::LIMIT
+
+# Links: `from` sends `message` to every branch in `to`, in that order
+# (`bonsai link <from> <Message> <to…>`). For example:
+#   [[link]]
+#   from = "sensor"
+#   message = "Reading"
+#   to = ["display", "logger"]

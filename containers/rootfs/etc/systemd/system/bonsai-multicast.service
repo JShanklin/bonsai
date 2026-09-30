@@ -1,0 +1,13 @@
+# Sends multicast (239.x groups, used by team-awareness and discovery apps)
+# out on the LAN interface, not the host link.
+[Unit]
+Description=Route multicast to the LAN (bonsai virtual board)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip route replace 239.0.0.0/8 dev lan0
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

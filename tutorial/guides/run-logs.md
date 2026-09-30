@@ -121,8 +121,32 @@ BONSAI_RECORD=off cargo local           # keep nothing this time
 BONSAI_RECORD=/tmp/runs cargo local     # folders go here instead
 ```
 
-A full disk or a read-only folder never stops the tree: bonsai says so
-once on stderr and stops writing that file.
+## How lines get to the disk
+
+The tree never waits for the disk. Each line goes into a queue of 1024
+(`record::QUEUE`), and one thread of its own writes them, in the order they
+were taken, and also makes the run's folder and checks the last one. So:
+
+- **A slow disk** (an SD card, a busy USB stick) doesn't slow branches,
+  edges or Ctrl-C down.
+- **When the queue is full**, a new line is dropped, not waited for, and
+  counted: the file gets a line saying how many were dropped, and END says
+  how many in all. Bounded, never-waiting logging can't promise to keep
+  everything while it's overwhelmed for long; it promises not to take the
+  tree down with it, and to say when it lost something.
+- **A line** is capped at 8 KiB (`record::MAX_LINE`); a longer one is cut
+  short with `…`.
+- **On the way out** (Ctrl-C, SIGTERM), the writer writes what it has
+  taken, then END, and syncs the files. The tree waits 2 s for that at most
+  (`record::END_WAIT`); if the disk is too slow, it says `END may be
+  missing` on stderr and exits anyway.
+- **Durability:** lines are handed to the OS within 0.1 s of being taken,
+  and synced to the disk every 5 s, at START and at END. A crash of the
+  program keeps what the OS already has; a power cut can lose up to the
+  last few seconds, and can leave the last line half-written.
+- **A full disk or a read-only folder** never stops the tree: bonsai says
+  so once on stderr (`bonsai: run logs: can't write events.log: …; stopped
+  writing it`) and stops writing that file.
 
 ## Older trees
 

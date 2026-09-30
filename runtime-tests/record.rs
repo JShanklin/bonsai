@@ -77,8 +77,16 @@ fn scenario_ticks_until_stopped() {
         return;
     }
     configure();
-    let stop = std::env::var("RT_STOP").map_or(0, |s| s.parse().unwrap());
-    run_tree(ticking(stop, |n| {
+    let var = |k: &str| std::env::var(k).map_or(0, |s| s.parse::<u64>().unwrap());
+    let stop = var("RT_STOP");
+    // A slow or failing disk, and a burst of records every tick.
+    record::fault::SLOW_MS.store(var("RT_SLOW_MS"), std::sync::atomic::Ordering::Relaxed);
+    record::fault::FAIL.store(var("RT_FAIL") == 1, std::sync::atomic::Ordering::Relaxed);
+    let burst = var("RT_BURST");
+    run_tree(ticking(stop, move |n| {
+        for i in 0..burst {
+            record!("burst {n}.{i}");
+        }
         if n == 2 {
             record!("launch {n}");
         }
@@ -269,4 +277,107 @@ fn unwritable_storage_never_stops_the_tree() {
     assert!(ran.code == Some(0), "{ran:?}");
     assert_eq!(ticks(&ran.stdout), 10, "{ran:?}");
     assert!(ran.stderr.contains("run logs"), "{}", ran.stderr);
+}
+
+fn hwm_kb(out: &str) -> u64 {
+    out.lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+        .expect("VmHWM")
+}
+
+#[test]
+fn a_slow_disk_never_stalls_the_tree_or_its_shutdown() {
+    let dir = scratch("slow-disk");
+    let running = spawn(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("RT_SLOW_MS", "200"),
+            ("RT_BURST", "5"),
+        ],
+    );
+    std::thread::sleep(Duration::from_millis(2000));
+    running.signal(libc::SIGTERM);
+    let ran = running.wait(Duration::from_secs(8));
+    // 50 ticks a second for 2 s: the tree didn't wait on the disk.
+    assert!(ticks(&ran.stdout) >= 80, "the tree stalled: {ran:?}");
+    assert!(
+        !ran.timed_out && ran.code == Some(0),
+        "shutdown stalled: {ran:?}"
+    );
+    // It gave up waiting for the writer after END_WAIT, and said so.
+    assert!(ran.stderr.contains("END may be missing"), "{}", ran.stderr);
+}
+
+#[test]
+fn a_failing_disk_is_reported_once_and_the_tree_carries_on() {
+    let dir = scratch("failing-disk");
+    let ran = child(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("RT_FAIL", "1"),
+            ("RT_STOP", "25"),
+            ("RT_BURST", "3"),
+        ],
+        Duration::from_secs(10),
+    );
+    assert!(ran.code == Some(0), "{ran:?}");
+    assert_eq!(ticks(&ran.stdout), 25, "{ran:?}");
+    let said = ran
+        .stderr
+        .matches("can't write events.log: injected failure")
+        .count();
+    assert_eq!(said, 1, "{}", ran.stderr);
+}
+
+#[test]
+fn a_flood_of_records_is_dropped_visibly_with_bounded_memory() {
+    let dir = scratch("flood");
+    let ran = child(
+        SCENARIO,
+        &[
+            ("RT_DIR", dir.to_str().unwrap()),
+            ("RT_SLOW_MS", "1"),
+            ("RT_BURST", "100"),
+            ("RT_STOP", "50"),
+        ],
+        Duration::from_secs(15),
+    );
+    assert!(ran.code == Some(0), "{ran:?}");
+    let text = read(runs(&dir).pop().unwrap().join("events.log"));
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        text.contains("lines dropped here: the recorder fell behind"),
+        "no drop note"
+    );
+    let end = lines.last().unwrap();
+    assert!(
+        end.contains(" END SIGTERM") && end.contains("lines dropped)"),
+        "{end}"
+    );
+    // Whatever was accepted is in order, before END.
+    let bursts: Vec<&str> = lines
+        .iter()
+        .filter(|l| l.contains(" burst "))
+        .copied()
+        .collect();
+    assert!(!bursts.is_empty());
+    let order: Vec<(u64, u64)> = bursts
+        .iter()
+        .filter_map(|l| {
+            let (n, i) = l.rsplit_once(" burst ")?.1.split_once('.')?;
+            Some((n.parse().ok()?, i.parse().ok()?))
+        })
+        .collect();
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "records out of order"
+    );
+    assert!(
+        hwm_kb(&ran.stdout) < 64 * 1024,
+        "{} kB",
+        hwm_kb(&ran.stdout)
+    );
 }

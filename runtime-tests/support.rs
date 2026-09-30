@@ -28,10 +28,22 @@ pub struct Ran {
     pub timed_out: bool,
 }
 
-/// A running child, for tests that signal it.
+/// A running child, for tests that signal it. Its output is read as it
+/// comes (a child that logs a lot would otherwise block on a full pipe).
 pub struct Running {
     child: std::process::Child,
     started: Instant,
+    stdout: std::thread::JoinHandle<String>,
+    stderr: std::thread::JoinHandle<String>,
+}
+
+fn drain(from: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut from = from;
+        let mut all = Vec::new();
+        let _ = from.read_to_end(&mut all);
+        String::from_utf8_lossy(&all).into_owned()
+    })
 }
 
 /// Start `scenario` (a test path, `#[ignore]`d so it only runs when asked) in
@@ -54,9 +66,14 @@ pub fn spawn(scenario: &str, env: &[(&str, &str)]) -> Running {
     for (k, v) in env {
         cmd.env(k, v);
     }
+    let mut child = cmd.spawn().expect("start child");
+    let stdout = drain(child.stdout.take().expect("stdout"));
+    let stderr = drain(child.stderr.take().expect("stderr"));
     Running {
-        child: cmd.spawn().expect("start child"),
+        child,
         started: Instant::now(),
+        stdout,
+        stderr,
     }
 }
 
@@ -84,11 +101,11 @@ impl Running {
                 None => std::thread::sleep(Duration::from_millis(20)),
             }
         }
-        let out = self.child.wait_with_output().expect("output");
+        let status = self.child.wait().expect("wait");
         Ran {
-            code: out.status.code(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            code: status.code(),
+            stdout: self.stdout.join().unwrap_or_default(),
+            stderr: self.stderr.join().unwrap_or_default(),
             timed_out,
         }
     }

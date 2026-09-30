@@ -226,7 +226,7 @@ pub async fn run<T: Tree>(mut tree: T) {
         Some("bonsai"),
         format_args!("stopping ({why})"),
     );
-    record::end(why);
+    record::end(why).await;
     drop(events);
 }
 
@@ -556,10 +556,15 @@ pub mod log {
 pub mod record {
     use std::fmt;
     use std::fs::{File, OpenOptions};
-    use std::io::Write;
+    use std::io::{BufWriter, Write};
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
     use std::sync::{Mutex, OnceLock};
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use tokio::sync::oneshot;
 
     /// `[record]` from bonsai.toml, generated into `src/links.rs`.
     #[derive(Clone, Copy, Debug)]
@@ -582,6 +587,17 @@ pub mod record {
         Errors,
         /// An edge coming up, or going down.
         Edges,
+    }
+
+    impl Config {
+        /// Everything off, in `logs`.
+        pub const DEFAULT: Config = Config {
+            dir: "logs",
+            events: false,
+            panics: false,
+            errors: false,
+            edges: false,
+        };
     }
 
     const KINDS: [Kind; 4] = [Kind::Events, Kind::Panics, Kind::Errors, Kind::Edges];
@@ -607,9 +623,63 @@ pub mod record {
     }
 
     static CONFIG: OnceLock<Config> = OnceLock::new();
-    /// One open file per kind, while the tree runs.
-    static FILES: [Mutex<Option<File>>; 4] = [const { Mutex::new(None) }; 4];
+
+    /// Lines waiting for the writer thread, at most: past this, new lines
+    /// are dropped (and counted), never waited for.
+    pub const QUEUE: usize = 1024;
+    /// The longest line kept; a longer one is cut short, ending in `…`.
+    pub const MAX_LINE: usize = 8 * 1024;
+    /// How soon a line accepted is handed to the OS (flushed).
+    pub const FLUSH_EVERY: Duration = Duration::from_millis(100);
+    /// How often what's been written is synced to the disk, besides START
+    /// and END: what a power loss can take with it.
+    pub const SYNC_EVERY: Duration = Duration::from_secs(5);
+    /// How long shutdown waits for the writer to finish and write END.
+    pub const END_WAIT: Duration = Duration::from_secs(2);
+
+    /// What the writer thread is asked to do, in order.
+    enum Job {
+        Start {
+            dir: PathBuf,
+            kinds: Vec<Kind>,
+            at: Local,
+        },
+        Line(Kind, String),
+    }
+
+    /// Taking lines: from `start` until `end`.
+    static ACCEPTING: AtomicBool = AtomicBool::new(false);
+    static QUEUE_TX: OnceLock<SyncSender<Job>> = OnceLock::new();
+    /// Which kinds have a file (set once the writer has opened them).
+    static OPEN: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
+    /// Lines dropped because the queue was full, per kind; the writer notes
+    /// them in the file, and in END.
+    static DROPPED: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    /// Writes that failed (the file is closed after the first).
+    static FAILED: AtomicU64 = AtomicU64::new(0);
+    /// Set by `end`: why the tree stopped, and who to tell once END is out.
+    static ENDING: Mutex<Option<(String, oneshot::Sender<()>)>> = Mutex::new(None);
     static STARTED: OnceLock<Instant> = OnceLock::new();
+
+    #[cfg(test)]
+    pub mod fault {
+        //! For the runtime's tests: a slow or failing disk.
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        /// Each write waits this long first.
+        pub static SLOW_MS: AtomicU64 = AtomicU64::new(0);
+        /// Each write fails.
+        pub static FAIL: AtomicBool = AtomicBool::new(false);
+    }
+
+    /// Lines dropped because the recorder fell behind, all told.
+    pub fn dropped() -> u64 {
+        DROPPED.iter().map(|d| d.load(Relaxed)).sum()
+    }
+
+    /// Writes that failed.
+    pub fn failed() -> u64 {
+        FAILED.load(Relaxed)
+    }
 
     /// Called by the generated `Core::new`; the first call wins.
     pub fn configure(config: Config) {
@@ -622,8 +692,9 @@ pub mod record {
         write(Kind::Events, super::log::source(), message);
     }
 
-    /// Open this run's folder and files; nothing when `[record]` keeps
-    /// nothing, or `BONSAI_RECORD=off`.
+    /// Start this run's recorder: a thread that makes the run's folder and
+    /// files and writes every line to them. Nothing when `[record]` keeps
+    /// nothing, or `BONSAI_RECORD=off`. Never touches the disk itself.
     pub fn start() {
         let Some(config) = CONFIG.get() else { return };
         let dir = match std::env::var("BONSAI_RECORD") {
@@ -635,94 +706,270 @@ pub mod record {
         if kinds.is_empty() {
             return;
         }
-        let now = Local::now();
-        let unfinished = last_run(&dir).filter(|run| !finished(run));
-        let folder = match new_folder(&dir, &folder_name(&now)) {
-            Ok(folder) => folder,
-            Err(e) => {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "bonsai: no run logs: can't make a folder in {}: {e}",
-                    dir.display()
-                );
-                return;
-            }
-        };
+        let (tx, rx) = sync_channel(QUEUE);
+        let at = Local::now();
         let _ = STARTED.set(Instant::now());
-        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
-        let mut start = format!(
-            "START {} {} on {} (pid {}, {})",
-            env!("CARGO_PKG_NAME"),
-            env!("CARGO_PKG_VERSION"),
-            host.trim(),
-            std::process::id(),
-            offset_text(now.offset)
-        );
-        if let Some(run) = unfinished {
-            let name = run.file_name().unwrap_or_default().to_string_lossy();
-            start += &format!(
-                "\n{} previous run {name} has no END line: it was killed or lost power",
-                stamp(&now)
-            );
+        if tx.send(Job::Start { dir, kinds, at }).is_err() || QUEUE_TX.set(tx).is_err() {
+            return; // started already
         }
-        for kind in kinds {
-            let path = folder.join(kind.file());
-            match OpenOptions::new().create(true).append(true).open(&path) {
-                Ok(file) => {
-                    if let Ok(mut slot) = FILES[kind as usize].lock() {
-                        *slot = Some(file);
-                    }
-                    write_line(kind, &format!("{} {start}", stamp(&now)));
-                }
-                Err(e) => {
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "bonsai: can't open {}: {e}",
-                        path.display()
-                    );
-                }
+        let spawned = std::thread::Builder::new()
+            .name("bonsai-record".into())
+            .spawn(move || Writer::default().run(rx));
+        match spawned {
+            Ok(_) => ACCEPTING.store(true, Relaxed),
+            Err(e) => {
+                let _ = writeln!(std::io::stderr(), "bonsai: no run logs: {e}");
             }
         }
     }
 
-    /// Close every file with an END line: why the tree stopped, and after how long.
-    pub fn end(why: &str) {
-        let ran = STARTED.get().map(|s| s.elapsed().as_secs()).unwrap_or(0);
-        let line = format!(
-            "{} END {why}, after {}",
-            stamp(&Local::now()),
-            duration_text(ran)
-        );
-        for kind in KINDS {
-            write_line(kind, &line);
-            if let Ok(mut slot) = FILES[kind as usize].lock() {
-                *slot = None;
-            }
+    /// Stop taking lines, let the writer write what it took, then END (why
+    /// the tree stopped, after how long) in every file, synced. Waits
+    /// `END_WAIT` at most, without holding up the runtime's thread.
+    pub async fn end(why: &str) {
+        if !ACCEPTING.swap(false, Relaxed) {
+            return;
+        }
+        let (done, finished) = oneshot::channel();
+        if let Ok(mut ending) = ENDING.lock() {
+            *ending = Some((why.to_string(), done));
+        }
+        if tokio::time::timeout(END_WAIT, finished).await.is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "bonsai: run logs: the writer didn't finish within {END_WAIT:?}; END may be missing"
+            );
         }
     }
 
     /// Keep a line from `source` in the file for `kind`, if it's being kept.
+    /// Never waits: when the writer is behind, the line is dropped and counted.
     pub fn write(kind: Kind, source: &str, message: fmt::Arguments) {
-        if FILES[kind as usize].lock().is_ok_and(|f| f.is_some()) {
-            write_line(kind, &line(&Local::now(), source, message));
+        if !ACCEPTING.load(Relaxed) || CONFIG.get().is_none_or(|c| !kind.on(c)) {
+            return;
+        }
+        let Some(tx) = QUEUE_TX.get() else { return };
+        let mut text = line(&Local::now(), source, message);
+        if text.len() > MAX_LINE {
+            let mut cut = MAX_LINE;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+            text.push('…');
+        }
+        if tx.try_send(Job::Line(kind, text)).is_err() {
+            DROPPED[kind as usize].fetch_add(1, Relaxed);
         }
     }
 
-    /// One whole line per write, so a crash can't leave half of one.
-    fn write_line(kind: Kind, line: &str) {
-        let Ok(mut slot) = FILES[kind as usize].lock() else {
-            return;
-        };
-        let Some(file) = slot.as_mut() else { return };
-        if let Err(e) = file.write_all(format!("{line}\n").as_bytes()) {
-            // Not warn!: that would come back here. The tree carries on.
+    /// The writer thread's files.
+    #[derive(Default)]
+    struct Writer {
+        files: [Option<BufWriter<File>>; 4],
+        /// Drops already noted in each file.
+        noted: [u64; 4],
+        flushed: Option<Instant>,
+        synced: Option<Instant>,
+        dirty: bool,
+    }
+
+    impl Writer {
+        fn run(mut self, jobs: Receiver<Job>) {
+            loop {
+                match jobs.recv_timeout(FLUSH_EVERY) {
+                    Ok(job) => self.take(job),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+                let now = Instant::now();
+                if self.flushed.is_none_or(|t| now - t >= FLUSH_EVERY) {
+                    self.flush(false);
+                }
+                if self.dirty && self.synced.is_none_or(|t| now - t >= SYNC_EVERY) {
+                    self.flush(true);
+                }
+                let ending = ENDING.lock().ok().and_then(|mut e| e.take());
+                if let Some((why, done)) = ending {
+                    // Nothing new is taken now: write what was, then END.
+                    while let Ok(job) = jobs.try_recv() {
+                        self.take(job);
+                    }
+                    self.end(&why);
+                    let _ = done.send(());
+                    return;
+                }
+            }
+        }
+
+        fn take(&mut self, job: Job) {
+            match job {
+                Job::Start { dir, kinds, at } => self.start(&dir, &kinds, &at),
+                Job::Line(kind, text) => {
+                    self.note_drops(kind);
+                    self.put(kind, &text);
+                }
+            }
+        }
+
+        fn start(&mut self, dir: &Path, kinds: &[Kind], at: &Local) {
+            let unfinished = last_run(dir).filter(|run| !finished(run));
+            let folder = match new_folder(dir, &folder_name(at)) {
+                Ok(folder) => folder,
+                Err(e) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "bonsai: no run logs: can't make a folder in {}: {e}",
+                        dir.display()
+                    );
+                    return;
+                }
+            };
+            let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+            let mut start = format!(
+                "{} START {} {} on {} (pid {}, {})",
+                stamp(at),
+                env!("CARGO_PKG_NAME"),
+                env!("CARGO_PKG_VERSION"),
+                host.trim(),
+                std::process::id(),
+                offset_text(at.offset)
+            );
+            if let Some(run) = unfinished {
+                let name = run.file_name().unwrap_or_default().to_string_lossy();
+                start += &format!(
+                    "\n{} previous run {name} has no END line: it was killed or lost power",
+                    stamp(at)
+                );
+            }
+            for &kind in kinds {
+                let path = folder.join(kind.file());
+                match OpenOptions::new().create(true).append(true).open(&path) {
+                    Ok(file) => {
+                        self.files[kind as usize] = Some(BufWriter::new(file));
+                        OPEN[kind as usize].store(true, Relaxed);
+                        self.put(kind, &start);
+                    }
+                    Err(e) => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "bonsai: run logs: can't open {}: {e}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            self.flush(true);
+        }
+
+        /// Note lines dropped since the last note, before the next one.
+        fn note_drops(&mut self, kind: Kind) {
+            let dropped = DROPPED[kind as usize].load(Relaxed);
+            let new = dropped - self.noted[kind as usize];
+            if new > 0 {
+                self.noted[kind as usize] = dropped;
+                let note = format!(
+                    "{} ({new} lines dropped here: the recorder fell behind)",
+                    stamp(&Local::now())
+                );
+                self.put(kind, &note);
+            }
+        }
+
+        fn put(&mut self, kind: Kind, text: &str) {
+            let Some(file) = self.files[kind as usize].as_mut() else {
+                return;
+            };
+            #[cfg(test)]
+            {
+                let ms = fault::SLOW_MS.load(Relaxed);
+                if ms > 0 {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
+            }
+            let result = if cfg!(test) && fault_fail() {
+                Err(std::io::Error::other("injected failure"))
+            } else {
+                file.write_all(text.as_bytes())
+                    .and_then(|()| file.write_all(b"\n"))
+            };
+            match result {
+                Ok(()) => self.dirty = true,
+                Err(e) => self.fail(kind, &e),
+            }
+        }
+
+        /// Stop writing `kind`'s file, saying so once, on stderr (not through
+        /// the logger, whose errors come back here).
+        fn fail(&mut self, kind: Kind, e: &std::io::Error) {
+            FAILED.fetch_add(1, Relaxed);
+            self.files[kind as usize] = None;
+            OPEN[kind as usize].store(false, Relaxed);
             let _ = writeln!(
                 std::io::stderr(),
-                "bonsai: stopped writing {}: {e}",
+                "bonsai: run logs: can't write {}: {e}; stopped writing it",
                 kind.file()
             );
-            *slot = None;
         }
+
+        /// Hand what's buffered to the OS; with `sync`, to the disk too.
+        fn flush(&mut self, sync: bool) {
+            for kind in KINDS {
+                let Some(file) = self.files[kind as usize].as_mut() else {
+                    continue;
+                };
+                let done = file.flush().and_then(|()| {
+                    if sync {
+                        file.get_ref().sync_data()
+                    } else {
+                        Ok(())
+                    }
+                });
+                if let Err(e) = done {
+                    self.fail(kind, &e);
+                }
+            }
+            let now = Instant::now();
+            self.flushed = Some(now);
+            if sync {
+                self.synced = Some(now);
+                self.dirty = false;
+            }
+        }
+
+        fn end(&mut self, why: &str) {
+            let ran = STARTED.get().map(|s| s.elapsed().as_secs()).unwrap_or(0);
+            for kind in KINDS {
+                self.note_drops(kind);
+                let dropped = DROPPED[kind as usize].load(Relaxed);
+                let lost = if dropped > 0 {
+                    format!(" ({dropped} lines dropped)")
+                } else {
+                    String::new()
+                };
+                let line = format!(
+                    "{} END {why}, after {}{lost}",
+                    stamp(&Local::now()),
+                    duration_text(ran)
+                );
+                self.put(kind, &line);
+            }
+            self.flush(true);
+            for kind in KINDS {
+                self.files[kind as usize] = None;
+                OPEN[kind as usize].store(false, Relaxed);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn fault_fail() -> bool {
+        fault::FAIL.load(Relaxed)
+    }
+
+    #[cfg(not(test))]
+    fn fault_fail() -> bool {
+        false
     }
 
     /// `2026-09-30_14-00-05`, or `…-2` when that one's taken (two runs in a second).

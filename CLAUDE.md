@@ -184,8 +184,17 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   (`shutdown()` returns which), `record::end(why)` (END and how long it ran).
   Lines: `record!` (`record::event`: an INFO log line plus `events.log`),
   panics from the panic hook, `error!`/`warn!` from `log::write`, and edge up/down
-  from `attempt`/`spawn_edge`. Each line is one `write_all` under a mutex; an
-  I/O error prints once on stderr and closes that file. `BONSAI_RECORD`
+  from `attempt`/`spawn_edge`. Callers only format the line (capped at
+  `MAX_LINE`) and `try_send` it to a bounded queue (`QUEUE` 1024; full:
+  dropped and counted per kind, `DROPPED`); one `bonsai-record` thread
+  (`Writer`) owns the files and does all the disk work, START included, in
+  the order lines were taken: buffered, flushed within `FLUSH_EVERY` (0.1 s),
+  synced every `SYNC_EVERY` (5 s), at START and at END, notes drops in the
+  file and in END. `end` (async) stops producers (`ACCEPTING`), hands the
+  writer the reason with a oneshot, and awaits it at most `END_WAIT` (2 s),
+  so the runtime thread never blocks. An I/O error prints once on stderr
+  (never through the logger) and closes that file (`FAILED`). `fault`
+  (`cfg(test)`) slows or fails writes for the runtime tests. `BONSAI_RECORD`
   (`off`, or a folder) overrides for one run. `bonsai record` edits the
   table (`set_keeping_comment` keeps each value's comment in its column) and
   `bonsai list` prints `record_summary`. Nothing opens without `run()`, so

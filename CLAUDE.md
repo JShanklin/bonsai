@@ -136,15 +136,21 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `start_edges` it keeps what's sent, which `drain_<edge>()` returns for
   tests). Built-ins: `Udp` (bind, to, join on iface, reply-to-last),
   `Tcp` (client, reconnect = restart; server: `max_clients`, default
-  `MAX_CLIENTS` 64, evicting the longest-lingering client before refusing;
+  `MAX_CLIENTS` 64, counting closed clients still draining (`closing`,
+  finished writers reaped by `held`): at the limit it cuts off the one
+  draining longest, else the longest-lingering client, before refusing;
   a reader task and a writer task (`write_to`) per client, the writer fed by
   a bounded queue (`CLIENT_QUEUE` 64; `execute` only `try_send`s, a full
   queue discards that copy) with each write under `WRITE_TIMEOUT` (5 s; on
   timeout or error the connection is dropped, never re-written, the rest
   counted as discarded, `WriteFailed` sent to the server);
   the reader reports `ReadEnded`; a client that stopped
-  sending lingers `LINGER` (2 s) for replies, broadcasts skip it; `Drop`
-  aborts every client task), `Framed<S>` (raw / lines, `max_frame`,
+  sending lingers `LINGER` (2 s) for replies, broadcasts skip it; `close`
+  then gives its writer `DRAIN_TIMEOUT` (5 s, a oneshot deadline the writer
+  enforces itself) for what's queued; each client's `outstanding` counts
+  copies queued or being written, and whoever cuts it off (the writer
+  giving up, `cut_off` on eviction or `Drop`) swaps it to 0 into
+  discarded, so nothing is counted twice; `Drop` aborts every client task), `Framed<S>` (raw / lines, `max_frame`,
   default `MAX_FRAME` 1 MiB, measured on the payload without `\n`/`\r\n`:
   every complete frame is checked as it's handed out, and the incomplete
   tail after every read by `frame_len` (a last `\r` not counted yet), so

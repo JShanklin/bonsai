@@ -130,6 +130,13 @@ pub fn scratch(name: &str) -> PathBuf {
 }
 
 /// Open file descriptors of this process.
+/// Tests that count this process's descriptors, and tests that open many
+/// sockets, take turns: hold this for the test.
+pub async fn fds_to_myself() -> tokio::sync::MutexGuard<'static, ()> {
+    static TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    TURN.lock().await
+}
+
 pub fn open_fds() -> usize {
     std::fs::read_dir("/proc/self/fd").map_or(0, |d| d.count())
 }

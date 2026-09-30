@@ -22,7 +22,7 @@ bonsai edge add <name> tcp --listen ADDR:PORT [--framing lines]    # a server
 | `listen` | a server: accept clients there, up to `max_clients` at once |
 | `framing` | `raw` (the default): each read is one packet, for protocols that frame themselves; `lines`: one packet per line, without its newline, and a newline added to each packet sent |
 | `max_frame` | the longest line, in bytes, with `lines` framing (default 1 MiB, `MAX_FRAME`): its payload, without the `\n` or `\r\n`, so `abcd\n` and `abcd\r\n` are both 4. Every line is held to it, however the bytes arrive (several lines in one read, or one line over many); a longer one is refused as soon as it must be longer, before it's buffered: a client edge reconnects, a server closes that client |
-| `max_clients` | a server's most clients at once (default 64, `MAX_CLIENTS`). Past it, a client that has stopped sending makes room; when every client is still sending, the new connection is closed at once, with one warning |
+| `max_clients` | a server's most connections at once (default 64, `MAX_CLIENTS`), closed clients still being sent what was queued for them included. Past it, one makes room: the closed client that has been draining longest, else the client that stopped sending longest ago, is cut off (what was queued for it is **lost**); when every client is still sending, the new connection is closed at once, with one warning |
 
 A **client**'s packets carry the server's address as `peer`. A **server**'s
 carry the client that sent them; a packet out goes to its `peer`, or to
@@ -152,8 +152,12 @@ The hub, the relay and the clients carry on the whole time.
   edge was carrying out when it failed is counted as **lost**.
 - A server client that stops sending (it closed its side, or sent a line
   past `max_frame`) keeps its connection for 2 s (`LINGER`), so replies to
-  what it sent still reach it; broadcasts skip it. Then it's closed, and
-  its task ends. A client whose write fails is closed at once.
+  what it sent still reach it; broadcasts skip it. Then it's closed: what's
+  still queued for it is sent within 5 s in all (`DRAIN_TIMEOUT`), and
+  what isn't by then is counted as **lost** and the connection closed. It
+  counts towards `max_clients` until then, so clients that come, ask for a
+  lot and read slowly can't pile up. A client whose write fails is closed
+  at once.
 - When a server edge restarts, every client's connection is closed and its
   tasks end with it; clients reconnect to the new one.
 - **Slow clients can't hold anyone up.** A server writes to each client

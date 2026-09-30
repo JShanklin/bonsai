@@ -1210,9 +1210,18 @@ pub fn record(args: &[String]) -> io::Result<()> {
             };
             set_keeping_comment(t, kind, on.into());
         }
+        [key, n] if graph::RECORD_LIMITS.contains(&key.as_str()) => {
+            let Ok(n) = n.parse::<u32>() else {
+                usage(format!(
+                    "`bonsai record {key}` takes a whole number (0: no limit); got {n:?}"
+                ));
+            };
+            set_keeping_comment(t, key, i64::from(n).into());
+        }
         _ => usage(format!(
-            "usage: bonsai record [{} on|off], or bonsai record dir <folder>",
-            graph::RECORD_KINDS.join("|")
+            "usage: bonsai record [{} on|off], bonsai record dir <folder>, or bonsai record {} <n>",
+            graph::RECORD_KINDS.join("|"),
+            graph::RECORD_LIMITS.join("|")
         )),
     }
     let cfg = save_checked(&doc)?;

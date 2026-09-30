@@ -31,6 +31,9 @@ const RECORD_CONFIG: crate::bonsai::record::Config = crate::bonsai::record::Conf
     panics: true,
     errors: false,
     edges: false,
+    keep_runs: 100,
+    keep_days: 0,
+    max_file_kb: 10240,
 };
 
 /// The links, in bonsai.toml order (from, message, to): for `bonsai top`.

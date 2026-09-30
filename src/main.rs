@@ -2416,6 +2416,9 @@ fn print_help() {
     println!("  bonsai rate <branch> <hz|off>   tick a branch this many times a second");
     println!("  bonsai record [<kind> on|off]   run logs to keep: events, panics, errors, edges");
     println!("  bonsai record dir <folder>   where each run's folder goes (default logs)");
+    println!(
+        "  bonsai record keep_runs|keep_days|max_file_kb <n>   how much to keep (0: no limit)"
+    );
     println!("  bonsai sync            regenerate src/links.rs after editing bonsai.toml");
     println!("  bonsai list            the tree's branches and links, and any warnings");
     println!("  bonsai top [user@host|local] [--port N] [--once]");

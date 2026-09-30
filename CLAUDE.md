@@ -46,6 +46,7 @@ cargo run -- unlink <from> [<Message>] [<to> ...]   # all receivers when none na
 cargo run -- rate <branch> <hz|off>       # Input::Tick at that rate
 cargo run -- record [<kind> on|off]       # run logs: events, panics, errors, edges ([record])
 cargo run -- record dir <folder>          # where each run's folder goes
+cargo run -- record keep_runs|keep_days|max_file_kb <n>   # retention (0: no limit)
 cargo run -- sync           # regenerate src/{bonsai,links,settings}.rs, branches/ and edges/mod.rs
 cargo run -- list           # branches, links, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
@@ -91,7 +92,9 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `to = [..]`: with a message, branch → branches; without, an edge at exactly
   one end: edge → branches, or branch → edges), and an optional `[record]`
   (`dir`, then `events`/`panics`/`errors`/`edges` bools, `graph::RecordCfg`,
-  `RECORD_KINDS`; none keeps nothing). Messages are
+  `RECORD_KINDS`, and `keep_runs`/`keep_days`/`max_file_kb` whole numbers,
+  `RECORD_LIMITS`, rendered as the runtime's defaults when absent; no table
+  keeps nothing). Messages are
   top-level `pub struct`s in `src/messages.rs` (`graph::parse_messages`).
   `graph::parse` → `graph::check` (errors refuse generation: unknown
   names, self-link, duplicates, bad names, `Tick`, the link rules above, an
@@ -179,11 +182,20 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `record::start()` (a folder per run under `dir`, named by the local start
   time via `libc::localtime_r`, `YYYY-MM-DD_HH-MM-SS`, `-2` on a clash; one
   append-only file per kind that's on, each opened with a START line: package,
-  version, host, pid, UTC offset; plus a note when the last run folder, by
-  mtime, has a file with no END line) and, on Ctrl-C/SIGTERM
+  version, host, pid, UTC offset; a `.running` file flock'd for the run's
+  life marks it active; `prune` deletes old run folders past `keep_runs`
+  (`KEEP_RUNS` 100, this one counted) or `keep_days` (0: off), oldest
+  first, never the current one, a `running` one, or one holding anything
+  but run files (`only_run_files`); a note when the last run folder, by
+  mtime, isn't running and has a file whose last whole line (read from the
+  last `TAIL` 4 KiB) isn't END: "did not shut down cleanly", no cause
+  claimed; a file past `max_file_kb` (`MAX_FILE_KB` 10 MiB) is renamed to
+  `<kind>.1.log` and a new one started) and, on Ctrl-C/SIGTERM
   (`shutdown()` returns which), `record::end(why)` (END and how long it ran).
   Lines: `record!` (`record::event`: an INFO log line plus `events.log`),
-  panics from the panic hook, `error!`/`warn!` from `log::write`, and edge up/down
+  panics from the panic hook, `error!`/`warn!` from `log::write` (before
+  the `BONSAI_LOG` filter, so errors.log keeps them whatever the console
+  shows), and edge up/down
   from `attempt`/`spawn_edge`. Callers only format the line (capped at
   `MAX_LINE`) and `try_send` it to a bounded queue (`QUEUE` 1024; full:
   dropped and counted per kind, `DROPPED`); one `bonsai-record` thread

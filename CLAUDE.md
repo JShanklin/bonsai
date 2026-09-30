@@ -44,6 +44,8 @@ cargo run -- link <from> <Message> <to> [<to> ...]  # branch → branches, a [[l
 cargo run -- link <from> <to> [<to> ...]  # an edge at one end: no message
 cargo run -- unlink <from> [<Message>] [<to> ...]   # all receivers when none named
 cargo run -- rate <branch> <hz|off>       # Input::Tick at that rate
+cargo run -- record [<kind> on|off]       # run logs: events, panics, errors, edges ([record])
+cargo run -- record dir <folder>          # where each run's folder goes
 cargo run -- sync           # regenerate src/{bonsai,links,settings}.rs, branches/ and edges/mod.rs
 cargo run -- list           # branches, links, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
@@ -87,7 +89,9 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `bind`, `to` or both: send only binds `0.0.0.0:0`; a custom edge's
   other keys are settings) and `[[link]]`s (`from`, optional `message`,
   `to = [..]`: with a message, branch → branches; without, an edge at exactly
-  one end: edge → branches, or branch → edges). Messages are
+  one end: edge → branches, or branch → edges), and an optional `[record]`
+  (`dir`, then `events`/`panics`/`errors`/`edges` bools, `graph::RecordCfg`,
+  `RECORD_KINDS`; none keeps nothing). Messages are
   top-level `pub struct`s in `src/messages.rs` (`graph::parse_messages`).
   `graph::parse` → `graph::check` (errors refuse generation: unknown
   names, self-link, duplicates, bad names, `Tick`, the link rules above, an
@@ -99,7 +103,8 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   edge it also writes `src/edges/serial.rs` (`templates/_tree/serial.rs`) and
   adds `tokio-serial` (its defaults pull in no libudev, so it cross-builds
   for the Zero W) with `with_dependency`, and removes both with the last one
-  (`without_dependency`). Every graph command ends with it.
+  (`without_dependency`). It also adds `libc` (`LIBC`, the runtime's local
+  time) to an older tree's manifest. Every graph command ends with it.
 - **The runtime** (`templates/_tree/bonsai.rs`, a tree's `src/bonsai.rs`):
   `trait Branch { type Input; type Out: Default; fn setup() -> Self; fn
   process(&mut self, Input, &mut Out) }`, `trait Sends<M>`, `Slot<B>`
@@ -150,6 +155,22 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   /proc/loadavg and /proc/meminfo, read only while a client is connected;
   new log lines come from `log::since(n)` (the ring counts every line).
   Observation only: it never changes what a branch sends.
+  Run logs (`mod record`): the generated `Core::new` calls
+  `record::configure(RECORD_CONFIG)` (from `[record]`); `run()` calls
+  `record::start()` (a folder per run under `dir`, named by the local start
+  time via `libc::localtime_r`, `YYYY-MM-DD_HH-MM-SS`, `-2` on a clash; one
+  append-only file per kind that's on, each opened with a START line: package,
+  version, host, pid, UTC offset; plus a note when the last run folder, by
+  mtime, has a file with no END line) and, on Ctrl-C/SIGTERM
+  (`shutdown()` returns which), `record::end(why)` (END and how long it ran).
+  Lines: `record!` (`record::event`: an INFO log line plus `events.log`),
+  panics from the panic hook, `error!`/`warn!` from `log::write`, and edge up/down
+  from `attempt`/`spawn_edge`. Each line is one `write_all` under a mutex; an
+  I/O error prints once on stderr and closes that file. `BONSAI_RECORD`
+  (`off`, or a folder) overrides for one run. `bonsai record` edits the
+  table (`set_keeping_comment` keeps each value's comment in its column) and
+  `bonsai list` prints `record_summary`. Nothing opens without `run()`, so
+  tests write no files. Observation only, like logs.
   Units (`mod units`): `f32` newtypes made by `macro_rules! unit` (same-unit
   arithmetic/compare, scaling, ratio, `Display` with the symbol and
   precision), `convert!` (`From` both ways within a kind) and `product!`
@@ -385,7 +406,8 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
   it runs on a PC: sensor → watchdog → display with `Celsius`/`Percent`
   fields, a `limit` setting, a UDP `uplink` edge with a text protocol, tests,
   logs and `bonsai top`) and `guides/` (short self-contained recipes: edges
-  over UDP/TCP/serial and custom edges, units, binary messages, testing, deploy, build tools, a virtual Pi
+  over UDP/TCP/serial and custom edges, units, binary messages, testing, run
+  logs, deploy, build tools, a virtual Pi
   (arm64 Podman container, qemu, macvlan/ipvlan), CI, troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold

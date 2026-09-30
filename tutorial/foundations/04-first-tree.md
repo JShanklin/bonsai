@@ -69,8 +69,11 @@ branches, so nothing happens until you add some (next chapter). Stop it with
 Ctrl-C:
 
 ```
-11:47:37.156Z  INFO bonsai: stopping
+11:47:37.156Z  INFO bonsai: stopping (Ctrl-C)
 ```
+
+The run also left a folder in `logs/`, named by when it started; chapter 8
+explains it.
 
 ## What's inside
 
@@ -116,6 +119,7 @@ bonsai list
 tree: greenhouse  (zero-2w (bcm2710a1))
 branches: none yet (`bonsai branch add <name>`)
 links: none yet (`bonsai link <from> <Message> <to>`)
+record: events, panics → logs/
 ```
 
 ## Save your progress

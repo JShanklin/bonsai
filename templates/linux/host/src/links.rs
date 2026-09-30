@@ -24,6 +24,15 @@ pub enum EdgeIn {
 pub enum Msg {
 }
 
+/// The run logs to keep, from [record].
+const RECORD_CONFIG: crate::bonsai::record::Config = crate::bonsai::record::Config {
+    dir: "logs",
+    events: true,
+    panics: true,
+    errors: false,
+    edges: false,
+};
+
 /// The links, in bonsai.toml order (from, message, to): for `bonsai top`.
 const LINKS: &[crate::bonsai::stats::LinkInfo] = &[
 ];
@@ -36,6 +45,7 @@ pub struct Core {
 impl Core {
     pub fn new() -> Self {
         crate::bonsai::stats::links(LINKS);
+        crate::bonsai::record::configure(RECORD_CONFIG);
         Core {
             queue: VecDeque::new(),
         }

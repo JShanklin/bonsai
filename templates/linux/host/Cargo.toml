@@ -8,6 +8,8 @@ edition = "2024"
 [dependencies]
 # The async runtime the tree runs on (see src/bonsai.rs).
 tokio = { version = "1.47", features = ["rt", "macros", "time", "sync", "signal", "net", "io-util"] }
+# The local time for run logs (already part of tokio).
+libc = "0.2"
 
 # Add libraries used by your branches below.
 

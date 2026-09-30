@@ -14,6 +14,10 @@
 //! Log with `error!`, `warn!`, `info!` and `debug!` (like `println!`), from a
 //! branch or an edge: each line is tagged with who wrote it. `BONSAI_LOG`
 //! picks what's shown: `debug`, or `warn,gps=debug` (the default is `info`).
+//!
+//! `record!("launch at {alt}")` also writes the line to this run's log folder
+//! (`[record]` in bonsai.toml), next to the panics, errors and edge changes
+//! it's set to keep.
 #![allow(dead_code)]
 
 /// Log an error: `error!("lost {name}")`.
@@ -38,6 +42,13 @@ macro_rules! info {
 #[allow(unused_macros)]
 macro_rules! debug {
     ($($arg:tt)+) => { $crate::bonsai::log::write($crate::bonsai::log::Level::Debug, None, format_args!($($arg)+)) };
+}
+
+/// An event worth keeping: logged like `info!`, and written to this run's
+/// `events.log` when `[record] events = true`.
+#[allow(unused_macros)]
+macro_rules! record {
+    ($($arg:tt)+) => { $crate::bonsai::record::event(format_args!($($arg)+)) };
 }
 
 use std::collections::{HashMap, VecDeque};
@@ -178,6 +189,7 @@ pub fn drain<M>(queue: &mut VecDeque<M>, mut deliver: impl FnMut(M, &mut VecDequ
 pub async fn run<T: Tree>(mut tree: T) {
     log::catch_panics();
     stats::start();
+    record::start();
     log::write(log::Level::Info, Some("bonsai"), format_args!("running"));
     top::start();
     let (events, mut inbox) = mpsc::channel::<Event<T::EdgeIn>>(1024);
@@ -198,27 +210,32 @@ pub async fn run<T: Tree>(mut tree: T) {
     // Made once: a signal that lands while an event is handled isn't missed.
     let shutdown = shutdown();
     tokio::pin!(shutdown);
-    loop {
+    let why = loop {
         tokio::select! {
             Some(event) = inbox.recv() => {
                 let started = Instant::now();
                 tree.handle(event);
                 stats::CORE.record(started.elapsed(), inbox.len());
             }
-            _ = &mut shutdown => break,
+            why = &mut shutdown => break why,
         }
-    }
-    log::write(log::Level::Info, Some("bonsai"), format_args!("stopping"));
+    };
+    log::write(
+        log::Level::Info,
+        Some("bonsai"),
+        format_args!("stopping ({why})"),
+    );
+    record::end(why);
     drop(events);
 }
 
-/// Resolves on Ctrl-C, or on SIGTERM (systemd stopping the service).
-async fn shutdown() {
+/// Resolves on Ctrl-C, or on SIGTERM (systemd stopping the service): which.
+async fn shutdown() -> &'static str {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .unwrap_or_else(|_| panic!("bonsai: can't listen for SIGTERM"));
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
+        _ = tokio::signal::ctrl_c() => "Ctrl-C",
+        _ = term.recv() => "SIGTERM",
     }
 }
 
@@ -419,6 +436,13 @@ pub mod log {
             // mustn't take the tree down.
             let _ = std::io::stderr().write_all(shown.as_bytes());
         }
+        if level <= Level::Warn {
+            super::record::write(
+                super::record::Kind::Errors,
+                source,
+                format_args!("{} {message}", level.label().trim()),
+            );
+        }
         if let Ok(mut recent) = RECENT.lock() {
             let (lines, total) = &mut *recent;
             if lines.len() == KEEP {
@@ -457,10 +481,16 @@ pub mod log {
                 .copied()
                 .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
                 .unwrap_or("(no message)");
-            match info.location() {
-                Some(at) => error!("panicked at {}:{}: {message}", at.file(), at.line()),
-                None => error!("panicked: {message}"),
-            }
+            let at = info
+                .location()
+                .map(|at| format!(" at {}:{}", at.file(), at.line()))
+                .unwrap_or_default();
+            error!("panicked{at}: {message}");
+            super::record::write(
+                super::record::Kind::Panics,
+                source(),
+                format_args!("panicked{at}: {message}"),
+            );
             let backtrace = std::backtrace::Backtrace::capture();
             if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
                 let _ = writeln!(std::io::stderr(), "{backtrace}");
@@ -509,6 +539,372 @@ pub mod log {
             assert_eq!(source(), "sensor");
             enter(outer);
             assert_eq!(source(), "bonsai");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run logs
+// ---------------------------------------------------------------------------
+
+/// Run logs: a folder per run, named by the local time it started
+/// (`logs/2026-09-30_14-00-05/`), with a file for each kind of line
+/// `[record]` in bonsai.toml keeps. Each file opens with a START line and,
+/// when the tree stops, closes with an END line saying why. `BONSAI_RECORD`
+/// overrides the folder for one run, or turns it `off`.
+pub mod record {
+    use std::fmt;
+    use std::fs::{File, OpenOptions};
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    /// `[record]` from bonsai.toml, generated into `src/links.rs`.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Config {
+        pub dir: &'static str,
+        pub events: bool,
+        pub panics: bool,
+        pub errors: bool,
+        pub edges: bool,
+    }
+
+    /// What a line is, and so which file it goes to.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Kind {
+        /// `record!(..)`.
+        Events,
+        /// A branch or an edge panicked.
+        Panics,
+        /// Every `error!` and `warn!`.
+        Errors,
+        /// An edge coming up, or going down.
+        Edges,
+    }
+
+    const KINDS: [Kind; 4] = [Kind::Events, Kind::Panics, Kind::Errors, Kind::Edges];
+
+    impl Kind {
+        fn file(self) -> &'static str {
+            match self {
+                Kind::Events => "events.log",
+                Kind::Panics => "panics.log",
+                Kind::Errors => "errors.log",
+                Kind::Edges => "edges.log",
+            }
+        }
+
+        fn on(self, config: &Config) -> bool {
+            match self {
+                Kind::Events => config.events,
+                Kind::Panics => config.panics,
+                Kind::Errors => config.errors,
+                Kind::Edges => config.edges,
+            }
+        }
+    }
+
+    static CONFIG: OnceLock<Config> = OnceLock::new();
+    /// One open file per kind, while the tree runs.
+    static FILES: [Mutex<Option<File>>; 4] = [const { Mutex::new(None) }; 4];
+    static STARTED: OnceLock<Instant> = OnceLock::new();
+
+    /// Called by the generated `Core::new`; the first call wins.
+    pub fn configure(config: Config) {
+        let _ = CONFIG.set(config);
+    }
+
+    /// Log an event with `info!`, and keep it in `events.log`.
+    pub fn event(message: fmt::Arguments) {
+        super::log::write(super::log::Level::Info, None, message);
+        write(Kind::Events, super::log::source(), message);
+    }
+
+    /// Open this run's folder and files; nothing when `[record]` keeps
+    /// nothing, or `BONSAI_RECORD=off`.
+    pub fn start() {
+        let Some(config) = CONFIG.get() else { return };
+        let dir = match std::env::var("BONSAI_RECORD") {
+            Ok(v) if v.trim() == "off" => return,
+            Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
+            _ => PathBuf::from(config.dir),
+        };
+        let kinds: Vec<Kind> = KINDS.into_iter().filter(|k| k.on(config)).collect();
+        if kinds.is_empty() {
+            return;
+        }
+        let now = Local::now();
+        let unfinished = last_run(&dir).filter(|run| !finished(run));
+        let folder = match new_folder(&dir, &folder_name(&now)) {
+            Ok(folder) => folder,
+            Err(e) => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "bonsai: no run logs: can't make a folder in {}: {e}",
+                    dir.display()
+                );
+                return;
+            }
+        };
+        let _ = STARTED.set(Instant::now());
+        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+        let mut start = format!(
+            "START {} {} on {} (pid {}, {})",
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+            host.trim(),
+            std::process::id(),
+            offset_text(now.offset)
+        );
+        if let Some(run) = unfinished {
+            let name = run.file_name().unwrap_or_default().to_string_lossy();
+            start += &format!(
+                "\n{} previous run {name} has no END line: it was killed or lost power",
+                stamp(&now)
+            );
+        }
+        for kind in kinds {
+            let path = folder.join(kind.file());
+            match OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(file) => {
+                    if let Ok(mut slot) = FILES[kind as usize].lock() {
+                        *slot = Some(file);
+                    }
+                    write_line(kind, &format!("{} {start}", stamp(&now)));
+                }
+                Err(e) => {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "bonsai: can't open {}: {e}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Close every file with an END line: why the tree stopped, and after how long.
+    pub fn end(why: &str) {
+        let ran = STARTED.get().map(|s| s.elapsed().as_secs()).unwrap_or(0);
+        let line = format!(
+            "{} END {why}, after {}",
+            stamp(&Local::now()),
+            duration_text(ran)
+        );
+        for kind in KINDS {
+            write_line(kind, &line);
+            if let Ok(mut slot) = FILES[kind as usize].lock() {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Keep a line from `source` in the file for `kind`, if it's being kept.
+    pub fn write(kind: Kind, source: &str, message: fmt::Arguments) {
+        if FILES[kind as usize].lock().is_ok_and(|f| f.is_some()) {
+            write_line(kind, &line(&Local::now(), source, message));
+        }
+    }
+
+    /// One whole line per write, so a crash can't leave half of one.
+    fn write_line(kind: Kind, line: &str) {
+        let Ok(mut slot) = FILES[kind as usize].lock() else {
+            return;
+        };
+        let Some(file) = slot.as_mut() else { return };
+        if let Err(e) = file.write_all(format!("{line}\n").as_bytes()) {
+            // Not warn!: that would come back here. The tree carries on.
+            let _ = writeln!(
+                std::io::stderr(),
+                "bonsai: stopped writing {}: {e}",
+                kind.file()
+            );
+            *slot = None;
+        }
+    }
+
+    /// `2026-09-30_14-00-05`, or `…-2` when that one's taken (two runs in a second).
+    fn new_folder(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+        std::fs::create_dir_all(dir)?;
+        let mut n = 1;
+        loop {
+            let folder = match n {
+                1 => dir.join(name),
+                n => dir.join(format!("{name}-{n}")),
+            };
+            match std::fs::create_dir(&folder) {
+                Ok(()) => return Ok(folder),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// The run folder in `dir` made last (by the clock, not the name: names
+    /// go back an hour when the clocks do).
+    fn last_run(dir: &Path) -> Option<PathBuf> {
+        std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| is_run(&n.to_string_lossy())))
+            .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
+    }
+
+    /// Whether every file in a run's folder ends with its END line.
+    fn finished(run: &Path) -> bool {
+        KINDS
+            .iter()
+            .map(|k| run.join(k.file()))
+            .filter(|p| p.is_file())
+            .all(|p| std::fs::read_to_string(p).is_ok_and(|text| has_end(&text)))
+    }
+
+    /// A run folder's name: `2026-09-30_14-00-05`, maybe with `-2` after it.
+    fn is_run(name: &str) -> bool {
+        let b = name.as_bytes();
+        b.len() >= 19 && b[4] == b'-' && b[10] == b'_' && b[..4].iter().all(u8::is_ascii_digit)
+    }
+
+    fn has_end(text: &str) -> bool {
+        text.lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .is_some_and(|l| l.split(' ').nth(2) == Some("END"))
+    }
+
+    /// The local date and time, with the zone's offset from UTC.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Local {
+        pub year: i32,
+        pub month: u32,
+        pub day: u32,
+        pub hour: u32,
+        pub minute: u32,
+        pub second: u32,
+        pub milli: u32,
+        /// Seconds east of UTC.
+        pub offset: i64,
+    }
+
+    impl Local {
+        /// Now, in the system's time zone (`TZ`, else /etc/localtime).
+        pub fn now() -> Local {
+            let since = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            let secs = since.as_secs() as libc::time_t;
+            // SAFETY: localtime_r only writes the `tm` it's given.
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            let ok = !unsafe { libc::localtime_r(&secs, &mut tm) }.is_null();
+            if !ok {
+                tm.tm_year = 70;
+                tm.tm_mday = 1;
+            }
+            Local {
+                year: tm.tm_year + 1900,
+                month: tm.tm_mon as u32 + 1,
+                day: tm.tm_mday as u32,
+                hour: tm.tm_hour as u32,
+                minute: tm.tm_min as u32,
+                second: tm.tm_sec as u32,
+                milli: since.subsec_millis(),
+                offset: tm.tm_gmtoff as i64,
+            }
+        }
+    }
+
+    /// `2026-09-30_14-00-05`.
+    fn folder_name(t: &Local) -> String {
+        format!(
+            "{:04}-{:02}-{:02}_{:02}-{:02}-{:02}",
+            t.year, t.month, t.day, t.hour, t.minute, t.second
+        )
+    }
+
+    /// `2026-09-30 14:00:05.120`.
+    fn stamp(t: &Local) -> String {
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+            t.year, t.month, t.day, t.hour, t.minute, t.second, t.milli
+        )
+    }
+
+    /// `2026-09-30 14:00:09.004 watchdog: launch`.
+    fn line(t: &Local, source: &str, message: fmt::Arguments) -> String {
+        format!("{} {source}: {message}", stamp(t))
+    }
+
+    /// `UTC+02:00`, `UTC-05:30`, or `UTC`.
+    fn offset_text(offset: i64) -> String {
+        if offset == 0 {
+            return "UTC".to_string();
+        }
+        let sign = if offset < 0 { '-' } else { '+' };
+        let m = offset.unsigned_abs() / 60;
+        format!("UTC{sign}{:02}:{:02}", m / 60, m % 60)
+    }
+
+    /// `5s`, `32m12s`, `2h03m`, `3d4h`.
+    fn duration_text(secs: u64) -> String {
+        let (d, h, m, s) = (secs / 86_400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
+        match (d, h, m) {
+            (0, 0, 0) => format!("{s}s"),
+            (0, 0, _) => format!("{m}m{s:02}s"),
+            (0, _, _) => format!("{h}h{m:02}m"),
+            _ => format!("{d}d{h}h"),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const T: Local = Local {
+            year: 2026,
+            month: 9,
+            day: 30,
+            hour: 14,
+            minute: 0,
+            second: 5,
+            milli: 120,
+            offset: 7200,
+        };
+
+        #[test]
+        fn names_and_lines_use_local_time() {
+            assert_eq!(folder_name(&T), "2026-09-30_14-00-05");
+            assert!(is_run("2026-09-30_14-00-05") && is_run("2026-09-30_14-00-05-2"));
+            assert!(!is_run("notes") && !is_run("2026-09-30"));
+            assert_eq!(
+                line(&T, "watchdog", format_args!("launch at {}", 120)),
+                "2026-09-30 14:00:05.120 watchdog: launch at 120"
+            );
+            assert_eq!(offset_text(7200), "UTC+02:00");
+            assert_eq!(offset_text(-19_800), "UTC-05:30");
+            assert_eq!(offset_text(0), "UTC");
+        }
+
+        #[test]
+        fn durations_read_at_a_glance() {
+            assert_eq!(duration_text(5), "5s");
+            assert_eq!(duration_text(32 * 60 + 12), "32m12s");
+            assert_eq!(duration_text(2 * 3600 + 3 * 60 + 9), "2h03m");
+            assert_eq!(duration_text(3 * 86_400 + 4 * 3600), "3d4h");
+        }
+
+        #[test]
+        fn a_run_ended_when_its_last_line_is_end() {
+            let start = "2026-09-30 14:00:05.120 START greenhouse 0.1.0\n";
+            assert!(!has_end(start));
+            assert!(has_end(&format!(
+                "{start}2026-09-30 14:32:17.551 END Ctrl-C, after 32m12s\n\n"
+            )));
+            // A record!("END …") from a branch isn't the tree's END.
+            assert!(!has_end(&format!(
+                "{start}2026-09-30 14:01:00.000 sensor: END\n"
+            )));
         }
     }
 }
@@ -1377,6 +1773,11 @@ where
             }
             stats.failed(&why);
             warn!("{why}; retrying in {backoff:?}");
+            record::write(
+                record::Kind::Edges,
+                name,
+                format_args!("down: {why}; retrying in {backoff:?}"),
+            );
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
@@ -1402,6 +1803,7 @@ where
     let mut edge = setup.await?;
     stats.state.store(stats::UP, Relaxed);
     info!("up");
+    record::write(record::Kind::Edges, log::source(), format_args!("up"));
     loop {
         let step = tokio::select! {
             got = edge.recv() => Step::In(got),

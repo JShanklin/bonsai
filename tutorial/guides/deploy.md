@@ -82,6 +82,7 @@ After=network-online.target
 
 [Service]
 ExecStart=/home/pi/greenhouse
+WorkingDirectory=/home/pi
 Restart=always
 User=pi
 
@@ -97,7 +98,8 @@ journalctl -u greenhouse -f      # its log
 The tree logs to stderr, so its lines land in the journal as they are. To
 choose what's logged, add `Environment=BONSAI_LOG=warn,uplink=info` under
 `[Service]`. `NO_COLOR` isn't needed: the level is only coloured on a
-terminal.
+terminal. `WorkingDirectory=` is where [run logs](run-logs.md) go:
+`/home/pi/logs/<start time>/`.
 
 A panic in a branch doesn't stop the tree (the branch is set up again), and
 a failing edge restarts by itself. `Restart=always` is for the rest: the

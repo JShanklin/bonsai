@@ -24,7 +24,7 @@ link, named after the sender and what it sends: `WatchdogAlarm`,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wiring::Msg;
+    use crate::links::Msg;
 
     #[test]
     fn alarms_only_above_the_limit() {
@@ -72,7 +72,7 @@ branches send an edge is kept, and `core.drain_<edge>()` returns it:
 #[cfg(test)]
 mod tests {
     use crate::bonsai::{Event, Packet, Tree};
-    use crate::wiring::{Core, EdgeIn};
+    use crate::links::{Core, EdgeIn};
 
     #[test]
     fn a_lower_limit_sets_off_an_alarm() {

@@ -49,9 +49,9 @@ bonsai link tracker sa
 added udp edge sa
 …
 sa --> tracker: what sa receives arrives as `Input::Sa(..)`
-updated src/wiring.rs
+updated src/links.rs
 tracker --> sa: send from tracker with `out.to_sa(..)`
-updated src/wiring.rs
+updated src/links.rs
 ```
 
 `bonsai.toml`:
@@ -72,9 +72,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::bonsai::Branch;
+use crate::links::tracker::{Input, Out};
 #[allow(unused_imports)] // the messages it sends, and units
 use crate::messages::*;
-use crate::wiring::tracker::{Input, Out};
 
 /// What tracker keeps between inputs.
 pub struct Tracker {
@@ -152,7 +152,7 @@ A test hands the core a packet with a sender, and reads what went out:
 #[cfg(test)]
 mod tests {
     use crate::bonsai::{Event, Packet, Tree};
-    use crate::wiring::{Core, EdgeIn};
+    use crate::links::{Core, EdgeIn};
 
     #[test]
     fn answers_each_sender() {

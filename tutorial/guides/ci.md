@@ -57,7 +57,7 @@ happens after a hand edit to `bonsai.toml` or `src/messages.rs` without
 
 ```yaml
       - run: cargo install --git https://github.com/JShanklin/bonsai.git
-      - run: bonsai sync && git diff --exit-code src/bonsai.rs src/wiring.rs src/settings.rs src/branches/mod.rs src/edges/
+      - run: bonsai sync && git diff --exit-code src/bonsai.rs src/links.rs src/settings.rs src/branches/mod.rs src/edges/
 ```
 
 bonsai's edits to your branches (a new arm, say) aren't formatted, so run

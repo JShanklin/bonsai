@@ -16,7 +16,7 @@ bonsai branch add display
 
 ```
 added branch sensor: src/branches/sensor.rs
-updated src/wiring.rs, src/branches/mod.rs
+updated src/links.rs, src/branches/mod.rs
 warning: sensor has no inputs, so its process never runs: link something to it, or give it a rate
 …
 ```
@@ -71,11 +71,11 @@ bonsai rate sensor 1
 
 ```
 sensor --Reading--> watchdog, display: send it from sensor with `out.send(Reading { .. })`
-updated src/wiring.rs
+updated src/links.rs
 watchdog --Alarm--> display: send it from watchdog with `out.send(Alarm { .. })`
-updated src/wiring.rs
+updated src/links.rs
 sensor ticks once a second: `Input::Tick` in its process
-updated src/wiring.rs
+updated src/links.rs
 ```
 
 `bonsai rate sensor 1` gives the sensor its own clock: an `Input::Tick` once
@@ -101,7 +101,7 @@ to = ["display"]
 ```
 
 You can edit `bonsai.toml` by hand too; run `bonsai sync` afterwards to
-regenerate the wiring. Check the whole graph with:
+regenerate `src/links.rs`. Check the whole graph with:
 
 ```sh
 bonsai list
@@ -135,16 +135,16 @@ fn process(&mut self, input: Input, out: &mut Out) {
 }
 ```
 
-`Input` is generated (in `src/wiring.rs`) with exactly what's linked to the
+`Input` is generated (in `src/links.rs`) with exactly what's linked to the
 branch. The compiler holds you to it. Delete the `Input::Alarm` arm and
 `cargo local` refuses to build:
 
 ```
-error[E0004]: non-exhaustive patterns: `wiring::display::Input::Alarm(_)` not covered
+error[E0004]: non-exhaustive patterns: `links::display::Input::Alarm(_)` not covered
    --> src/branches/display.rs:26:15
     |
  26 |         match input {
-    |               ^^^^^ pattern `wiring::display::Input::Alarm(_)` not covered
+    |               ^^^^^ pattern `links::display::Input::Alarm(_)` not covered
 ```
 
 Sending is checked the same way. The sensor is linked to send `Reading` only,

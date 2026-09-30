@@ -62,9 +62,9 @@ use tokio::time::MissedTickBehavior;
 /// A branch: its state, and what it decides for each input.
 pub trait Branch: Sized {
     /// What it receives: one variant per link into it, plus `Tick` when it
-    /// has a `rate`. Generated as `crate::wiring::<branch>::Input`.
+    /// has a `rate`. Generated as `crate::links::<branch>::Input`.
     type Input;
-    /// Where it sends: `crate::wiring::<branch>::Out`.
+    /// Where it sends: `crate::links::<branch>::Out`.
     type Out: Default + Outbox;
 
     /// Setup: the branch's starting state. Runs again after `process` panics.
@@ -91,11 +91,11 @@ pub trait Outbox {
 pub enum Event<E> {
     /// A branch's `rate` ticked: its index in the tree.
     Tick(usize),
-    /// An edge received something (`crate::wiring::EdgeIn`).
+    /// An edge received something (`crate::links::EdgeIn`).
     Edge(E),
 }
 
-/// The generated tree, `crate::wiring::Core`.
+/// The generated tree, `crate::links::Core`.
 pub trait Tree {
     /// What the edges hand the core, one variant per edge.
     type EdgeIn: Send + 'static;

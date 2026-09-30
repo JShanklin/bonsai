@@ -20,7 +20,7 @@
 | ``no branch or edge `sensr` `` | a typo | `bonsai list` shows the names |
 | `Reading is still linked; unlink it first` | removing a message that's in use | `bonsai unlink` each link it lists |
 | ``a branch name is snake_case (a-z, 0-9, _), not a Rust keyword, and not `serial` `` | `Sensor`, `my-branch`, `type`… | `sensor`, `my_branch` |
-| `` `Tick` is a name the generated code uses; pick another`` | a message named like part of the wiring (`Tick`, `Packet`, `Edge`…) | another name |
+| `` `Tick` is a name the generated code uses; pick another`` | a message named like part of the generated code (`Tick`, `Packet`, `Edge`…) | another name |
 | ``[edge.net] a udp edge takes `bind` (to receive), `to` (to send), or both`` or `[edge.net] baud: a udp edge takes bind, to, join, iface, reply` | an edge's settings don't fit its kind | the [edge guides](../README.md#guides-pick-what-you-need) list each kind's keys |
 | `--bind takes an address (like 0.0.0.0:6969), got --to` | a flag with no value after it | give it one: `--bind 0.0.0.0:6969`; a UDP edge that only sends needs just `--to` |
 | `bind "0.0.0.0": an address is HOST:PORT, like 0.0.0.0:6969` | an address without its port | add the port |
@@ -37,12 +37,12 @@ is fine: bonsai puts it back on its own line.
 
 | error | means | fix |
 |-------|-------|-----|
-| ``non-exhaustive patterns: `wiring::display::Input::Alarm(_)` not covered`` | something new is linked to the branch | add the arm (`Input::Alarm(alarm) => …`) |
+| ``non-exhaustive patterns: `links::display::Input::Alarm(_)` not covered`` | something new is linked to the branch | add the arm (`Input::Alarm(alarm) => …`) |
 | ``mismatched types … expected `Reading`, found `Alarm` `` at an `out.send(..)` | the branch isn't linked to send that message | `bonsai link <branch> Alarm <to>`, or send what it is linked for |
-| ``no method named `to_uplink` found for mutable reference `&mut wiring::sensor::Out` `` | the branch isn't linked to that edge | `bonsai link <branch> uplink` |
+| ``no method named `to_uplink` found for mutable reference `&mut links::sensor::Out` `` | the branch isn't linked to that edge | `bonsai link <branch> uplink` |
 | ``expected `Celsius`, found floating-point number`` | a unit compared or combined with a bare number | wrap the number: `Celsius(30.0)`; or take the number out: `temp.0` |
 | ``cannot find … `Celsius` in this scope`` (a tree planted before units) | the units aren't imported | `pub use crate::bonsai::units::*;` at the top of `src/messages.rs` (`bonsai message add` adds it when a field uses a unit) |
-| errors in `src/wiring.rs` after editing `bonsai.toml` or `src/messages.rs` by hand | the wiring is out of date | `bonsai sync` |
+| errors in `src/links.rs` after editing `bonsai.toml` or `src/messages.rs` by hand | `src/links.rs` is out of date | `bonsai sync` |
 | `cannot find type …` in a message's fields | the type isn't imported in `src/messages.rs` | add its `use` at the top of `src/messages.rs` |
 
 ## At runtime

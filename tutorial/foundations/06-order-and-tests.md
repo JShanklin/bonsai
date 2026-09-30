@@ -33,7 +33,7 @@ bonsai link display Alarm sensor
 
 ```
 display --Alarm--> sensor: send it from display with `out.send(Alarm { .. })`
-updated src/wiring.rs
+updated src/links.rs
 warning: sensor → display → sensor send to each other in a loop: make at least one of those sends conditional
 warning: sensor → watchdog → display → sensor send to each other in a loop: make at least one of those sends conditional
 ```
@@ -47,7 +47,7 @@ bonsai unlink display Alarm sensor
 
 ```
 unlinked display from sensor; take its `out.send(Alarm ..)` out of display
-updated src/wiring.rs
+updated src/links.rs
 ```
 
 `unlink` also removed the `Input::Alarm` arm it had added to the sensor. If
@@ -65,7 +65,7 @@ sent with `out.sent()`. Add this to the bottom of
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wiring::Msg;
+    use crate::links::Msg;
 
     #[test]
     fn alarms_only_above_the_limit() {
@@ -103,7 +103,7 @@ carries over from one input to the next, so drive it for several ticks:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wiring::Msg;
+    use crate::links::Msg;
 
     #[test]
     fn warms_then_starts_over() {

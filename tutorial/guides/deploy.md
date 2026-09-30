@@ -114,7 +114,7 @@ It needs nothing on the Pi but sshd. See [chapter 8](../foundations/08-watching.
 ## Before you ship
 
 - `cargo build --release` with no warnings, and `cargo clippy` clean.
-- `bonsai list` shows no wiring warnings.
+- `bonsai list` shows no warnings.
 - `bonsai top` on a real run: no edge `retrying`, nothing `dropped`, no
   panics, and `waiting` near 0.
 - No `.unwrap()` on anything that can fail at runtime (input, I/O, parsing).

@@ -33,7 +33,7 @@ to paste, and shows how to check it works.
 | [Edges: serial](guides/edges-serial.md) | a UART or USB-serial port: a GPS, a microcontroller |
 | [Edges: your own](guides/edges-custom.md) | the `Edge` trait, for anything the built-ins don't cover |
 | [Units](guides/units.md) | `Celsius`, `Meters`, `Knots`…: numbers the compiler won't mix up |
-| [Wire format](guides/wire-format.md) | compact binary messages (serde + postcard + COBS) |
+| [Binary messages](guides/binary-messages.md) | compact bytes for what crosses the network (serde + postcard + COBS) |
 | [Testing](guides/testing.md) | branches and the whole tree, with no network |
 | [Deploy](guides/deploy.md) | release builds, running on a Pi, as a service |
 | [Build tools](guides/build-tools.md) | sccache, mold, zigbuild and bacon: faster builds, and Pi builds with zig |

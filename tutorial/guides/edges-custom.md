@@ -60,10 +60,10 @@ bonsai link cputemp thermal
 ```
 added edge cputemp: src/edges/cputemp.rs
 link it one way or both: `bonsai link cputemp <branch>` (what it receives), `bonsai link <branch> cputemp` (what it sends)
-updated src/wiring.rs, src/edges/mod.rs
+updated src/links.rs, src/edges/mod.rs
 …
 cputemp --> thermal: what cputemp receives arrives as `Input::Cputemp(..)`
-updated src/wiring.rs
+updated src/links.rs
 ```
 
 A custom edge's keys in `bonsai.toml`, other than `kind`, are settings, like

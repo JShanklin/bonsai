@@ -35,7 +35,7 @@ already works. bonsai is built to prevent those:
 - **Deterministic by design.** A branch's `process` does no I/O and never
   waits. The core feeds it one input at a time, in a fixed order. A test can
   drive a branch, or the whole core, with no runtime and no sockets.
-- **The compiler checks the wiring.** Each branch gets an `Input` enum with
+- **The compiler checks the links.** Each branch gets an `Input` enum with
   exactly the messages linked to it. Link in a new one and the build fails
   until the branch handles it; `out.send(m)` compiles only for messages the
   branch is linked to send.
@@ -133,7 +133,7 @@ bonsai link <from> <Message> <to> [<to> …]      from sends it to each (unlink 
 bonsai link <from> <to> [<to> …]                with an edge at one end: no message
 bonsai rate <branch> <hz|off>                   tick a branch this many times a second
 bonsai list                                     branches, links, warnings
-bonsai sync                                     regenerate the wiring after editing bonsai.toml
+bonsai sync                                     regenerate src/links.rs after editing bonsai.toml
 bonsai top [user@host] [--once]                 watch a running tree, here or on a Pi
 bonsai update                                   refresh template crates and Cargo.lock
 bonsai regrow                                   reset the tree to a fresh template
@@ -156,7 +156,7 @@ bonsai tools [<tool> …]                         build tools: sccache, mold, zi
 | **rate** | a branch's own clock: `Input::Tick`s per second | `rate` in its `[branch.<name>]` |
 | **settings** | a branch's values, as constants | other keys in `[branch.<name>]` → `src/settings.rs` |
 | **units** | numbers with their unit: `Celsius`, `Meters`, `Knots`… | in every tree's runtime, used in messages |
-| **wiring** | the generated `Input`/`Out` types, the edges and the core | `src/wiring.rs` (never edit) |
+| **`src/links.rs`** | the generated `Input`/`Out` types, the edges and the core | written by bonsai (never edit) |
 
 ## Edges
 
@@ -284,7 +284,7 @@ fresh one, which deletes its branches.
 
 - **The code:** `src/main.rs` is the CLI (the wizard, `tools`, `regrow`,
   `retarget`, `update`); `src/tree.rs` holds the commands that grow a tree;
-  `src/graph.rs` reads `bonsai.toml` and generates the wiring. It's pure and
+  `src/graph.rs` reads `bonsai.toml` and generates `src/links.rs`. It's pure and
   unit-tested. Per-board templates live in `templates/linux/<board>/` and are
   rendered by cargo-generate; the branch scaffold and the runtime
   (`templates/_branch/`, `templates/_tree/`) are built into the binary.

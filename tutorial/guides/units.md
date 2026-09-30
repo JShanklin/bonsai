@@ -89,7 +89,7 @@ convert once:
 - **Text protocols** usually want the bare number: `reading.temp.0`.
 - **Binary protocols** often use integers: tenths of a degree, centimeters.
   Convert where you encode and decode (see the
-  [wire format guide](wire-format.md)).
+  [binary messages guide](binary-messages.md)).
 - **An edge** can hand branches units directly: a custom edge's `In` can be
   `Celsius` ([custom edges](edges-custom.md)).
 

@@ -15,7 +15,8 @@ use crate::graph::{self, Config};
 pub const CONFIG: &str = "bonsai.toml";
 pub const MESSAGES: &str = "src/messages.rs";
 const RUNTIME_RS: &str = "src/bonsai.rs";
-const WIRING_RS: &str = "src/wiring.rs";
+const LINKS_RS: &str = "src/links.rs";
+const OLD_WIRING_RS: &str = "src/wiring.rs";
 const SETTINGS_RS: &str = "src/settings.rs";
 const BRANCHES_MOD: &str = "src/branches/mod.rs";
 const EDGES_MOD: &str = "src/edges/mod.rs";
@@ -96,6 +97,40 @@ pub fn require_tree(cmd: &str) {
         std::fs::write(CONFIG, src).unwrap_or_else(|e| exit(format!("can't write {CONFIG}: {e}")));
         println!("{CONFIG}: [[wire]] tables are [[link]] now");
     }
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn rust_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            out.extend(rust_files(&path)?);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
+/// Source from a tree whose generated module was `wiring`, using `links`
+/// instead (`mod links;`, `crate::links::…`, `links::Core`); None when it
+/// never names it.
+pub fn with_links_module(src: &str) -> Option<String> {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(at) = rest.find("wiring") {
+        let before = rest[..at].chars().next_back();
+        let after = &rest[at + "wiring".len()..];
+        let word = !before.is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let declared = rest[..at].ends_with("mod ") && after.starts_with(';');
+        let module = word && (after.starts_with("::") || declared);
+        out.push_str(&rest[..at]);
+        out.push_str(if module { "links" } else { "wiring" });
+        rest = after;
+    }
+    out.push_str(rest);
+    (out != src).then_some(out)
 }
 
 /// A `bonsai.toml` from before wires were called links, with each `[[wire]]`
@@ -183,9 +218,23 @@ pub fn sync_tree() -> io::Result<()> {
         exit("the tree has errors; nothing was generated");
     }
     let mut changed = Vec::new();
+    // Trees from before src/wiring.rs was src/links.rs: move their code across.
+    if Path::new(OLD_WIRING_RS).exists() {
+        let mut moved = 0;
+        for path in rust_files(Path::new("src"))? {
+            if let Some(new) = with_links_module(&std::fs::read_to_string(&path)?) {
+                std::fs::write(&path, new)?;
+                moved += 1;
+            }
+        }
+        std::fs::remove_file(OLD_WIRING_RS)?;
+        changed.push(format!(
+            "{OLD_WIRING_RS} → {LINKS_RS} ({moved} files now use crate::links)"
+        ));
+    }
     for (path, content) in [
         (RUNTIME_RS, RUNTIME.to_string()),
-        (WIRING_RS, graph::render_wiring(&cfg)),
+        (LINKS_RS, graph::render_links(&cfg)),
         (SETTINGS_RS, graph::render_settings(&cfg)),
         (BRANCHES_MOD, graph::render_mod(&cfg)),
         (EDGES_MOD, graph::render_edges_mod(&cfg)),
@@ -1101,6 +1150,27 @@ pub fn with_macro_use(main_src: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wiring_module_becomes_links() {
+        let main = "#[rustfmt::skip]\nmod wiring;\n\nfn main() {\n    bonsai::run(wiring::Core::new());\n}\n";
+        assert_eq!(
+            with_links_module(main).as_deref(),
+            Some(
+                "#[rustfmt::skip]\nmod links;\n\nfn main() {\n    bonsai::run(links::Core::new());\n}\n"
+            )
+        );
+        assert_eq!(
+            with_links_module("use crate::wiring::sensor::{Input, Out};\n").as_deref(),
+            Some("use crate::links::sensor::{Input, Out};\n")
+        );
+        // Prose and other names stay.
+        assert_eq!(
+            with_links_module("// rewiring the wiring; let wiring = 1;\n"),
+            None
+        );
+        assert_eq!(with_links_module("use crate::links::Msg;\n"), None);
+    }
 
     #[test]
     fn wire_tables_become_links() {

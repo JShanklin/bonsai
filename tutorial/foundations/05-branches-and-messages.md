@@ -116,6 +116,7 @@ branches, in the order the core runs them:
 links:
   sensor --Reading--> watchdog, display
   watchdog --Alarm--> display
+record: events, panics → logs/
 ```
 
 ## What each branch receives

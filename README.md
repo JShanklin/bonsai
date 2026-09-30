@@ -45,6 +45,11 @@ already works. bonsai is built to prevent those:
 - **A panic isn't the end.** A branch that panics is set up again; an edge
   that fails or panics is restarted with backoff. The rest of the tree keeps
   running, and the core never waits on an edge.
+- **A record of every run.** Each run gets a folder named by when it
+  started, with a file per kind of line: the events you mark with
+  `record!("launch: altitude {alt}")`, panics, errors, edges coming and
+  going. Every file starts with START and ends with END and why; a run with
+  no END was killed or lost power.
 - **Units the compiler checks.** `temp: Celsius`, `alt: Meters`, `speed:
   Knots`: comparing a temperature with a bare number, or adding meters to
   seconds, doesn't build. `Meters / Seconds` is `MetersPerSecond`, and each
@@ -79,6 +84,7 @@ links:
   sensor --Reading--> display
   display --Alarm--> sensor
   display --> net
+record: events, panics → logs/
 warning: sensor → display → sensor send to each other in a loop: make at least one of those sends conditional
 ```
 

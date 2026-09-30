@@ -32,7 +32,8 @@ templates/
       cargo-generate.toml
       Cargo.toml
       .cargo/config.toml   # the build target and runner (none for host)
-      bonsai.toml          # the graph: branches, settings, rates, links
+      bonsai.toml          # the graph: branches, settings, rates, links; [record]
+      .gitignore           # target/ and logs/ (run logs)
       src/
         main.rs            # trunk: `bonsai::run(links::Core::new())`
         messages.rs        # the message structs (has `// bonsai:message`), units in scope

@@ -35,6 +35,7 @@ to paste, and shows how to check it works.
 | [Units](guides/units.md) | `Celsius`, `Meters`, `Knots`…: numbers the compiler won't mix up |
 | [Binary messages](guides/binary-messages.md) | compact bytes for what crosses the network (serde + postcard + COBS) |
 | [Testing](guides/testing.md) | branches and the whole tree, with no network |
+| [Run logs](guides/run-logs.md) | a folder per run: your `record!` events, panics, errors, START and END |
 | [Deploy](guides/deploy.md) | release builds, running on a Pi, as a service |
 | [Build tools](guides/build-tools.md) | sccache, mold, zigbuild and bacon: faster builds, and Pi builds with zig |
 | [Virtual Pi](guides/virtual-pi.md) | an emulated Pi with its own network address, deployed to like the real one |

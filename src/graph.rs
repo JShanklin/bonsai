@@ -17,6 +17,34 @@ pub struct Config {
     pub branches: Vec<BranchCfg>,
     pub edges: Vec<EdgeCfg>,
     pub links: Vec<Link>,
+    /// `[record]`: the run logs to keep; None keeps none.
+    pub record: Option<RecordCfg>,
+}
+
+/// `[record]`: a folder per run under `dir`, a file for each kind set true.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordCfg {
+    pub dir: String,
+    pub events: bool,
+    pub panics: bool,
+    pub errors: bool,
+    pub edges: bool,
+}
+
+/// The kinds of line `[record]` can keep, each its own file.
+pub const RECORD_KINDS: [&str; 4] = ["events", "panics", "errors", "edges"];
+
+impl RecordCfg {
+    /// The kinds kept, in `RECORD_KINDS` order.
+    pub fn kept(&self) -> Vec<&'static str> {
+        let on = [self.events, self.panics, self.errors, self.edges];
+        RECORD_KINDS
+            .iter()
+            .zip(on)
+            .filter(|(_, on)| *on)
+            .map(|(k, _)| *k)
+            .collect()
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -176,6 +204,42 @@ pub fn parse(src: &str) -> Result<Config, String> {
             name: name.to_string(),
             kind,
         });
+    }
+
+    if let Some(item) = doc.get("record") {
+        let t = item
+            .as_table()
+            .ok_or("bonsai.toml: `record` is a table: [record]")?;
+        let mut record = RecordCfg {
+            dir: "logs".to_string(),
+            events: false,
+            panics: false,
+            errors: false,
+            edges: false,
+        };
+        for (key, item) in t.iter() {
+            let bad = || format!("bonsai.toml: [record] {key} is true or false");
+            match key {
+                "dir" => {
+                    record.dir = item
+                        .as_str()
+                        .filter(|d| !d.trim().is_empty())
+                        .ok_or("bonsai.toml: [record] dir is a folder: \"logs\"")?
+                        .to_string()
+                }
+                "events" => record.events = item.as_bool().ok_or_else(bad)?,
+                "panics" => record.panics = item.as_bool().ok_or_else(bad)?,
+                "errors" => record.errors = item.as_bool().ok_or_else(bad)?,
+                "edges" => record.edges = item.as_bool().ok_or_else(bad)?,
+                _ => {
+                    return Err(format!(
+                        "bonsai.toml: [record] {key}: it takes dir, {}",
+                        RECORD_KINDS.join(", ")
+                    ));
+                }
+            }
+        }
+        cfg.record = Some(record);
     }
 
     if doc.contains_key("wire") {
@@ -978,6 +1042,17 @@ pub mod {name} {{
         o.push_str(&configs);
     }
 
+    let record = cfg.record.clone().unwrap_or(RecordCfg {
+        dir: "logs".to_string(),
+        events: false,
+        panics: false,
+        errors: false,
+        edges: false,
+    });
+    o.push_str(&format!(
+        "\n/// The run logs to keep, from [record].\nconst RECORD_CONFIG: crate::bonsai::record::Config = crate::bonsai::record::Config {{\n    dir: {:?},\n    events: {},\n    panics: {},\n    errors: {},\n    edges: {},\n}};\n",
+        record.dir, record.events, record.panics, record.errors, record.edges
+    ));
     o.push_str(
         "\n/// The links, in bonsai.toml order (from, message, to): for `bonsai top`.\nconst LINKS: &[crate::bonsai::stats::LinkInfo] = &[\n",
     );
@@ -1004,7 +1079,7 @@ pub mod {name} {{
         o.push_str(&format!("    {}: EdgeOut<{}>,\n", e.name, edge_types(e).1));
     }
     o.push_str(
-        "    queue: VecDeque<Msg>,\n}\n\nimpl Core {\n    pub fn new() -> Self {\n        crate::bonsai::stats::links(LINKS);\n        Core {\n",
+        "    queue: VecDeque<Msg>,\n}\n\nimpl Core {\n    pub fn new() -> Self {\n        crate::bonsai::stats::links(LINKS);\n        crate::bonsai::record::configure(RECORD_CONFIG);\n        Core {\n",
     );
     for b in &cfg.branches {
         o.push_str(&format!(
@@ -1751,6 +1826,35 @@ to = ["b"]
         // Send only: no bind, any free port.
         let cfg = parse("[edge.out]\nkind = \"udp\"\nto = \"h:1\"\n").unwrap();
         assert!(matches!(&cfg.edges[0].kind, EdgeKind::Udp { bind, .. } if bind == "0.0.0.0:0"));
+    }
+
+    #[test]
+    fn record_says_which_run_logs_to_keep() {
+        let cfg =
+            parse("[record]\ndir = \"/var/log/tree\"\nevents = true\nedges = true\n").unwrap();
+        let r = cfg.record.clone().unwrap();
+        assert_eq!(r.kept(), ["events", "edges"]);
+        assert_eq!(r.dir, "/var/log/tree");
+        let w = render_links(&cfg);
+        assert!(
+            w.contains("crate::bonsai::record::configure(RECORD_CONFIG);"),
+            "{w}"
+        );
+        assert!(w.contains("    dir: \"/var/log/tree\",\n    events: true,\n    panics: false,\n    errors: false,\n    edges: true,\n"), "{w}");
+        // No table: nothing kept.
+        assert!(parse("").unwrap().record.is_none());
+        assert!(render_links(&parse("").unwrap()).contains("    events: false,\n"));
+        for (table, expect) in [
+            ("events = \"yes\"", "[record] events is true or false"),
+            (
+                "crashes = true",
+                "[record] crashes: it takes dir, events, panics, errors, edges",
+            ),
+            ("dir = \"\"", "[record] dir is a folder"),
+        ] {
+            let err = parse(&format!("[record]\n{table}\n")).unwrap_err();
+            assert!(err.contains(expect), "{err}");
+        }
     }
 
     #[test]

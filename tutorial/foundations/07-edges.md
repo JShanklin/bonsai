@@ -70,6 +70,7 @@ links:
   watchdog --Alarm--> display
   uplink --> watchdog
   watchdog --> uplink
+record: events, panics → logs/
 ```
 
 The watchdog gained an `Input::Uplink(_uplink) => {}` arm, and an
@@ -181,7 +182,7 @@ And the tree's log:
 11:55:46.571Z  INFO display: 28.0 °C, 55% humidity
 11:55:47.572Z  INFO display: 29.5 °C, 55% humidity
 11:55:47.572Z  WARN display: too hot: 29.5 °C
-11:55:48.051Z  INFO bonsai: stopping
+11:55:48.051Z  INFO bonsai: stopping (Ctrl-C)
 ```
 
 ## When an edge fails

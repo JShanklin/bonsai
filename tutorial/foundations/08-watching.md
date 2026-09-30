@@ -39,6 +39,13 @@ Only warnings, except the uplink, which tells everything:
 BONSAI_LOG=warn,uplink=info cargo local
 ```
 
+**Each run also leaves a folder** in `logs/`, named by the local time it
+started (`logs/2026-09-30_20-07-45/`). It holds `events.log`, with what
+branches mark with `record!("…")` (like `info!`, kept), and `panics.log`,
+each starting with a START line and ending with an END line that says why
+the tree stopped. `[record]` in `bonsai.toml` picks what's kept: see the
+[run logs guide](../guides/run-logs.md).
+
 ```
 11:56:07.751Z  INFO uplink: up
 11:56:10.752Z  WARN display: too hot: 31.0 °C

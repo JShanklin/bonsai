@@ -1282,10 +1282,18 @@ mod tests {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         tree::link("sensor", &args(&["Reading", "display", "logger"])).unwrap();
         tree::rate("sensor", "10").unwrap();
+        tree::record(&args(&["errors", "on"])).unwrap();
+        tree::record(&args(&["dir", "/srv/gh"])).unwrap();
         tree::sync().unwrap();
 
         let toml = read("bonsai.toml");
         assert!(toml.contains("[branch.sensor]\nrate = 10\n"), "{toml}");
+        assert!(
+            toml.contains("dir = \"/srv/gh\"     # relative to where the tree runs\n")
+                && toml.contains("errors = true       # every error!/warn! line\n"),
+            "{toml}"
+        );
+        assert!(read("src/links.rs").contains("    errors: true,\n"));
         assert!(
             toml.contains("[[link]]\nfrom = \"sensor\"\nmessage = \"Reading\"\nto = [\"display\", \"logger\"]\n"),
             "{toml}"
@@ -1368,6 +1376,8 @@ mod tests {
         assert!(!read("src/branches/display.rs").contains("Input::Reading"));
         tree::rate("sensor", "off").unwrap();
         assert!(!read("src/branches/sensor.rs").contains("Input::Tick"));
+        tree::record(&args(&["errors", "off"])).unwrap();
+        tree::record(&args(&["dir", "logs"])).unwrap();
         tree::message_remove("Reading").unwrap();
         tree::branch_remove("logger").unwrap();
         tree::branch_remove("display").unwrap();
@@ -2327,6 +2337,8 @@ fn print_help() {
     println!("  bonsai link <from> <to> [<to> ...]   with an edge at one end (no message)");
     println!("  bonsai unlink <from> [<Message>] [<to> ...]   stop (all when none named)");
     println!("  bonsai rate <branch> <hz|off>   tick a branch this many times a second");
+    println!("  bonsai record [<kind> on|off]   run logs to keep: events, panics, errors, edges");
+    println!("  bonsai record dir <folder>   where each run's folder goes (default logs)");
     println!("  bonsai sync            regenerate src/links.rs after editing bonsai.toml");
     println!("  bonsai list            the tree's branches and links, and any warnings");
     println!("  bonsai top [user@host|local] [--port N] [--once]");
@@ -2374,6 +2386,10 @@ fn main() -> io::Result<()> {
             tree::unlink(from, &rest)
         }
         ["rate", branch, hz] => tree::rate(branch, hz),
+        ["record", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
+            tree::record(&rest)
+        }
         ["sync"] => tree::sync(),
         ["list"] => tree::list(),
         ["regrow"] => regrow(),

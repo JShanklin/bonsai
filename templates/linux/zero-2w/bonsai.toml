@@ -17,3 +17,13 @@
 #   from = "sensor"
 #   message = "Reading"
 #   to = ["display", "logger"]
+
+# Run logs: a folder per run in `dir`, named by when it started
+# (logs/2026-09-30_14-00-05/), with a file for each kind set true. Each file
+# starts with a START line and ends with an END line (`bonsai record`).
+[record]
+dir = "logs"        # relative to where the tree runs
+events = true       # record!("…") from a branch or an edge
+panics = true       # a branch or an edge panicked
+errors = false      # every error!/warn! line
+edges = false       # edges coming up and going down

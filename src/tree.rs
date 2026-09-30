@@ -32,6 +32,8 @@ pub const RUNTIME: &str = include_str!("../templates/_tree/bonsai.rs");
 pub const SERIAL: &str = include_str!("../templates/_tree/serial.rs");
 /// The crate the serial edge needs, added and removed with it.
 const TOKIO_SERIAL: (&str, &str) = ("tokio-serial", "5.5");
+/// The runtime reads the local time with it (for run logs).
+const LIBC: (&str, &str) = ("libc", "0.2");
 /// The scaffolds. `{{branch_name}}`/`{{BranchName}}` and
 /// `{{edge_name}}`/`{{EdgeName}}` are plain replacements, not Liquid.
 pub const BRANCH_TEMPLATE: &str = include_str!("../templates/_branch/branch.rs");
@@ -267,6 +269,11 @@ pub fn sync_tree() -> io::Result<()> {
             std::fs::write("Cargo.toml", new)?;
             changed.push(format!("Cargo.toml (-{})", TOKIO_SERIAL.0));
         }
+    }
+    // Trees from before run logs: the runtime needs libc now.
+    if let Some(new) = crate::with_dependency(&read("Cargo.toml"), LIBC)? {
+        std::fs::write("Cargo.toml", new)?;
+        changed.push(format!("Cargo.toml (+{})", LIBC.0));
     }
     if changed.is_empty() {
         println!("generated code is in step with {CONFIG}");
@@ -1116,6 +1123,7 @@ pub fn list() -> io::Result<()> {
             println!("  {}", graph::describe(w));
         }
     }
+    println!("{}", record_summary(&cfg));
     let report = graph::check(&cfg, &messages());
     for e in &report.errors {
         println!("error: {e}");
@@ -1124,6 +1132,91 @@ pub fn list() -> io::Result<()> {
         println!("warning: {w}");
     }
     Ok(())
+}
+
+/// `record: events, panics → logs/`, for `bonsai list` and `bonsai record`.
+pub fn record_summary(cfg: &Config) -> String {
+    match &cfg.record {
+        Some(r) if !r.kept().is_empty() => {
+            format!(
+                "record: {} → {}/",
+                r.kept().join(", "),
+                r.dir.trim_end_matches('/')
+            )
+        }
+        _ => "record: nothing (`bonsai record events on`)".to_string(),
+    }
+}
+
+/// Set `key` in `t`, keeping the comment after its old value in its column.
+fn set_keeping_comment(t: &mut Table, key: &str, new: toml_edit::Value) {
+    let mut new = new;
+    if let Some(old) = t.get(key).and_then(Item::as_value) {
+        let decor = old.decor();
+        let prefix = decor.prefix().and_then(|p| p.as_str()).unwrap_or(" ");
+        let suffix = decor.suffix().and_then(|s| s.as_str()).unwrap_or("");
+        let pad = suffix.len() - suffix.trim_start_matches(' ').len();
+        let bare = |v: &toml_edit::Value| v.clone().decorated("", "").to_string().len();
+        let (old_len, new_len) = (bare(old), bare(&new));
+        let suffix = match suffix.trim_start_matches(' ') {
+            comment if comment.starts_with('#') => {
+                let pad = (pad + old_len).saturating_sub(new_len).max(1);
+                format!("{}{comment}", " ".repeat(pad))
+            }
+            _ => suffix.to_string(),
+        };
+        new.decor_mut().set_prefix(prefix);
+        new.decor_mut().set_suffix(suffix);
+    }
+    t.insert(key, Item::Value(new));
+}
+
+/// `bonsai record [<kind> on|off | dir <folder>]`: which run logs to keep.
+pub fn record(args: &[String]) -> io::Result<()> {
+    require_tree("record");
+    let mut doc = load_doc();
+    if !doc.contains_key("record") {
+        if args.is_empty() {
+            println!("{}", record_summary(&load()));
+            return Ok(());
+        }
+        let mut t = Table::new();
+        t.decor_mut().set_prefix(
+            "\n# Run logs: a folder per run in `dir`, a file for each kind set true.\n",
+        );
+        t.insert("dir", value("logs"));
+        for kind in graph::RECORD_KINDS {
+            t.insert(kind, value(false));
+        }
+        doc.insert("record", Item::Table(t));
+    }
+    let Some(t) = doc.get_mut("record").and_then(Item::as_table_mut) else {
+        exit(format!("{CONFIG}: `record` is a table: [record]"));
+    };
+    match args {
+        [] => {}
+        [dir, folder] if dir == "dir" => set_keeping_comment(t, "dir", folder.as_str().into()),
+        [kind, on] if graph::RECORD_KINDS.contains(&kind.as_str()) => {
+            let on = match on.as_str() {
+                "on" | "true" => true,
+                "off" | "false" => false,
+                _ => usage(format!(
+                    "`bonsai record {kind}` takes on or off; got {on:?}"
+                )),
+            };
+            set_keeping_comment(t, kind, on.into());
+        }
+        _ => usage(format!(
+            "usage: bonsai record [{} on|off], or bonsai record dir <folder>",
+            graph::RECORD_KINDS.join("|")
+        )),
+    }
+    let cfg = save_checked(&doc)?;
+    println!("{}", record_summary(&cfg));
+    if args.is_empty() {
+        return Ok(());
+    }
+    sync_tree()
 }
 
 /// `main_src` with `#[macro_use]` above `mod bonsai;` (so every module can

@@ -196,8 +196,8 @@ branch            inputs/s    sent/s    avg µs    max µs  panics
 sensor                 1.0       1.0         4         5       0
 watchdog               1.0       0.0         2         7       0
 display                1.0       0.0        21        32       1
-edge                 state      in/s     out/s   dropped restarts  last error
-uplink                  up       0.0       0.0         0       0  
+edge                 state      in/s     out/s   dropped      lost restarts  last error
+uplink                  up       0.0       0.0         0         0       0  
 link                                                msgs/s
 sensor --Reading--> watchdog, display                  1.0
 watchdog --Alarm--> display                            0.0

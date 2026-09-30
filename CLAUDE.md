@@ -52,6 +52,10 @@ cargo run -- list           # branches, links, errors and warnings
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
 cargo run -- top [user@host|local] [--port N] [--once]   # watch a running tree
 cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs, top/)
+cargo test -- --ignored runtime   # the runtime's regression tests, in a rendered host tree
+BONSAI_RUNTIME_MODULES=tcp BONSAI_RUNTIME_TESTS=slow cargo test -- --ignored runtime   # narrowed
+scripts/sync-templates.sh [--check]   # regenerate every board (--check: fail if stale)
+scripts/check-boards.sh [board ...]   # a representative tree per board, cargo check for its target
 cargo test marker_matches_whole_line_not_substring   # run a single test by name
 cargo install --path .      # put `bonsai` on PATH (embeds templates/ into the binary)
 ```
@@ -379,6 +383,24 @@ embedded copy is extracted to a temp dir for cargo-generate, then deleted.
 The branch scaffold and the runtime are embedded separately with
 `include_str!` (with the serial edge and the custom-edge scaffold) so the
 graph commands work inside a tree where `templates/` isn't present.
+
+## Runtime tests and CI
+
+The runtime (`templates/_tree/bonsai.rs`) is data to this crate, so its
+behaviour is tested in a rendered tree: `runtime-tests/` (not part of the
+crate; formatted with `rustfmt --edition 2024`) is copied into
+`templates/linux/host` rendered at `target/runtime-tests/tree` as its
+`runtime_tests` module by the ignored `runtime_regression_tests_pass_in_a_rendered_host_tree`
+(`render_runtime_test_tree`), and `cargo test` runs there
+(`CARGO_TARGET_DIR=target/runtime-tests/target`). Tests that touch
+process-wide state (the logger, the panic hook, the recorder, signals) run
+a scenario in a child process (`support::spawn`/`child`: the test binary
+re-run with one `#[ignore]`d scenario and `BONSAI_RUNTIME_TEST_CHILD`; its
+output is drained as it comes). `record::fault` (`cfg(test)` only) injects
+a slow or failing disk. `.github/workflows/ci.yml` runs fmt, clippy, the CLI
+tests, `scripts/sync-templates.sh --check`, the runtime tests and
+`scripts/check-boards.sh` (cross `cargo check` for aarch64/armv6: a compile
+check, not a hardware test).
 
 ## Invariants to preserve
 

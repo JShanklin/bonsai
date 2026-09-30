@@ -1,0 +1,64 @@
+# Checks every push and pull request: the CLI, the runtime every tree
+# carries (tested in a rendered host tree), the board templates being in
+# step with the generator, and every board compiling for its own target.
+# Compiling for a Pi target is not a hardware test.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  host:
+    name: fmt, clippy, CLI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      # The runtime tests aren't part of this crate: check their format too.
+      - run: rustfmt --edition 2024 --check runtime-tests/*.rs
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  templates:
+    name: board templates in step
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Regenerates every board's generated files; fails on any change.
+      - run: scripts/sync-templates.sh --check
+
+  runtime:
+    name: runtime regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            target/runtime-tests/tree -> ../target
+      # Renders templates/linux/host with runtime-tests/ and runs its tests.
+      - run: cargo test -- --ignored runtime_regression
+
+  boards:
+    name: every board compiles for its target
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu, arm-unknown-linux-gnueabihf
+      - uses: Swatinem/rust-cache@v2
+      # cargo check needs each target's standard library, not a linker.
+      - run: scripts/check-boards.sh

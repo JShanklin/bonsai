@@ -230,8 +230,9 @@ is one line; set `RUST_BACKTRACE=1` for the backtrace too.
 tabs you switch with their number, `Tab` or a click: the **graph** (every
 branch and edge as a box coloured by its state: green busy, grey idle, red
 after a panic or while retrying; every link an arrow with its message and
-rate), **branches** (inputs and sends a second, time per input, panics),
-**edges** (up or retrying, packets in and out, drops, restarts, the last
+rate), **branches** (inputs and sends a second, time per input, panics,
+and any branch out of service), **edges** (up or retrying, packets in and
+out, what was dropped at its queue or lost after it, restarts, the last
 error), the **log** (scroll, search, filter by level or by who wrote it)
 and the **system** (the tree's CPU and memory, the computer's load). Here,
 the tutorial's greenhouse, its display selected just after a panic:
@@ -275,6 +276,33 @@ tables and exits. `BONSAI_TOP` moves a tree's server to another port
 (`BONSAI_TOP=7778`; `bonsai top --port 7778`) or turns it off (`off`).
 Counting what branches do never changes what they send.
 
+## Limits and defaults
+
+A tree runs for months on a small board, so everything that could grow is
+bounded, and the core never waits for anything outside it. When a limit is
+reached, something is dropped and counted rather than the tree slowing
+down or running out of memory:
+
+| what | default | past it | set it |
+|------|---------|---------|--------|
+| an edge's queue (what branches send it) | 64 | dropped and counted (**dropped** in `bonsai top`), one warning each time it starts | `EDGE_QUEUE` |
+| a line on a TCP or serial edge (`lines` framing) | 1 MiB | refused before it's buffered: a server closes that client, a client or serial edge reconnects | `max_frame` in `[edge.<name>]` |
+| a TCP server's clients | 64 | the one that stopped sending longest ago makes room, else the new one is closed | `max_clients` |
+| what a TCP server holds for one client | 64 packets | that client misses them (**lost**) | `CLIENT_QUEUE` |
+| one write to a TCP server's client | 5 s | that client is disconnected (**lost**) | `WRITE_TIMEOUT` |
+| a client that stopped sending | kept 2 s for replies | closed | `LINGER` |
+| a branch whose `setup` panics | out of service, tried again after 1 s, doubling to 60 s | its inputs are dropped and counted | `SETUP_RETRY` |
+| run-log lines waiting for the disk | 1024 | dropped and counted, noted in the file and END | `record::QUEUE` |
+| a run-log line | 8 KiB | cut short with `…` | `record::MAX_LINE` |
+| run folders | the last 100 | the oldest go | `keep_runs`, `keep_days` in `[record]` |
+| a run-log file | 10 MiB | moves to `<kind>.1.log` | `max_file_kb` |
+
+The names in capitals are constants in the runtime (`src/bonsai.rs`); the
+others are keys in `bonsai.toml`. Run logs are flushed within 0.1 s and
+synced to the disk every 5 s and at START and END; shutdown waits 2 s at
+most for END to be written. The [run logs](tutorial/guides/run-logs.md) and
+[TCP](tutorial/guides/edges-tcp.md) guides say more.
+
 ## Boards
 
 | board | chip | target | status |
@@ -301,7 +329,13 @@ fresh one, which deletes its branches.
   `templates/linux/<board>/` (copy a similar board). See
   [templates/README.md](templates/README.md).
 - **Checks:** `cargo fmt --check`, `cargo clippy --all-targets`,
-  `cargo test`.
+  `cargo test`. The runtime every tree carries is tested in a rendered host
+  tree: `cargo test -- --ignored runtime` (the tests are in
+  `runtime-tests/`). After changing the runtime, the generator or a
+  template's `bonsai.toml`, `scripts/sync-templates.sh` regenerates every
+  board; `scripts/check-boards.sh` builds a tree on each board for its own
+  target (a compile check, not a hardware test). CI
+  (`.github/workflows/ci.yml`) runs all of these.
 
 [tokio]: https://tokio.rs/
 [cargo-generate]: https://cargo-generate.github.io/cargo-generate/

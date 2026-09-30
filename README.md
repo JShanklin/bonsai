@@ -42,9 +42,11 @@ already works. bonsai is built to prevent those:
 - **One file is the graph.** Branches, their settings and rates, and every
   link are in `bonsai.toml`, edited by commands or by hand. `bonsai list`
   shows it, and flags loops and branches nothing reaches.
-- **A panic isn't the end.** A branch that panics is set up again; an edge
-  that fails or panics is restarted with backoff. The rest of the tree keeps
-  running, and the core never waits on an edge.
+- **A panic isn't the end.** A branch that panics is set up again; if its
+  setup panics too, it's out of service (its inputs dropped and counted)
+  and tried again with backoff. An edge that fails or panics is restarted
+  with backoff. The rest of the tree keeps running, and the core never
+  waits on an edge.
 - **A record of every run.** Each run gets a folder named by when it
   started, with a file per kind of line: the events you mark with
   `record!("launch: altitude {alt}")`, panics, errors, edges coming and

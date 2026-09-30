@@ -226,10 +226,12 @@ impl App {
                 _ => Color::Gray,
             };
         }
-        if self
-            .panicked
-            .get(&node.name)
-            .is_some_and(|(_, at)| at.elapsed() < RED_FOR)
+        let failed = now.branches.iter().any(|b| b.name == node.name && b.failed);
+        if failed
+            || self
+                .panicked
+                .get(&node.name)
+                .is_some_and(|(_, at)| at.elapsed() < RED_FOR)
         {
             return Color::Red;
         }
@@ -555,13 +557,20 @@ impl App {
         };
         if let Some(b) = now.branches.iter().find(|b| b.name == name) {
             let s = if b.panics == 1 { "" } else { "s" };
-            return format!(
+            let mut line = format!(
                 " {name}: {:.1} inputs/s, avg {} µs, max {} µs, {} panic{s}",
                 self.rate(name),
                 avg_us(b),
                 b.max_us,
                 b.panics
             );
+            if b.failed {
+                line += &format!(
+                    ", OUT OF SERVICE: its setup panicked ({} inputs dropped)",
+                    b.discarded
+                );
+            }
+            return line;
         }
         if let Some(e) = now.edges.iter().find(|e| e.name == name) {
             let mut s = format!(
@@ -594,8 +603,16 @@ impl App {
             } else {
                 Span::raw("0")
             };
+            let name = if b.failed {
+                Line::from(Span::styled(
+                    format!("{} (out of service)", b.name),
+                    Style::new().fg(Color::Red),
+                ))
+            } else {
+                Line::from(b.name.clone())
+            };
             Row::new(vec![
-                Line::from(b.name.clone()),
+                name,
                 Line::from(format!("{:.1}", per_sec(inputs, b.inputs, ms))).right_aligned(),
                 Line::from(format!("{:.1}", per_sec(sent, b.sent, ms))).right_aligned(),
                 Line::from(avg_us(b).to_string()).right_aligned(),
@@ -1092,6 +1109,32 @@ mod tests {
         assert_eq!(
             (app.tab, app.filter.as_deref()),
             (Tab::Log, Some("display"))
+        );
+    }
+
+    #[test]
+    fn a_branch_out_of_service_is_red_and_says_so() {
+        let mut app = App::new("t".into());
+        app.update(Update::Snapshot(Snapshot {
+            uptime_ms: 500,
+            branches: vec![Branch {
+                name: "display".into(),
+                failed: true,
+                discarded: 7,
+                ..Default::default()
+            }],
+            links: vec![Link::default()],
+            ..Default::default()
+        }));
+        let node = Node {
+            name: "display".into(),
+            edge: false,
+        };
+        assert_eq!(app.color(&node), Color::Red);
+        assert!(
+            app.detail("display").contains("OUT OF SERVICE"),
+            "{}",
+            app.detail("display")
         );
     }
 

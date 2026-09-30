@@ -83,6 +83,14 @@ One line says where it panicked, and the display was set up again: its
 watchdog never noticed. For the full backtrace, run with
 `RUST_BACKTRACE=1`. Keep the `assert!` for the next section, then delete it.
 
+If `setup` itself panics (at startup, or when setting up again), the branch
+is **out of service**: `ERROR display: setup panicked: out of service, its
+inputs dropped; trying again in 1s`. Its inputs are dropped and counted,
+everything else carries on, and `setup` is tried again on an input a
+second later, then after 2 s, 4 s… up to a minute, never in a tight loop.
+`bonsai top` shows the branch red, `(out of service)`, until a `setup`
+works: `INFO display: set up again: back in service`.
+
 ## bonsai top
 
 While the tree runs, open another terminal in the tree's folder:

@@ -111,7 +111,13 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
 - **The runtime** (`templates/_tree/bonsai.rs`, a tree's `src/bonsai.rs`):
   `trait Branch { type Input; type Out: Default; fn setup() -> Self; fn
   process(&mut self, Input, &mut Out) }`, `trait Sends<M>`, `Slot<B>`
-  (catch_unwind around `process`; a panic logs and re-runs `setup`), `drain`
+  (catch_unwind around `process`; a panic drops that input's sends and
+  re-runs `setup`, itself under catch_unwind, as at startup in `Slot::new`;
+  a `setup` that panics puts the branch out of service: `branch: None`,
+  inputs discarded and counted, `setup` retried on an input after
+  `SETUP_RETRY` (1 s) doubling to `SETUP_RETRY_MAX` (60 s); `BranchStats`
+  `failed`/`discarded`, sent on the top `branch` row after the old fields,
+  shown red "out of service" by `bonsai top`), `drain`
   (run-to-completion with a `MAX_DELIVERIES` runaway cap) and `run()`: one
   tokio interval task per rate feeding an mpsc of `Event<EdgeIn>`s (`Tick` or
   `Edge`), `Tree::start_edges`, a core loop that handles one event at a time,

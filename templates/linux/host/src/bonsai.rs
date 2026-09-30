@@ -945,9 +945,17 @@ pub mod record {
 
         fn start(&mut self, dir: &Path, kinds: &[Kind], at: &Local, config: &Config) {
             // Trees sharing `dir` take turns: the check of the last run,
-            // making this one, and pruning happen under `dir`'s lock.
+            // making this one, and pruning happen under `dir`'s lock. Without
+            // it this run records nothing: a folder made unprotected could be
+            // taken for an abandoned one by the tree holding the lock.
             let _ = std::fs::create_dir_all(dir);
-            let turn = DirLock::take(dir);
+            let turn = match DirLock::take(dir) {
+                Ok(turn) => turn,
+                Err(why) => {
+                    let _ = writeln!(std::io::stderr(), "bonsai: no run logs this time: {why}");
+                    return;
+                }
+            };
             // The run before this one, unless it's still going (another
             // tree sharing the folder).
             let unfinished = last_run(dir)
@@ -966,11 +974,7 @@ pub mod record {
             };
             self.lock = Some(lock);
             self.max_bytes = u64::from(config.max_file_kb) * 1024;
-            // Only with `dir`'s lock is anything deleted.
-            let (removed, skipped) = match &turn {
-                Ok(_) => (prune(dir, &folder, config), None),
-                Err(why) => (0, Some(why.clone())),
-            };
+            let removed = prune(dir, &folder, config);
             drop(turn);
             let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
             let mut start = format!(
@@ -996,9 +1000,6 @@ pub mod record {
                     config.keep_runs,
                     config.keep_days
                 );
-            }
-            if let Some(why) = skipped {
-                start += &format!("\n{} old runs not pruned this time: {why}", stamp(at));
             }
             self.folder = Some(folder.clone());
             for &kind in kinds {
@@ -1175,7 +1176,7 @@ pub mod record {
     /// Held by a tree while it checks, makes and prunes run folders in `dir`,
     /// so trees sharing `dir` take turns.
     const DIR_LOCK: &str = ".bonsai-record.lock";
-    /// How long to wait for `dir`'s lock before recording without pruning.
+    /// How long to wait for `dir`'s lock before giving up on this run's logs.
     pub const DIR_LOCK_WAIT: Duration = Duration::from_secs(5);
     /// A run folder being made: never a run's name, so never pruned as one.
     const NEW: &str = ".new-";
@@ -1219,7 +1220,9 @@ pub mod record {
     /// Make this run's folder, locked before it has a run's name: it's made
     /// as `.new-<pid>-<n>`, its `.running` lock taken, and only then renamed
     /// to `2026-09-30_14-00-05` (or `…-2` when that's taken), never over
-    /// another folder. So no tree ever sees an unlocked run to prune.
+    /// another folder. So no tree ever sees an unlocked run to prune. Only
+    /// ever called with `dir`'s lock held, as `prune` is: an unlocked
+    /// `.new-*` folder it sees was left by a tree that died making it.
     fn new_run(dir: &Path, name: &str) -> std::io::Result<(PathBuf, File)> {
         std::fs::create_dir_all(dir)?;
         let mut n = 0;

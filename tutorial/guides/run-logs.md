@@ -126,10 +126,12 @@ folder is made as `.new-<pid>-<n>`, gets its `.running` lock, and only
 then takes its run's name, so no tree ever sees a run folder that isn't
 locked. A `.new-*` folder left by a tree killed at that moment is cleared
 by the next one. A tree that can't get that lock within 5 s
-(`record::DIR_LOCK_WAIT`), or can't open it, still records its run but
-deletes nothing that time, and says so under its START (`old runs not
-pruned this time: …`). So `dir` can briefly hold more than `keep_runs`,
-never fewer than the runs in use.
+(`record::DIR_LOCK_WAIT`), or can't open it, keeps no run logs that time
+(a folder made without the lock could be taken for one left by a killed
+tree) and says so once on stderr (`bonsai: no run logs this time: another
+tree held logs/.bonsai-record.lock for 5s`); the tree itself runs as
+usual. So `dir` never loses a run in use, and may briefly hold more than
+`keep_runs`.
 
 `0` means no limit for any of the three. A tree whose `[record]` doesn't
 name them (one planted before they existed) gets the defaults.

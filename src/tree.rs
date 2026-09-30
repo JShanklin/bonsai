@@ -1,7 +1,8 @@
-//! The commands that grow a tree: branches, messages, wires and rates, and
-//! `sync`, which regenerates the code they imply. The graph lives in
+//! The commands that grow a tree: branches, edges, messages, wires and rates,
+//! and `sync`, which regenerates the code they imply. The graph lives in
 //! `bonsai.toml` (edited with toml_edit, so comments stay); the message types
-//! in `src/messages.rs`; each branch's handling in `src/branches/<name>.rs`.
+//! in `src/messages.rs`; each branch's handling in `src/branches/<name>.rs`;
+//! each custom edge in `src/edges/<name>.rs`.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -17,6 +18,8 @@ const RUNTIME_RS: &str = "src/bonsai.rs";
 const WIRING_RS: &str = "src/wiring.rs";
 const SETTINGS_RS: &str = "src/settings.rs";
 const BRANCHES_MOD: &str = "src/branches/mod.rs";
+const EDGES_MOD: &str = "src/edges/mod.rs";
+const SERIAL_RS: &str = "src/edges/serial.rs";
 
 /// Where `bonsai wire` adds a receiving arm, and `bonsai message add` a type.
 pub const INPUT_ARM: &str = "// bonsai:input-arm";
@@ -24,13 +27,19 @@ pub const MESSAGE_MARKER: &str = "// bonsai:message";
 
 /// The runtime every tree carries as `src/bonsai.rs`, kept current by `sync`.
 pub const RUNTIME: &str = include_str!("../templates/_tree/bonsai.rs");
-/// The branch scaffold. `{{branch_name}}` and `{{BranchName}}` are plain
-/// replacements, not Liquid.
+/// The serial edge, written to `src/edges/serial.rs` while a tree has one.
+pub const SERIAL: &str = include_str!("../templates/_tree/serial.rs");
+/// The crate the serial edge needs, added and removed with it.
+const TOKIO_SERIAL: (&str, &str) = ("tokio-serial", "5.5");
+/// The scaffolds. `{{branch_name}}`/`{{BranchName}}` and
+/// `{{edge_name}}`/`{{EdgeName}}` are plain replacements, not Liquid.
 pub const BRANCH_TEMPLATE: &str = include_str!("../templates/_branch/branch.rs");
+pub const EDGE_TEMPLATE: &str = include_str!("../templates/_edge/edge.rs");
 
 /// Names a message can't take: the generated code's own.
 const RESERVED: &[&str] = &[
     "Tick", "Msg", "Input", "Out", "Core", "Slot", "Event", "Tree", "Sends", "Branch", "VecDeque",
+    "EdgeIn", "EdgeOut", "Edge", "Packet",
 ];
 
 fn exit(msg: impl std::fmt::Display) -> ! {
@@ -79,6 +88,10 @@ fn branch_file(name: &str) -> PathBuf {
     Path::new("src/branches").join(format!("{name}.rs"))
 }
 
+fn edge_file(name: &str) -> PathBuf {
+    Path::new("src/edges").join(format!("{name}.rs"))
+}
+
 /// Write `content` to `path` if it differs. True when it changed.
 fn write_if_changed(path: &str, content: &str) -> io::Result<bool> {
     if std::fs::read_to_string(path).is_ok_and(|old| old == content) {
@@ -96,20 +109,28 @@ fn write_if_changed(path: &str, content: &str) -> io::Result<bool> {
 pub fn sync_tree() -> io::Result<()> {
     let cfg = load();
     let report = graph::check(&cfg, &messages());
+    let mut missing = Vec::new();
     for b in &cfg.branches {
         if !branch_file(&b.name).is_file() {
-            eprintln!(
-                "error: [branch.{}] has no src/branches/{}.rs (`bonsai branch add {}` makes one)",
-                b.name, b.name, b.name
-            );
-            std::process::exit(1);
+            missing.push(format!(
+                "[branch.{0}] has no src/branches/{0}.rs (`bonsai branch add {0}` makes one)",
+                b.name
+            ));
         }
     }
-    if !report.errors.is_empty() {
-        for e in &report.errors {
+    for e in &cfg.edges {
+        if matches!(e.kind, graph::EdgeKind::Custom { .. }) && !edge_file(&e.name).is_file() {
+            missing.push(format!(
+                "[edge.{0}] is custom but has no src/edges/{0}.rs (`bonsai edge add {0} --custom` makes one)",
+                e.name
+            ));
+        }
+    }
+    if !report.errors.is_empty() || !missing.is_empty() {
+        for e in report.errors.iter().chain(&missing) {
             eprintln!("error: {e}");
         }
-        exit("bonsai.toml has errors; nothing was generated");
+        exit("the tree has errors; nothing was generated");
     }
     let mut changed = Vec::new();
     for (path, content) in [
@@ -117,9 +138,30 @@ pub fn sync_tree() -> io::Result<()> {
         (WIRING_RS, graph::render_wiring(&cfg)),
         (SETTINGS_RS, graph::render_settings(&cfg)),
         (BRANCHES_MOD, graph::render_mod(&cfg)),
+        (EDGES_MOD, graph::render_edges_mod(&cfg)),
     ] {
         if write_if_changed(path, &content)? {
-            changed.push(path);
+            changed.push(path.to_string());
+        }
+    }
+    // The serial edge's code and crate come and go with the tree's serial edges.
+    let manifest = read("Cargo.toml");
+    if cfg.has_serial() {
+        if write_if_changed(SERIAL_RS, SERIAL)? {
+            changed.push(SERIAL_RS.to_string());
+        }
+        if let Some(new) = crate::with_dependency(&manifest, TOKIO_SERIAL)? {
+            std::fs::write("Cargo.toml", new)?;
+            changed.push(format!("Cargo.toml (+{})", TOKIO_SERIAL.0));
+        }
+    } else {
+        if Path::new(SERIAL_RS).exists() {
+            std::fs::remove_file(SERIAL_RS)?;
+            changed.push(format!("{SERIAL_RS} (removed)"));
+        }
+        if let Some(new) = crate::without_dependency(&manifest, TOKIO_SERIAL.0)? {
+            std::fs::write("Cargo.toml", new)?;
+            changed.push(format!("Cargo.toml (-{})", TOKIO_SERIAL.0));
         }
     }
     if changed.is_empty() {
@@ -147,15 +189,16 @@ fn save_doc(doc: &DocumentMut) -> io::Result<()> {
     std::fs::write(CONFIG, doc.to_string())
 }
 
-/// The `[branch]` super-table, created implicit so only `[branch.x]` headers show.
-fn branch_tables(doc: &mut DocumentMut) -> &mut Table {
-    let item = doc.entry("branch").or_insert_with(|| {
+/// The `[<kind>]` super-table (`branch`, `edge`), created implicit so only
+/// `[kind.x]` headers show.
+fn tables<'a>(doc: &'a mut DocumentMut, kind: &str) -> &'a mut Table {
+    let item = doc.entry(kind).or_insert_with(|| {
         let mut t = Table::new();
         t.set_implicit(true);
         Item::Table(t)
     });
     item.as_table_mut()
-        .unwrap_or_else(|| exit(format!("{CONFIG}: `branch` must be tables")))
+        .unwrap_or_else(|| exit(format!("{CONFIG}: `{kind}` must be tables")))
 }
 
 fn wires(doc: &mut DocumentMut) -> &mut ArrayOfTables {
@@ -167,6 +210,10 @@ fn wires(doc: &mut DocumentMut) -> &mut ArrayOfTables {
 
 fn str_of<'a>(t: &'a Table, key: &str) -> &'a str {
     t.get(key).and_then(Item::as_str).unwrap_or_default()
+}
+
+fn message_of(t: &Table) -> Option<&str> {
+    t.get("message").and_then(Item::as_str)
 }
 
 fn to_list(t: &Table) -> Vec<String> {
@@ -182,6 +229,13 @@ fn to_list(t: &Table) -> Vec<String> {
 
 fn set_to_list(t: &mut Table, to: &[String]) {
     t.insert("to", value(Array::from_iter(to.iter().map(String::as_str))));
+}
+
+/// Save `doc` if it's a valid graph; exit, leaving the file alone, if not.
+fn save_checked(doc: &DocumentMut) -> io::Result<Config> {
+    let cfg = graph::parse(&doc.to_string()).unwrap_or_else(|e| exit(e));
+    save_doc(doc)?;
+    Ok(cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -204,41 +258,44 @@ fn snake(camel: &str) -> String {
     out
 }
 
-/// The arm `wire` adds for a message (or `rate` for its tick).
-fn arm(message: Option<&str>) -> String {
-    match message {
-        Some(m) => format!("Input::{m}(_{}) => {{}}", snake(m)),
-        None => "Input::Tick => {}".to_string(),
+/// The arm for an input variant: a message, an edge (CamelCase) or `Tick`.
+fn arm(variant: &str) -> String {
+    match variant {
+        "Tick" => "Input::Tick => {}".to_string(),
+        v => format!("Input::{v}(_{}) => {{}}", snake(v)),
     }
 }
 
-/// Whether a line opens the arm for `message` (None: the tick).
-fn is_input_arm(line: &str, message: Option<&str>) -> bool {
-    let rest = line.trim_start().strip_prefix("Input::");
-    match message {
-        Some(m) => rest
-            .and_then(|r| r.strip_prefix(m))
-            .is_some_and(|r| r.starts_with('(')),
-        None => rest
-            .and_then(|r| r.strip_prefix("Tick"))
-            .is_some_and(|r| r.starts_with([' ', '=', '|'])),
-    }
+/// Whether a line opens the arm for `variant`.
+fn is_input_arm(line: &str, variant: &str) -> bool {
+    line.trim_start()
+        .strip_prefix("Input::")
+        .and_then(|r| r.strip_prefix(variant))
+        .is_some_and(|r| {
+            if variant == "Tick" {
+                r.starts_with([' ', '=', '|'])
+            } else {
+                r.starts_with('(')
+            }
+        })
 }
 
 /// Add the arm to `branch`'s `match input`, unless it has one already.
-fn add_arm(branch: &str, message: Option<&str>) -> io::Result<()> {
+fn add_arm(branch: &str, variant: &str) -> io::Result<()> {
     let path = branch_file(branch);
-    let src = std::fs::read_to_string(&path)?;
-    if src.lines().any(|l| is_input_arm(l, message)) {
+    let Ok(src) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    if src.lines().any(|l| is_input_arm(l, variant)) {
         return Ok(());
     }
-    match crate::insert_indented_before(&src, INPUT_ARM, &arm(message)) {
+    match crate::insert_indented_before(&src, INPUT_ARM, &arm(variant)) {
         Some(new) => std::fs::write(&path, new),
         None => {
             eprintln!(
                 "note: no `{INPUT_ARM}` line in {}: add `{}` to its match yourself",
                 path.display(),
-                arm(message)
+                arm(variant)
             );
             Ok(())
         }
@@ -246,43 +303,56 @@ fn add_arm(branch: &str, message: Option<&str>) -> io::Result<()> {
 }
 
 /// Take the arm out of `branch`'s `match input`, body and all.
-fn remove_arm(branch: &str, message: Option<&str>) -> io::Result<()> {
+fn remove_arm(branch: &str, variant: &str) -> io::Result<()> {
     let path = branch_file(branch);
     let Ok(src) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    if let Some(new) = crate::remove_balanced_span(&src, |l| is_input_arm(l, message)) {
+    if let Some(new) = crate::remove_balanced_span(&src, |l| is_input_arm(l, variant)) {
         std::fs::write(&path, new)?;
     }
     Ok(())
 }
 
-/// Whether any wire in `doc` still delivers `message` to `branch`.
-fn receives(doc: &DocumentMut, branch: &str, message: &str) -> bool {
-    doc.get("wire")
-        .and_then(Item::as_array_of_tables)
-        .is_some_and(|ws| {
-            ws.iter()
-                .any(|w| str_of(w, "message") == message && to_list(w).iter().any(|t| t == branch))
-        })
+/// Bring every branch's arms in step with a graph change: add an arm for each
+/// input it gained, remove the arm of each it lost.
+fn reconcile_arms(before: &Config, after: &Config) -> io::Result<()> {
+    for b in &after.branches {
+        let old = graph::input_variants(before, &b.name);
+        let new = graph::input_variants(after, &b.name);
+        for v in old.iter().filter(|v| !new.contains(v)) {
+            remove_arm(&b.name, v)?;
+        }
+        for v in new.iter().filter(|v| !old.contains(v)) {
+            add_arm(&b.name, v)?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
+fn check_new_name(cfg: &Config, name: &str, what: &str) {
+    if !graph::is_branch_name(name) || graph::RESERVED_NAMES.contains(&name) {
+        usage(format!(
+            "`{name}`: a {what} name is snake_case (a-z, 0-9, _), not a Rust keyword, and not `serial`"
+        ));
+    }
+    if cfg.is_branch(name) || cfg.edge(name).is_some() {
+        exit(format!("there's already a branch or edge `{name}`"));
+    }
+}
+
 /// `bonsai branch add <name>`.
 pub fn branch_add(name: &str) -> io::Result<()> {
     require_tree("branch add");
-    if !graph::is_branch_name(name) {
-        usage(format!(
-            "`{name}`: a branch name is snake_case (a-z, 0-9, _) and not a Rust keyword"
-        ));
-    }
     let cfg = load();
+    check_new_name(&cfg, name, "branch");
     let path = branch_file(name);
-    if cfg.branches.iter().any(|b| b.name == name) || path.exists() {
-        exit(format!("there's already a branch `{name}`"));
+    if path.exists() {
+        exit(format!("{} already exists", path.display()));
     }
     let src = BRANCH_TEMPLATE
         .replace("{{branch_name}}", name)
@@ -290,62 +360,150 @@ pub fn branch_add(name: &str) -> io::Result<()> {
     std::fs::create_dir_all("src/branches")?;
     std::fs::write(&path, src)?;
     let mut doc = load_doc();
-    branch_tables(&mut doc).insert(name, Item::Table(Table::new()));
+    tables(&mut doc, "branch").insert(name, Item::Table(Table::new()));
     save_doc(&doc)?;
     println!("added branch {name}: {}", path.display());
     sync_tree()
+}
+
+/// Remove a branch's or edge's table and every wire from it, and take it
+/// out of every `to` list; returns the new graph.
+fn remove_node(doc: &mut DocumentMut, kind: &str, name: &str) -> io::Result<Config> {
+    if let Some(t) = doc.get_mut(kind).and_then(Item::as_table_like_mut) {
+        t.remove(name);
+    }
+    if let Some(ws) = doc.get_mut("wire").and_then(Item::as_array_of_tables_mut) {
+        let mut i = 0;
+        while i < ws.len() {
+            let w = ws.get_mut(i).expect("index in range");
+            let mut to = to_list(w);
+            let gone = if str_of(w, "from") == name {
+                true
+            } else if to.iter().any(|t| t == name) {
+                to.retain(|t| t != name);
+                if !to.is_empty() {
+                    set_to_list(w, &to);
+                }
+                to.is_empty()
+            } else {
+                false
+            };
+            if gone {
+                ws.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+    save_checked(doc)
 }
 
 /// `bonsai branch remove <name>`: its file, its table, and every wire from or
 /// to it (with the arms those wires put in other branches).
 pub fn branch_remove(name: &str) -> io::Result<()> {
     require_tree("branch remove");
-    let mut doc = load_doc();
-    let known = doc
-        .get("branch")
-        .and_then(Item::as_table_like)
-        .is_some_and(|t| t.contains_key(name));
-    if !known {
+    let before = load();
+    if !before.is_branch(name) {
         exit(format!("no branch `{name}` in {CONFIG}"));
     }
-    if let Some(t) = doc.get_mut("branch").and_then(Item::as_table_like_mut) {
-        t.remove(name);
-    }
-    // Wires from it go; it leaves every `to` list.
-    let mut lost: Vec<(String, String)> = Vec::new(); // (receiver, message)
-    if let Some(ws) = doc.get_mut("wire").and_then(Item::as_array_of_tables_mut) {
-        let mut i = 0;
-        while i < ws.len() {
-            let w = ws.get_mut(i).expect("index in range");
-            let message = str_of(w, "message").to_string();
-            let mut to = to_list(w);
-            if str_of(w, "from") == name {
-                lost.extend(to.iter().map(|t| (t.clone(), message.clone())));
-                ws.remove(i);
-                continue;
-            }
-            if to.iter().any(|t| t == name) {
-                to.retain(|t| t != name);
-                if to.is_empty() {
-                    ws.remove(i);
-                    continue;
-                }
-                set_to_list(w, &to);
-            }
-            i += 1;
-        }
-    }
-    save_doc(&doc)?;
-    for (receiver, message) in lost {
-        if receiver != name && !receives(&doc, &receiver, &message) {
-            remove_arm(&receiver, Some(&message))?;
-        }
-    }
+    let mut doc = load_doc();
+    let after = remove_node(&mut doc, "branch", name)?;
+    reconcile_arms(&before, &after)?;
     let path = branch_file(name);
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
     println!("removed branch {name}");
+    sync_tree()
+}
+
+/// `bonsai edge add <name> <kind> [--key value …]`, or `--custom`.
+pub fn edge_add(name: &str, args: &[String]) -> io::Result<()> {
+    require_tree("edge add");
+    let cfg = load();
+    check_new_name(&cfg, name, "edge");
+    let (kind, rest) = match args.split_first() {
+        Some((flag, rest)) if flag == "--custom" => ("custom", rest),
+        Some((kind, rest)) if !kind.starts_with('-') => (kind.as_str(), rest),
+        _ => usage("usage: bonsai edge add <name> udp|tcp|serial [--key value …], or --custom"),
+    };
+    let mut table = Table::new();
+    table.insert("kind", value(kind));
+    let mut i = 0;
+    while i < rest.len() {
+        let Some(key) = rest[i].strip_prefix("--") else {
+            usage(format!("expected --key, got {:?}", rest[i]));
+        };
+        let key = key.replace('-', "_");
+        match key.as_str() {
+            "reply" => {
+                table.insert("reply", value(true));
+                i += 1;
+            }
+            "join" => {
+                let Some(group) = rest.get(i + 1) else {
+                    usage("--join takes a group address");
+                };
+                let mut groups = table
+                    .get("join")
+                    .and_then(Item::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                groups.push(group.as_str());
+                table.insert("join", value(groups));
+                i += 2;
+            }
+            _ => {
+                let Some(v) = rest.get(i + 1) else {
+                    usage(format!("--{key} takes a value"));
+                };
+                match v.parse::<i64>() {
+                    Ok(n) if key == "baud" => table.insert(&key, value(n)),
+                    _ => table.insert(&key, value(v.as_str())),
+                };
+                i += 2;
+            }
+        }
+    }
+    let mut doc = load_doc();
+    tables(&mut doc, "edge").insert(name, Item::Table(table));
+    save_checked(&doc)?;
+    if kind == "custom" {
+        let path = edge_file(name);
+        if !path.exists() {
+            let src = EDGE_TEMPLATE
+                .replace("{{edge_name}}", name)
+                .replace("{{EdgeName}}", &graph::camel(name));
+            std::fs::create_dir_all("src/edges")?;
+            std::fs::write(&path, src)?;
+        }
+        println!("added edge {name}: {}", path.display());
+    } else {
+        println!("added {kind} edge {name}");
+    }
+    println!(
+        "wire it with `bonsai wire {name} <branch>` (what it receives) and `bonsai wire <branch> {name}` (what it sends)"
+    );
+    sync_tree()
+}
+
+/// `bonsai edge remove <name>`: its table, its wires and the arms they fed,
+/// and a custom edge's file.
+pub fn edge_remove(name: &str) -> io::Result<()> {
+    require_tree("edge remove");
+    let before = load();
+    let Some(edge) = before.edge(name) else {
+        exit(format!("no edge `{name}` in {CONFIG}"));
+    };
+    let custom = matches!(edge.kind, graph::EdgeKind::Custom { .. });
+    let mut doc = load_doc();
+    let after = remove_node(&mut doc, "edge", name)?;
+    reconcile_arms(&before, &after)?;
+    let path = edge_file(name);
+    if custom && path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    println!("removed edge {name}");
     sync_tree()
 }
 
@@ -437,8 +595,8 @@ pub fn message_remove(name: &str) -> io::Result<()> {
     let users: Vec<String> = cfg
         .wires
         .iter()
-        .filter(|w| w.message == name)
-        .map(|w| format!("{} --{}--> {}", w.from, w.message, w.to.join(", ")))
+        .filter(|w| w.message.as_deref() == Some(name))
+        .map(graph::describe)
         .collect();
     if !users.is_empty() {
         exit(format!(
@@ -455,34 +613,41 @@ pub fn message_remove(name: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// `bonsai wire <from> <Message> <to …>`: `from` sends it to each of `to`.
-pub fn wire(from: &str, message: &str, to: &[String]) -> io::Result<()> {
+/// `bonsai wire` takes `<from> <Message> <to…>` between branches, or
+/// `<from> <to…>` when an edge is at one end. Message names are UpperCamel
+/// and branch and edge names snake_case, so the two can't be confused.
+fn split_wire_args(args: &[String]) -> (Option<&str>, &[String]) {
+    match args.split_first() {
+        Some((m, rest)) if is_message_name(m) => (Some(m.as_str()), rest),
+        _ => (None, args),
+    }
+}
+
+/// `bonsai wire <from> [<Message>] <to …>`.
+pub fn wire(from: &str, args: &[String]) -> io::Result<()> {
     require_tree("wire");
-    let cfg = load();
-    let is_branch = |n: &str| cfg.branches.iter().any(|b| b.name == n);
-    if !is_branch(from) {
-        exit(format!("no branch `{from}`"));
+    let (message, to) = split_wire_args(args);
+    if to.is_empty() {
+        usage(
+            "usage: bonsai wire <from> <Message> <to> [<to> …], or bonsai wire <from> <to> … with an edge",
+        );
     }
-    if !messages().iter().any(|m| m == message) {
+    let before = load();
+    if !before.is_branch(from) && before.edge(from).is_none() {
+        exit(format!("no branch or edge `{from}`"));
+    }
+    if let Some(m) = message
+        && !messages().iter().any(|x| x == m)
+    {
         exit(format!(
-            "no message `{message}` in {MESSAGES} (`bonsai message add {message}` makes one)"
+            "no message `{m}` in {MESSAGES} (`bonsai message add {m}` makes one)"
         ));
-    }
-    for t in to {
-        if !is_branch(t) {
-            exit(format!("no branch `{t}`"));
-        }
-        if t == from {
-            exit(format!(
-                "a branch can't send to itself; keep that in {from}'s own state"
-            ));
-        }
     }
     let mut doc = load_doc();
     let ws = wires(&mut doc);
     let existing = ws
         .iter_mut()
-        .find(|w| str_of(w, "from") == from && str_of(w, "message") == message);
+        .find(|w| str_of(w, "from") == from && message_of(w) == message);
     let added: Vec<String> = match existing {
         Some(w) => {
             let mut list = to_list(w);
@@ -494,37 +659,66 @@ pub fn wire(from: &str, message: &str, to: &[String]) -> io::Result<()> {
         None => {
             let mut t = Table::new();
             t.insert("from", value(from));
-            t.insert("message", value(message));
+            if let Some(m) = message {
+                t.insert("message", value(m));
+            }
             set_to_list(&mut t, to);
             ws.push(t);
             to.to_vec()
         }
     };
     if added.is_empty() {
-        println!("{from} already sends {message} to {}", to.join(", "));
+        println!("that's wired already");
         return Ok(());
     }
-    save_doc(&doc)?;
-    for t in &added {
-        add_arm(t, Some(message))?;
+    let after = graph::parse(&doc.to_string()).unwrap_or_else(|e| exit(e));
+    let report = graph::check(&after, &messages());
+    if !report.errors.is_empty() {
+        for e in &report.errors {
+            eprintln!("error: {e}");
+        }
+        exit("not wired");
     }
-    println!(
-        "{from} --{message}--> {}: send it from {from} with `out.send({message} {{ .. }})`",
-        added.join(", ")
-    );
+    save_doc(&doc)?;
+    reconcile_arms(&before, &after)?;
+    match message {
+        Some(m) => println!(
+            "{from} --{m}--> {}: send it from {from} with `out.send({m} {{ .. }})`",
+            added.join(", ")
+        ),
+        None if before.edge(from).is_some() => println!(
+            "{from} --> {}: what {from} receives arrives as `Input::{}(..)`",
+            added.join(", "),
+            graph::camel(from)
+        ),
+        None => println!(
+            "{from} --> {}: send from {from} with {}",
+            added.join(", "),
+            added
+                .iter()
+                .map(|e| format!("`out.to_{e}(..)`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
     sync_tree()
 }
 
-/// `bonsai unwire <from> <Message> [<to …>]`: all receivers when none named.
-pub fn unwire(from: &str, message: &str, to: &[String]) -> io::Result<()> {
+/// `bonsai unwire <from> [<Message>] [<to …>]`: all receivers when none named.
+pub fn unwire(from: &str, args: &[String]) -> io::Result<()> {
     require_tree("unwire");
+    let (message, to) = split_wire_args(args);
+    let before = load();
     let mut doc = load_doc();
     let ws = wires(&mut doc);
     let Some(i) = ws
         .iter()
-        .position(|w| str_of(w, "from") == from && str_of(w, "message") == message)
+        .position(|w| str_of(w, "from") == from && message_of(w) == message)
     else {
-        exit(format!("{from} isn't wired to send {message}"));
+        exit(match message {
+            Some(m) => format!("{from} isn't wired to send {m}"),
+            None => format!("{from} has no wire without a message"),
+        });
     };
     let w = ws.get_mut(i).expect("found above");
     let mut list = to_list(w);
@@ -533,7 +727,7 @@ pub fn unwire(from: &str, message: &str, to: &[String]) -> io::Result<()> {
     } else {
         for t in to {
             if !list.contains(t) {
-                exit(format!("{from} doesn't send {message} to {t}"));
+                exit(format!("{from} isn't wired to {t}"));
             }
         }
         list.retain(|t| !to.contains(t));
@@ -544,31 +738,33 @@ pub fn unwire(from: &str, message: &str, to: &[String]) -> io::Result<()> {
     } else {
         set_to_list(w, &list);
     }
-    save_doc(&doc)?;
-    for t in &dropped {
-        if !receives(&doc, t, message) {
-            remove_arm(t, Some(message))?;
-        }
-    }
-    let still = !list.is_empty();
-    println!(
-        "{from} no longer sends {message} to {}{}",
-        dropped.join(", "),
-        if still {
-            String::new()
-        } else {
-            format!("; take its `out.send({message} ..)` out of {from}")
-        }
-    );
+    let after = save_checked(&doc)?;
+    reconcile_arms(&before, &after)?;
+    let sender_note = match message {
+        Some(m) if list.is_empty() => format!("; take its `out.send({m} ..)` out of {from}"),
+        None if before.is_branch(from) => format!(
+            "; take its {} out of {from}",
+            dropped
+                .iter()
+                .map(|e| format!("`out.to_{e}(..)`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => String::new(),
+    };
+    println!("unwired {from} from {}{sender_note}", dropped.join(", "));
     sync_tree()
 }
 
 /// `bonsai rate <branch> <hz|off>`: tick the branch this many times a second.
 pub fn rate(branch: &str, hz: &str) -> io::Result<()> {
     require_tree("rate");
+    let before = load();
     let mut doc = load_doc();
-    let tables = branch_tables(&mut doc);
-    let Some(t) = tables.get_mut(branch).and_then(Item::as_table_mut) else {
+    let Some(t) = tables(&mut doc, "branch")
+        .get_mut(branch)
+        .and_then(Item::as_table_mut)
+    else {
         exit(format!("no branch `{branch}` in {CONFIG}"));
     };
     if hz == "off" {
@@ -576,8 +772,6 @@ pub fn rate(branch: &str, hz: &str) -> io::Result<()> {
             println!("{branch} has no rate");
             return Ok(());
         }
-        save_doc(&doc)?;
-        remove_arm(branch, None)?;
         println!("{branch} no longer ticks");
     } else {
         let Some(n) = hz.parse::<f64>().ok().filter(|n| *n > 0.0 && n.is_finite()) else {
@@ -590,14 +784,14 @@ pub fn rate(branch: &str, hz: &str) -> io::Result<()> {
         } else {
             t.insert("rate", value(n));
         }
-        save_doc(&doc)?;
-        add_arm(branch, None)?;
         println!("{branch} ticks {hz} times a second: `Input::Tick` in its process");
     }
+    let after = save_checked(&doc)?;
+    reconcile_arms(&before, &after)?;
     sync_tree()
 }
 
-/// `bonsai list`: the tree's branches and wires.
+/// `bonsai list`: the tree's branches, edges and wires.
 pub fn list() -> io::Result<()> {
     require_tree("list");
     let cargo = std::fs::read_to_string("Cargo.toml").unwrap_or_default();
@@ -627,12 +821,18 @@ pub fn list() -> io::Result<()> {
             }
         );
     }
+    if !cfg.edges.is_empty() {
+        println!("edges:");
+        for e in &cfg.edges {
+            println!("  {}  ({})", e.name, e.kind.summary());
+        }
+    }
     if cfg.wires.is_empty() {
         println!("wires: none yet (`bonsai wire <from> <Message> <to>`)");
     } else {
         println!("wires:");
         for w in &cfg.wires {
-            println!("  {} --{}--> {}", w.from, w.message, w.to.join(", "));
+            println!("  {}", graph::describe(w));
         }
     }
     let report = graph::check(&cfg, &messages());
@@ -650,21 +850,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn arms_match_their_message_only() {
-        assert!(is_input_arm(
-            "            Input::Beat(_beat) => {}",
-            Some("Beat")
-        ));
-        assert!(is_input_arm("Input::Beat(b) => {", Some("Beat")));
-        assert!(!is_input_arm("Input::BeatTwice(b) => {}", Some("Beat")));
-        assert!(is_input_arm("    Input::Tick => {}", None));
-        assert!(is_input_arm("Input::Tick | Input::Beat(_) => {}", None));
-        assert!(!is_input_arm("Input::TickTock(_) => {}", None));
+    fn arms_match_their_variant_only() {
+        assert!(is_input_arm("            Input::Beat(_beat) => {}", "Beat"));
+        assert!(is_input_arm("Input::Beat(b) => {", "Beat"));
+        assert!(!is_input_arm("Input::BeatTwice(b) => {}", "Beat"));
+        assert!(is_input_arm("    Input::Tick => {}", "Tick"));
+        assert!(is_input_arm("Input::Tick | Input::Beat(_) => {}", "Tick"));
+        assert!(!is_input_arm("Input::TickTock(_) => {}", "Tick"));
         assert_eq!(
-            arm(Some("RouteFollow")),
+            arm("RouteFollow"),
             "Input::RouteFollow(_route_follow) => {}"
         );
-        assert_eq!(arm(None), "Input::Tick => {}");
+        assert_eq!(arm("Tak"), "Input::Tak(_tak) => {}");
+        assert_eq!(arm("Tick"), "Input::Tick => {}");
+    }
+
+    #[test]
+    fn wire_args_split_on_the_message_name() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let a = args(&["Reading", "display", "log"]);
+        assert_eq!(split_wire_args(&a), (Some("Reading"), &a[1..]));
+        let a = args(&["atak"]);
+        assert_eq!(split_wire_args(&a), (None, &a[..]));
     }
 
     #[test]

@@ -37,6 +37,6 @@ mod tests {
     #[allow(unused_imports)] // what it sends, as its tests see it
     use crate::links::Msg;
 
-    // `bonsai link` and `bonsai rate` add a test here for each new input
+    // `bonsai link`/`rate` add a test per input here; `unlink` removes it unless edited
     // bonsai:input-test
 }

@@ -20,8 +20,10 @@ branch (`on_reading`, `on_tick`, …, in the `mod tests` at the bottom of its
 file): it hands the branch one such input and checks that it sends nothing.
 Change its last line to say what it should send. An input with no obvious
 value to start from (a custom edge's, or a message with a field of your own
-type) gets `todo!` and `#[ignore]` until you fill it in. `unlink` takes the
-test out with the arm.
+type) gets `todo!` and `#[ignore]` until you fill it in. Each sits between
+`// bonsai:test on_<input> begin <n>` and `… end` lines; `unlink` removes
+the block with the arm only while it's as bonsai wrote it. An edited test,
+or one from before the markers, is kept, with a note saying what to update.
 
 Make it with `setup`, give it an input and an empty `Out`, and read
 `out.sent()`: everything it sent, oldest first, as `Msg`s (one variant per

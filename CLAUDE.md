@@ -341,9 +341,15 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   one input → `assert!(out.sent().is_empty(), ..)`, a value from the
   message's fields via `message_fields`/`starting_value`, or `Packet::new`
   for a built-in edge; anything else `todo!` + `#[ignore]`), added above
-  `// bonsai:input-test` in the scaffold's `mod tests` (`add_test`; none
-  without the marker) and removed with its attributes (`remove_test`, a
-  note when it isn't the one bonsai wrote). `edge add` builds the table from `--key value` flags (the pure
+  `// bonsai:input-test` in the scaffold's `mod tests` (`with_test`, pure:
+  only inside `#[cfg(test)] mod tests` (`tests_module`), never a second
+  test by that name, none without the marker), wrapped in `// bonsai:test
+  on_<x> begin <hash>`/`end` lines (`test_hash`, FNV-1a of the trimmed
+  lines). `without_test` removes only such a block, only if its hash still
+  matches; an edited block (`KeptChanged`) or an unmarked test using the
+  input (`KeptUnmarked`, from before the markers) stays with a note saying
+  what to update; helpers or other modules' tests by that name are never
+  touched. `edge add` builds the table from `--key value` flags (the pure
   `edge_table`: `--reply`, repeatable `--join`, a flag followed by nothing or
   another flag refused with what it takes, `wants`) and saves only if
   `graph::parse` accepts it; an edge may be linked one way only;

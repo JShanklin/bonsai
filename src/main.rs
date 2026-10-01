@@ -1,4 +1,6 @@
+mod doctor;
 mod graph;
+mod sync;
 mod tools;
 mod top;
 mod tree;
@@ -2421,6 +2423,8 @@ fn print_help() {
     );
     println!("  bonsai sync            regenerate src/links.rs after editing bonsai.toml");
     println!("  bonsai list            the tree's branches and links, and any warnings");
+    println!("  bonsai doctor [--json] check the tree, read-only: graph, files, generated");
+    println!("                         code, tools; each problem with what to do");
     println!("  bonsai top [user@host|local] [--port N] [--once]");
     println!("                         watch a running tree: its branches, edges and log");
     println!("  bonsai update          refresh template crates and Cargo.lock");
@@ -2471,6 +2475,10 @@ fn main() -> io::Result<()> {
             tree::record(&rest)
         }
         ["sync"] => tree::sync(),
+        ["doctor", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
+            doctor::doctor(&rest)
+        }
         ["list"] => tree::list(),
         ["regrow"] => regrow(),
         ["update"] => update(),

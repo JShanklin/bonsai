@@ -49,6 +49,7 @@ cargo run -- record dir <folder>          # where each run's folder goes
 cargo run -- record keep_runs|keep_days|max_file_kb <n>   # retention (0: no limit)
 cargo run -- sync           # regenerate src/{bonsai,links,settings}.rs, branches/ and edges/mod.rs
 cargo run -- list           # branches, links, errors and warnings
+cargo run -- doctor [--json]   # read-only checks, each with a fix; exit 1 on an error
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
 cargo run -- top [user@host|local] [--port N] [--once]   # watch a running tree
 cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs, top/)
@@ -266,6 +267,19 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   (its `In`/`Out` used as `<T as Edge>::In`). Runtime types are written fully
   qualified, so a message can't shadow them; `Packet` and friends are also
   reserved message names (`tree::RESERVED`), and `serial` an edge/branch name.
+- **Sync plan and doctor.** `src/sync.rs`: `sync::plan(root)` works out
+  every file `bonsai sync` would create, change or remove (`Change`
+  before/after, a `label` for the `updated …` line; migrations included:
+  `[[wire]]`, `src/wiring.rs`, `#[macro_use]`, Cargo.toml deps), reading
+  only, refused (`Refused`) on config or graph errors or missing
+  branch/custom-edge files; `tree::sync_tree` applies it. `src/doctor.rs`:
+  `bonsai doctor [--json]`, read-only `Finding`s (`id` stable: tree, config,
+  graph, sources, generated, markers, toolchain.cargo/target/linker,
+  tools.<name>, deploy.address; `status` ok/skipped/warning/error;
+  optional `subject`, `fix`); stale generated files are the plan's changes;
+  exit 0 without errors (warnings and skips allowed), 1 with any, 2 usage.
+  Nothing is written, installed or contacted (rustup is asked which targets
+  are installed). Tests use `TEMPLATES`' host tree in temp folders.
 - **Graph commands** (`src/tree.rs`): `branch add` writes the scaffold
   (`templates/_branch/branch.rs`, `{{branch_name}}`/`{{BranchName}}` by plain
   replace) and an empty `[branch.x]`; `branch remove` also drops its links,

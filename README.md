@@ -142,6 +142,7 @@ bonsai link <from> <Message> <to> [<to> …]      from sends it to each (unlink 
 bonsai link <from> <to> [<to> …]                with an edge at one end: no message
 bonsai rate <branch> <hz|off>                   tick a branch this many times a second
 bonsai list                                     branches, links, warnings
+bonsai doctor [--json]                          check the tree (read-only) and say what to fix
 bonsai sync                                     regenerate src/links.rs after editing bonsai.toml
 bonsai top [user@host] [--once]                 watch a running tree, here or on a Pi
 bonsai update                                   refresh template crates and Cargo.lock

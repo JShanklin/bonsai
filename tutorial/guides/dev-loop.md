@@ -88,9 +88,17 @@ the tree's child, and a daemon that double-forks (its parent exits, so it
 would be left to the system) comes to `bonsai dev` instead, which runs as
 a subreaper for exactly that. Each is matched by its process id *and*
 start time, and signalled through a pidfd, so no other process is ever
-hit, even if an id is reused. If `bonsai dev` is killed with SIGKILL (so
-it can't clean up), Linux sends the tree SIGTERM, but not what the tree
-started; those end only if the tree takes them with it.
+hit, even if an id is reused.
+
+Even if `bonsai dev` itself is killed with SIGKILL (so it can't clean
+up), nothing is left running: a small helper it starts beside it
+(`bonsai __dev-guardian`, which you'll see in `ps`) notices, and stops the
+tree and everything it started the same way, SIGTERM and then SIGKILL
+after 5 s. It finds them by what it last saw and by `BONSAI_DEV_RUN`, set
+in the environment of everything `bonsai dev` starts (a process that
+clears its environment and leaves at the same moment can escape it). The
+helper exits with `bonsai dev`; if it's killed outright as well, the
+cleanup is up to you.
 
 Arguments after `--` go to the tree (`bonsai dev -- <args>`), as
 `cargo run -- <args>` would pass them.

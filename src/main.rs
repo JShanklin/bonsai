@@ -2493,6 +2493,7 @@ fn main() -> io::Result<()> {
             let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
             tree::sync(&rest)
         }
+        ["__dev-guardian", dev] => dev::guardian(dev),
         ["dev", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
             dev::dev(&rest)

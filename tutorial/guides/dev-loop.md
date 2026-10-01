@@ -74,9 +74,19 @@ another build before anything is restarted.
 
 Ctrl-C stops the tree (it gets Ctrl-C, as if you'd run it yourself), then
 `bonsai dev`. During a build, the build is stopped too, whatever it's doing:
-cargo and everything it started get SIGTERM, then SIGKILL after 2 s. A tree that doesn't stop within 5 s is killed. The tree runs
-in its own process group and, on Linux, is ended if `bonsai dev` is killed,
-so nothing is left running in the background.
+cargo and everything it started get SIGTERM, then SIGKILL after 2 s.
+
+The tree runs as a process group of its own, and everything it starts
+(a helper it spawns, a shell command) is in that group. Stopping it, for a
+restart or for Ctrl-C, stops the whole group: Ctrl-C (or SIGTERM, for a
+restart) to every process in it, then SIGKILL after 5 s to whatever's
+left, and only then does a new build start. When the tree exits by
+itself, whatever it left running in its group goes the same way.
+
+The limits: a process that leaves the group on purpose (`setsid`, a
+daemon) is out of reach. If `bonsai dev` is killed with SIGKILL (so it
+can't clean up), Linux sends the tree SIGTERM, but not what the tree
+started; those end only if the tree takes them with it.
 
 Arguments after `--` go to the tree (`bonsai dev -- <args>`), as
 `cargo run -- <args>` would pass them.

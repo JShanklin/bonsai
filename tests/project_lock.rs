@@ -274,3 +274,180 @@ fn a_command_that_cant_get_the_lock_in_time_changes_nothing_and_says_why() {
     assert_eq!(read(&root, "bonsai.toml"), toml);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Every file in the tree but the lock (which a command may create) and
+/// build output, with its bytes.
+fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(dir: &Path, root: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = e.path();
+            let rel = path.strip_prefix(root).unwrap().to_path_buf();
+            if rel == Path::new(".bonsai.lock") || rel == Path::new("target") {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// A tree as an older bonsai left it: a link from `a` to `b`, written as a
+/// `[[wire]]` table (the comments that mention `[[link]]` stay as they are).
+fn legacy_tree(name: &str) -> PathBuf {
+    let root = tree(name);
+    for args in [
+        &["branch", "add", "a"][..],
+        &["branch", "add", "b"],
+        &["message", "add", "Ping"],
+        &["link", "a", "Ping", "b"],
+    ] {
+        assert!(run(&root, args).status.success(), "{args:?}");
+    }
+    let toml = read(&root, "bonsai.toml");
+    let legacy: String = toml
+        .split_inclusive('\n')
+        .map(|l| {
+            if l.trim() == "[[link]]" {
+                l.replacen("[[link]]", "[[wire]]", 1)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    assert_ne!(legacy, toml);
+    std::fs::write(root.join("bonsai.toml"), legacy).unwrap();
+    root
+}
+
+#[test]
+fn a_refused_sync_leaves_a_legacy_tree_byte_for_byte() {
+    let root = legacy_tree("legacy-refused");
+    // And a graph error: a link carrying a message that doesn't exist.
+    let mut toml = read(&root, "bonsai.toml");
+    toml.push_str("\n[[wire]]\nfrom = \"a\"\nmessage = \"Nope\"\nto = [\"b\"]\n");
+    std::fs::write(root.join("bonsai.toml"), toml).unwrap();
+    let before = snapshot(&root);
+    let sync = run(&root, &["sync"]);
+    let err = String::from_utf8_lossy(&sync.stderr);
+    assert_eq!(sync.status.code(), Some(1), "{err}");
+    assert!(err.contains("no message `Nope`"), "{err}");
+    assert!(
+        !String::from_utf8_lossy(&sync.stdout).contains("[[link]] now"),
+        "said it migrated"
+    );
+    assert!(!root.join(".bonsai-sync").exists(), "a journal was made");
+    assert!(snapshot(&root) == before, "a refused sync changed the tree");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_legacy_tree_migrates_as_previewed() {
+    let root = legacy_tree("legacy-preview");
+    let legacy = read(&root, "bonsai.toml");
+    let before = snapshot(&root);
+    let dry = run(&root, &["sync", "--dry-run"]);
+    let preview = String::from_utf8_lossy(&dry.stdout).to_string();
+    assert!(dry.status.success(), "{preview}");
+    assert!(
+        preview.contains("changed  bonsai.toml")
+            && preview.contains("-[[wire]]")
+            && preview.contains("+[[link]]"),
+        "{preview}"
+    );
+    assert!(snapshot(&root) == before, "a dry run changed the tree");
+    let sync = run(&root, &["sync"]);
+    let said = String::from_utf8_lossy(&sync.stdout);
+    assert!(sync.status.success(), "{said}");
+    assert!(said.contains("[[wire]] tables are [[link]] now"), "{said}");
+    // What the preview showed, and nothing else: the headers renamed.
+    let migrated: String = legacy
+        .split_inclusive('\n')
+        .map(|l| {
+            if l.trim() == "[[wire]]" {
+                l.replacen("[[wire]]", "[[link]]", 1)
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    assert_eq!(read(&root, "bonsai.toml"), migrated);
+    let after = snapshot(&root);
+    let changed: Vec<&PathBuf> = after
+        .keys()
+        .filter(|p| before.get(*p) != after.get(*p))
+        .collect();
+    assert_eq!(changed, [Path::new("bonsai.toml")], "{preview}");
+    assert!(!root.join(".bonsai-sync").exists());
+    let again = run(&root, &["sync", "--dry-run"]);
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains("in step"),
+        "{}",
+        String::from_utf8_lossy(&again.stdout)
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_interrupted_migration_is_finished_by_the_next_sync() {
+    let root = legacy_tree("legacy-interrupted");
+    // A second change besides the migration, so it stops part way.
+    let toml = read(&root, "bonsai.toml");
+    std::fs::write(
+        root.join("bonsai.toml"),
+        toml.replace("[branch.a]", "[branch.a]\nrate = 2"),
+    )
+    .unwrap();
+    let pause = root.join("pause");
+    let mut sync = bonsai(&root, &["sync"]);
+    sync.env("BONSAI_TEST_PAUSE_APPLY", &pause);
+    let mut sync = sync.spawn().unwrap();
+    await_file(&pause.with_extension("paused"));
+    sync.kill().unwrap();
+    sync.wait().unwrap();
+    assert!(
+        root.join(".bonsai-sync").exists(),
+        "the interrupted sync left no mark"
+    );
+    let finish = run(&root, &["sync"]);
+    let said = String::from_utf8_lossy(&finish.stdout);
+    assert!(
+        finish.status.success() && said.contains("finishing a sync that didn't finish"),
+        "{said}{}",
+        String::from_utf8_lossy(&finish.stderr)
+    );
+    assert!(!root.join(".bonsai-sync").exists());
+    let toml = read(&root, "bonsai.toml");
+    assert!(!toml.lines().any(|l| l.trim() == "[[wire]]"), "{toml}");
+    assert!(read(&root, "src/links.rs").contains("Tick"));
+    assert!(run(&root, &["doctor"]).status.success());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_modern_tree_still_syncs_as_before() {
+    let root = tree("modern");
+    assert!(run(&root, &["branch", "add", "sensor"]).status.success());
+    let toml = read(&root, "bonsai.toml");
+    std::fs::write(
+        root.join("bonsai.toml"),
+        toml.replace("[branch.sensor]", "[branch.sensor]\nrate = 2"),
+    )
+    .unwrap();
+    let sync = run(&root, &["sync"]);
+    let said = String::from_utf8_lossy(&sync.stdout);
+    assert!(sync.status.success(), "{said}");
+    assert!(
+        said.contains("updated") && !said.contains("[[wire]]"),
+        "{said}"
+    );
+    assert!(read(&root, "src/links.rs").contains("Tick"));
+    assert!(read(&root, "bonsai.toml").contains("[branch.sensor]\nrate = 2"));
+    assert!(!root.join(".bonsai-sync").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}

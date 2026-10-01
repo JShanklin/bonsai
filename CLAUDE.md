@@ -20,8 +20,10 @@ vocabulary (nutrient, sap, tap/release, feed/starve, graft/snip, roots,
 paths) is gone; `renamed()` in `main.rs` points its commands at their
 replacements, and the commands refuse its trees. Links were once called
 wires: `renamed()` maps `wire`/`unwire`, and `require_tree` renames an older
-tree's `[[wire]]` headers to `[[link]]` (`tree::with_links`); `graph::parse`
-refuses `[[wire]]`. A new tree has no branches
+tree's `[[wire]]` headers to `[[link]]` (`tree::with_links`), except for
+`bonsai sync`, which only checks the tree and locks it: its `sync::plan`
+carries the rename as one more change, written through the journal and only
+if the whole plan is accepted; `graph::parse` refuses `[[wire]]`. A new tree has no branches
 (there's no built-in heartbeat: it logs `INFO bonsai: running`, and any
 branch can have a `rate`).
 

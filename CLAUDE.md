@@ -339,8 +339,13 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `adopted` (any child it didn't start itself, `STARTED`), reaped by
   `reap_adopted`; each signalled by `signal_exactly`: pidfd_open, start
   time rechecked from /proc, pidfd_send_signal) and starts the new one as a `Group` (its
-  own process group, `PR_SET_PDEATHSIG` on Linux: the leader only, so
-  descendants of a SIGKILLed `dev` aren't covered). A program that exits
+  own process group, `PR_SET_PDEATHSIG` on Linux, and `MARK`
+  (`BONSAI_DEV_RUN=<dev pid>:<start>`) in its environment). If `dev` is
+  SIGKILLed, the guardian (`bonsai __dev-guardian <dev pid>`, its own group,
+  started by `dev()`, told the leaders over a pipe by `watch`, dismissed with
+  `bye`) sees the pipe close and stops what `guarded` found at its last look
+  (every 100 ms) plus what's `marked` now: SIGTERM, SIGKILL after
+  `STOP_WAIT`, each by `signal_exactly`. A program that exits
   by itself has its group's leftovers stopped the same way before
   `Exited`. A failed build keeps the old one; a save
   during a build rebuilds before restarting. SIGINT/SIGTERM set `STOP`:

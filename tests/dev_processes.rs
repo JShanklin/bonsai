@@ -138,6 +138,16 @@ fn wait_until(what: &str, done: impl Fn() -> bool) {
     }
 }
 
+/// The guardian `bonsai dev` (pid `dev`) started, if it's running.
+fn guardian_of(dev: u32) -> Option<u32> {
+    let want = format!("__dev-guardian\0{dev}\0");
+    std::fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
+        let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        (String::from_utf8_lossy(&cmdline).contains(&want) && running(pid)).then_some(pid)
+    })
+}
+
 /// SIGKILL whatever of `pids` is left, so a failed test leaves nothing.
 fn sweep(pids: &[u32]) {
     for &pid in pids {
@@ -154,6 +164,7 @@ fn what_left_the_group_goes_on_restart_and_on_ctrl_c() {
     let mut stranger = Command::new("sleep").arg("1000").spawn().unwrap();
     let mut dev = tree.dev();
     let first = tree.generation(1);
+    let guardian = guardian_of(dev.id()).expect("no guardian");
     // The orphan's parent exited: `bonsai dev` adopted it.
     wait_until("the orphan's adoption", || {
         stat(first[3]).is_some_and(|(_, p)| p == dev.id())
@@ -190,6 +201,37 @@ fn what_left_the_group_goes_on_restart_and_on_ctrl_c() {
         "left running after Ctrl-C: {gone:?}\n{}",
         tree.log()
     );
+    assert!(
+        running(stranger.id()),
+        "a process bonsai dev didn't start was signalled"
+    );
+    stranger.kill().unwrap();
+    stranger.wait().unwrap();
+    // Told it's done, the guardian goes too.
+    wait_until("the guardian's exit", || !running(guardian));
+}
+
+#[test]
+fn killing_bonsai_dev_outright_leaves_nothing_running() {
+    let tree = Tree::new("killed");
+    let mut stranger = Command::new("sleep").arg("1000").spawn().unwrap();
+    let mut dev = tree.dev();
+    let first = tree.generation(1);
+    let guardian = guardian_of(dev.id()).expect("no guardian");
+    dev.kill().unwrap(); // SIGKILL: it can't clean up
+    dev.wait().unwrap();
+    // The guardian does: SIGTERM (ignored by all three), SIGKILL after 5 s.
+    let until = Instant::now() + Duration::from_secs(20);
+    while first.iter().any(|&p| running(p)) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let left: Vec<u32> = first.iter().copied().filter(|&p| running(p)).collect();
+    sweep(&first);
+    assert!(
+        left.is_empty(),
+        "left running after bonsai dev was killed: {left:?}"
+    );
+    wait_until("the guardian's exit", || !running(guardian));
     assert!(
         running(stranger.id()),
         "a process bonsai dev didn't start was signalled"

@@ -16,8 +16,9 @@
 //! What left the group goes too: a `setsid` child by its parentage, and a
 //! double-forked orphan because `bonsai dev` is the subreaper that adopts
 //! it (`Options::adopt`); each signalled by pidfd after its start time is
-//! checked. If `bonsai dev` is SIGKILLed, Linux sends the program (only)
-//! SIGTERM.
+//! checked. If `bonsai dev` is SIGKILLed, its guardian (a process of its
+//! own, `guardian`) stops all of that: what it saw at its last look, and
+//! whatever still carries this run's `MARK` in its environment.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -196,7 +197,7 @@ pub struct Options {
 /// and everything it starts. The group is signalled only while its leader
 /// is ours and not yet reaped (its exit is seen without reaping it), so its
 /// id can't have passed to anyone else's processes. A descendant that leaves
-/// the group (`setsid`, a daemon) is out of reach.
+/// the group (`setsid`, a daemon) is found by `running` instead.
 struct Group {
     child: Child,
 }
@@ -224,9 +225,13 @@ impl Group {
                 });
             }
         }
+        cmd.env(MARK, mark());
         let child = cmd.spawn()?;
         if let Ok(mut s) = STARTED.lock() {
             s.push(child.id());
+        }
+        if let Some(p) = proc_stat(child.id()) {
+            watch(|w| w.push((p.pid, p.start)));
         }
         Ok(Group { child })
     }
@@ -318,6 +323,8 @@ impl Group {
         if let Ok(mut s) = STARTED.lock() {
             s.retain(|&p| p != self.child.id());
         }
+        let pid = self.child.id();
+        watch(|w| w.retain(|&(p, _)| p != pid));
         (killed, status)
     }
 }
@@ -409,6 +416,195 @@ static STARTED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
 
 fn started(pid: u32) -> bool {
     STARTED.lock().is_ok_and(|s| s.contains(&pid))
+}
+
+// ---------------------------------------------------------------------------
+// The guardian: if `bonsai dev` dies without stopping what it started
+// ---------------------------------------------------------------------------
+
+/// The guardian's end of a pipe (when there's a guardian), and the group
+/// leaders it's to watch: (pid, start time).
+static GUARDIAN: std::sync::Mutex<Option<std::process::ChildStdin>> = std::sync::Mutex::new(None);
+static WATCHED: std::sync::Mutex<Vec<(u32, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// In the environment of everything `bonsai dev` starts, and so (unless a
+/// process clears it) of everything those start: `<dev's pid>:<its start
+/// time>`. It finds a descendant whose parentage is gone (an orphan reparented
+/// to init when `bonsai dev` died) and names this run of `bonsai dev` only.
+const MARK: &str = "BONSAI_DEV_RUN";
+
+fn mark() -> String {
+    let me = std::process::id();
+    let start = proc_stat(me).map_or(0, |p| p.start);
+    format!("{me}:{start}")
+}
+
+/// The processes in `table` whose environment holds `MARK=mark`.
+fn marked(table: &[Proc], mark: &str, me: u32) -> Vec<Proc> {
+    let want = format!("{MARK}={mark}");
+    table
+        .iter()
+        .filter(|p| p.pid != me && !p.zombie)
+        .filter(|p| {
+            std::fs::read(format!("/proc/{}/environ", p.pid))
+                .is_ok_and(|env| env.split(|&b| b == 0).any(|v| v == want.as_bytes()))
+        })
+        .copied()
+        .collect()
+}
+
+/// Change the leaders being watched, and tell the guardian.
+fn watch(change: impl FnOnce(&mut Vec<(u32, u64)>)) {
+    use std::io::Write;
+    let Ok(mut watched) = WATCHED.lock() else {
+        return;
+    };
+    change(&mut watched);
+    if let Ok(mut guardian) = GUARDIAN.lock()
+        && let Some(pipe) = guardian.as_mut()
+    {
+        let list: Vec<String> = watched.iter().map(|(p, s)| format!("{p}:{s}")).collect();
+        let _ = writeln!(pipe, "watch {}", list.join(" "));
+    }
+}
+
+/// Start the guardian: `bonsai __dev-guardian <this pid>`, in a group of its
+/// own (Ctrl-C isn't for it), reading what to watch from a pipe.
+fn start_guardian() -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new(std::env::current_exe()?)
+        .args(["__dev-guardian", &std::process::id().to_string()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .process_group(0)
+        .spawn()?;
+    if let Ok(mut s) = STARTED.lock() {
+        s.push(child.id());
+    }
+    if let Ok(mut g) = GUARDIAN.lock() {
+        *g = child.stdin.take();
+    }
+    watch(|_| {});
+    Ok(())
+}
+
+/// Tell the guardian `bonsai dev` stopped everything itself: it can go.
+fn dismiss_guardian() {
+    use std::io::Write;
+    if let Ok(mut g) = GUARDIAN.lock()
+        && let Some(mut pipe) = g.take()
+    {
+        let _ = writeln!(pipe, "bye");
+    }
+}
+
+/// What the guardian would stop: what the watched leaders started (their
+/// groups, by start time no earlier than the leader's, and descendants),
+/// and the orphans `dev` adopted, with theirs.
+fn guarded(table: &[Proc], leaders: &[(u32, u64)], dev: u32, me: u32) -> Vec<Proc> {
+    let mut out: Vec<Proc> = Vec::new();
+    let mut add = |ps: Vec<Proc>| {
+        for p in ps {
+            if p.pid != me && !out.iter().any(|o| o.pid == p.pid) {
+                out.push(p);
+            }
+        }
+    };
+    for &(leader, start) in leaders {
+        if table.iter().any(|p| p.pid == leader && p.start == start) {
+            add(descendants(table, &[leader]));
+        }
+        add(table
+            .iter()
+            .filter(|p| p.pgrp == leader && p.start >= start && !p.zombie)
+            .copied()
+            .collect());
+    }
+    let orphans: Vec<u32> = table
+        .iter()
+        .filter(|p| p.ppid == dev && p.pid != me)
+        .map(|p| p.pid)
+        .collect();
+    add(descendants(table, &orphans));
+    out
+}
+
+/// `bonsai __dev-guardian <dev's pid>`: watch what `bonsai dev` says it's
+/// running; if its pipe closes without a `bye` (it was killed), stop all of
+/// that: SIGTERM, then SIGKILL after `STOP_WAIT`, each by pid and start time.
+pub fn guardian(dev: &str) -> ! {
+    use std::io::BufRead;
+    let dev: u32 = dev.parse().unwrap_or(0);
+    // SAFETY: getppid has no preconditions.
+    if unsafe { libc::getppid() } as u32 != dev {
+        std::process::exit(0); // `bonsai dev` is gone already
+    }
+    let mark = format!("{dev}:{}", proc_stat(dev).map_or(0, |p| p.start));
+    // SAFETY: setting dispositions for this process.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+    }
+    let me = std::process::id();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    let mut leaders: Vec<(u32, u64)> = Vec::new();
+    let mut known: Vec<Proc> = Vec::new();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) if line == "bye" => std::process::exit(0),
+            Ok(line) => {
+                if let Some(list) = line.strip_prefix("watch") {
+                    leaders = list
+                        .split_whitespace()
+                        .filter_map(|w| {
+                            let (p, s) = w.split_once(':')?;
+                            Some((p.parse().ok()?, s.parse().ok()?))
+                        })
+                        .collect();
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        known = guarded(&procs(), &leaders, dev, me);
+    }
+    // `bonsai dev` is gone without a word: what it ran goes now. An orphan
+    // it adopted since the last look has passed to init by now: its mark
+    // still names it.
+    let mut targets = known;
+    let table = procs();
+    for p in guarded(&table, &leaders, dev, me)
+        .into_iter()
+        .chain(marked(&table, &mark, me))
+    {
+        if !targets.iter().any(|t| t.pid == p.pid) {
+            targets.push(p);
+        }
+    }
+    let alive = |ps: &[Proc]| -> Vec<Proc> {
+        ps.iter()
+            .filter(|p| proc_stat(p.pid).is_some_and(|now| now.start == p.start && !now.zombie))
+            .copied()
+            .collect()
+    };
+    for p in &targets {
+        signal_exactly(p, libc::SIGTERM);
+    }
+    let until = Instant::now() + STOP_WAIT;
+    while !alive(&targets).is_empty() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for p in alive(&targets) {
+        signal_exactly(&p, libc::SIGKILL);
+    }
+    std::process::exit(0);
 }
 
 /// Orphans `bonsai dev` adopted (as a subreaper: ones whose parent died, a
@@ -728,6 +924,12 @@ pub fn dev(args: &[String]) -> ! {
     // parent died) come to `bonsai dev`, so they go with the program.
     // SAFETY: prctl on this process.
     opts.adopt = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } == 0;
+    // If `bonsai dev` is killed outright, the guardian stops what it ran.
+    if let Err(e) = start_guardian() {
+        eprintln!(
+            "bonsai dev: no guardian ({e}): if bonsai dev is killed, what it started may be left running"
+        );
+    }
     // SAFETY: the handler only stores to an atomic.
     unsafe {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
@@ -736,6 +938,7 @@ pub fn dev(args: &[String]) -> ! {
     run(Path::new("."), &opts, &STOP, &mut |n| {
         eprintln!("bonsai dev: {}", n.text());
     });
+    dismiss_guardian();
     std::process::exit(0);
 }
 

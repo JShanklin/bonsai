@@ -189,7 +189,7 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   counts after the error, so older `bonsai top`s still read it; top shows
   failed + discarded as **lost**. `mod top`:
   `run()` serves them on `BONSAI_TOP` (default `127.0.0.1:7777`, a bare port,
-  or `off`; a bind failure is one WARN) as `stats::render` text every 500 ms:
+  or `off`; a bind failure is one WARN) as `stats::render` text every `REPORT_EVERY` (500 ms; 50 ms under `cfg(test)`):
   `bonsai-top 1\t…` then `branch`/`edge`/`link`/`sys`/`record`/`log` rows
   (tab-separated) and `end`; `record` is `record::status()` (`off`,
   `starting`, `on`, `partial`, `unavailable`; then the folder or why; then

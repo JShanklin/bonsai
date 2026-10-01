@@ -2401,6 +2401,14 @@ pub mod top {
     /// Log lines a new client gets from before it connected.
     const BACKLOG: u64 = 200;
 
+    /// How often a connected `bonsai top` gets a report; faster in the
+    /// runtime's own tests, which wait on what the reports say.
+    pub const REPORT_EVERY: Duration = if cfg!(test) {
+        Duration::from_millis(50)
+    } else {
+        Duration::from_millis(500)
+    };
+
     /// Where to listen, from `BONSAI_TOP`'s value; None: don't.
     pub fn address(setting: Option<&str>) -> Option<String> {
         match setting.map(str::trim) {
@@ -2434,7 +2442,7 @@ pub mod top {
                 tokio::spawn(async move {
                     let (_, now) = log::since(0);
                     let mut next = now.saturating_sub(BACKLOG);
-                    let mut every = tokio::time::interval(Duration::from_millis(500));
+                    let mut every = tokio::time::interval(REPORT_EVERY);
                     loop {
                         every.tick().await;
                         let (lines, now) = log::since(next);

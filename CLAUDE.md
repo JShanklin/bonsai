@@ -332,8 +332,13 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   SIGKILL after `BUILD_STOP_WAIT` 2 s, reap; `Options::cargo` swaps in a
   fake for the tests), and
   only on success stops the old program's whole group (`Group::stop`:
-  SIGTERM to the group, SIGKILL after `STOP_WAIT` 5 s to whatever's left,
-  per /proc's pgrp; then reap) and starts the new one as a `Group` (its
+  SIGTERM, SIGKILL after `STOP_WAIT` 5 s to whatever's left, then reap; what
+  counts is `Group::running`: the group's members, the leader's
+  `descendants` by /proc parent links (a `setsid` child), and with
+  `Options::adopt` (`dev()` sets `PR_SET_CHILD_SUBREAPER`) the orphans it
+  `adopted` (any child it didn't start itself, `STARTED`), reaped by
+  `reap_adopted`; each signalled by `signal_exactly`: pidfd_open, start
+  time rechecked from /proc, pidfd_send_signal) and starts the new one as a `Group` (its
   own process group, `PR_SET_PDEATHSIG` on Linux: the leader only, so
   descendants of a SIGKILLed `dev` aren't covered). A program that exits
   by itself has its group's leftovers stopped the same way before

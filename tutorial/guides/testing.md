@@ -15,6 +15,14 @@ cargo test          # a host tree
 
 ## One branch
 
+`bonsai link` and `bonsai rate` write a test for each input they give a
+branch (`on_reading`, `on_tick`, …, in the `mod tests` at the bottom of its
+file): it hands the branch one such input and checks that it sends nothing.
+Change its last line to say what it should send. An input with no obvious
+value to start from (a custom edge's, or a message with a field of your own
+type) gets `todo!` and `#[ignore]` until you fill it in. `unlink` takes the
+test out with the arm.
+
 Make it with `setup`, give it an input and an empty `Out`, and read
 `out.sent()`: everything it sent, oldest first, as `Msg`s (one variant per
 link, named after the sender and what it sends: `WatchdogAlarm`,

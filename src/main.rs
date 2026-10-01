@@ -1382,6 +1382,9 @@ mod tests {
         ));
         assert!(read("src/branches/logger.rs").contains("Input::Reading(_reading) => {}"));
         assert!(read("src/branches/sensor.rs").contains("            Input::Tick => {}\n"));
+        // Each new input gets a test that hands it over and checks what's sent.
+        assert!(read("src/branches/display.rs").contains("    #[test]\n    fn on_reading() {\n"));
+        assert!(read("src/branches/sensor.rs").contains("    fn on_tick() {\n"));
         let links = read("src/links.rs");
         assert!(links.contains("impl Sends<Reading> for Out"), "{links}");
         assert!(
@@ -1455,6 +1458,7 @@ mod tests {
         assert!(!read("src/branches/display.rs").contains("Input::Reading"));
         tree::rate("sensor", "off").unwrap();
         assert!(!read("src/branches/sensor.rs").contains("Input::Tick"));
+        assert!(!read("src/branches/sensor.rs").contains("fn on_tick"));
         tree::record(&args(&["errors", "off"])).unwrap();
         tree::record(&args(&["dir", "logs"])).unwrap();
         tree::message_remove("Reading").unwrap();

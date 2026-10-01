@@ -88,8 +88,19 @@ fn scenario_ticks_until_stopped() {
     // A slow or failing disk, and a burst of records every tick.
     record::fault::SLOW_MS.store(var("RT_SLOW_MS"), std::sync::atomic::Ordering::Relaxed);
     record::fault::FAIL.store(var("RT_FAIL") == 1, std::sync::atomic::Ordering::Relaxed);
+    // Kinds (a bit each, in `Kind` order) whose files can't be opened, and
+    // whose writes fail from tick RT_WRITE_FAIL_AT on.
+    record::fault::OPEN_FAIL.store(
+        var("RT_OPEN_FAIL") as u8,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let write_fail = var("RT_WRITE_FAIL") as u8;
+    let write_fail_when = std::env::var("RT_WRITE_FAIL_WHEN").unwrap_or_default();
     let burst = var("RT_BURST");
     run_tree(ticking(stop, move |n| {
+        if write_fail != 0 && Path::new(&write_fail_when).exists() {
+            record::fault::WRITE_FAIL.store(write_fail, std::sync::atomic::Ordering::Relaxed);
+        }
         for i in 0..burst {
             record!("burst {n}.{i}");
         }
@@ -759,4 +770,174 @@ fn bonsai_top_hears_whether_the_run_is_being_recorded() {
     b.signal(libc::SIGTERM);
     let _ = b.wait(Duration::from_secs(10));
     assert!(row.starts_with("record\tunavailable\tcan't open "), "{row}");
+}
+
+/// The `record` rows a running tree serves to `bonsai top`, up to and
+/// including the first `done` accepts.
+fn record_rows_until(port: u16, done: impl Fn(&str) -> bool) -> Vec<String> {
+    use std::io::{BufRead, BufReader};
+    let started = std::time::Instant::now();
+    let mut rows = Vec::new();
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "no such row: {rows:?}"
+        );
+        let Ok(stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else { break };
+            if line.starts_with("record\t") {
+                rows.push(line.clone());
+                if done(&line) {
+                    return rows;
+                }
+            }
+        }
+    }
+}
+
+/// The scenario, running with `env` and BONSAI_TOP on a free port: the
+/// tree, its port, and the folder its runs go in.
+fn health_tree(name: &str, env: &[(&str, &str)]) -> (super::support::Running, u16, PathBuf) {
+    let dir = scratch(name);
+    let port = super::support::free_port();
+    let top = format!("127.0.0.1:{port}");
+    let mut all = vec![
+        ("RT_DIR", dir.to_str().unwrap()),
+        ("BONSAI_TOP", top.as_str()),
+    ];
+    all.extend_from_slice(env);
+    (spawn(SCENARIO, &all), port, dir)
+}
+
+/// Stop it; it carried on throughout, whatever its run logs did.
+fn stop_tree(tree: super::support::Running) {
+    tree.signal(libc::SIGTERM);
+    let ran = tree.wait(Duration::from_secs(10));
+    assert_eq!(ran.code, Some(0), "the tree didn't carry on: {ran:?}");
+}
+
+/// Wait until `path` holds `text`.
+fn await_text(path: &Path, text: &str) {
+    let started = std::time::Instant::now();
+    while !std::fs::read_to_string(path).is_ok_and(|t| t.contains(text)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "no {text:?} in {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Run the scenario with `env` until its first record row `done` accepts;
+/// the rows up to there, and its run folder.
+fn rows_of(
+    name: &str,
+    env: &[(&str, &str)],
+    done: impl Fn(&str) -> bool,
+) -> (Vec<String>, PathBuf) {
+    let (tree, port, dir) = health_tree(name, env);
+    let rows = record_rows_until(port, done);
+    stop_tree(tree);
+    (rows, runs(&dir).pop().unwrap_or_default())
+}
+
+#[test]
+fn run_logs_are_on_only_once_every_file_is_open() {
+    // Slow writes hold START up: meanwhile it's starting, not on.
+    let (rows, folder) = rows_of(
+        "health-on",
+        &[("RT_KINDS", "events,panics"), ("RT_SLOW_MS", "700")],
+        |r| !r.starts_with("record\tstarting"),
+    );
+    assert!(rows[0].starts_with("record\tstarting\t"), "{rows:?}");
+    assert_eq!(
+        rows.last().unwrap(),
+        &format!("record\ton\t{}", folder.display())
+    );
+}
+
+#[test]
+fn run_logs_none_of_which_open_are_unavailable_and_say_why() {
+    let (rows, folder) = rows_of(
+        "health-none",
+        &[("RT_KINDS", "events,panics"), ("RT_OPEN_FAIL", "3")],
+        |r| !r.starts_with("record\tstarting"),
+    );
+    assert_eq!(
+        rows.last().unwrap(),
+        &format!(
+            "record\tunavailable\tnothing can be written in {}\tevents\tcan't open events.log: injected failure\tpanics\tcan't open panics.log: injected failure",
+            folder.display()
+        )
+    );
+}
+
+#[test]
+fn run_logs_one_of_which_fails_to_open_are_partial_and_the_rest_carry_on() {
+    let (tree, port, dir) = health_tree(
+        "health-partial",
+        &[("RT_KINDS", "events,errors"), ("RT_OPEN_FAIL", "4")],
+    );
+    let rows = record_rows_until(port, |r| !r.starts_with("record\tstarting"));
+    let folder = runs(&dir).pop().unwrap();
+    assert_eq!(
+        rows.last().unwrap(),
+        &format!(
+            "record\tpartial\t{}\terrors\tcan't open errors.log: injected failure",
+            folder.display()
+        )
+    );
+    // The file that opened is written as usual.
+    await_text(&folder.join("events.log"), "launch 2");
+    stop_tree(tree);
+    let events = read(folder.join("events.log"));
+    assert!(events.contains(" END SIGTERM"), "{events}");
+    assert!(!folder.join("errors.log").exists());
+}
+
+#[test]
+fn a_file_that_fails_later_turns_on_into_partial() {
+    let scratchpad = scratch("health-later-when");
+    let when = scratchpad.join("fail-now");
+    let (tree, port, dir) = health_tree(
+        "health-later",
+        &[
+            ("RT_KINDS", "events,panics"),
+            ("RT_WRITE_FAIL", "1"),
+            ("RT_WRITE_FAIL_WHEN", when.to_str().unwrap()),
+            ("RT_BURST", "1"),
+        ],
+    );
+    let on = record_rows_until(port, |r| r.starts_with("record\ton\t"));
+    let folder = runs(&dir).pop().unwrap();
+    assert_eq!(
+        on.last().unwrap(),
+        &format!("record\ton\t{}", folder.display())
+    );
+    // Now every write to events.log fails.
+    std::fs::write(&when, "").unwrap();
+    let rows = record_rows_until(port, |r| r.starts_with("record\tpartial"));
+    assert_eq!(
+        rows.last().unwrap(),
+        &format!(
+            "record\tpartial\t{}\tevents\tcan't write events.log: injected failure",
+            folder.display()
+        )
+    );
+    stop_tree(tree);
+    // The other file goes on to the end.
+    assert!(read(folder.join("panics.log")).contains(" END SIGTERM"));
+}
+
+#[test]
+fn run_logs_turned_off_say_so() {
+    let (rows, _) = rows_of("health-off", &[("BONSAI_RECORD", "off")], |r| {
+        r.starts_with("record\toff")
+    });
+    assert_eq!(rows.last().unwrap(), "record\toff\tBONSAI_RECORD=off");
 }

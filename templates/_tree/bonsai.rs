@@ -625,7 +625,7 @@ pub mod record {
     use std::io::{BufWriter, Write};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering::Relaxed;
-    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
+    use std::sync::atomic::{AtomicBool, AtomicU64};
     use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -680,6 +680,16 @@ pub mod record {
     const KINDS: [Kind; 4] = [Kind::Events, Kind::Panics, Kind::Errors, Kind::Edges];
 
     impl Kind {
+        /// `events`, as `[record]` names it.
+        pub fn name(self) -> &'static str {
+            match self {
+                Kind::Events => "events",
+                Kind::Panics => "panics",
+                Kind::Errors => "errors",
+                Kind::Edges => "edges",
+            }
+        }
+
         fn file(self) -> &'static str {
             match self {
                 Kind::Events => "events.log",
@@ -759,33 +769,49 @@ pub mod record {
     /// Set by `end`: why the tree stopped, and who to tell once END is out.
     static ENDING: Mutex<Option<(String, oneshot::Sender<()>)>> = Mutex::new(None);
 
-    // What the recorder is doing, for `bonsai top`: off, starting (the
-    // writer is making the run's folder), on, or unavailable; and the folder,
-    // or why not.
+    // What the recorder is doing, for `bonsai top`: off (and why), starting
+    // (until every file it was asked for has been opened, or failed to),
+    // on (every one is being written), partial (some are, and which aren't),
+    // or unavailable (none are, and why). State, detail and the failed kinds
+    // change together, under one lock.
     const OFF: u8 = 0;
     const STARTING: u8 = 1;
     const ON: u8 = 2;
-    const UNAVAILABLE: u8 = 3;
-    static STATE: AtomicU8 = AtomicU8::new(OFF);
-    static DETAIL: Mutex<String> = Mutex::new(String::new());
+    const PARTIAL: u8 = 3;
+    const UNAVAILABLE: u8 = 4;
+
+    /// The recorder's state; its folder or why not; each kind asked for that
+    /// isn't being written (`events`), and why.
+    type Status = (u8, String, Vec<(&'static str, String)>);
+    static STATUS: Mutex<Status> = Mutex::new((OFF, String::new(), Vec::new()));
 
     fn set_status(state: u8, detail: String) {
-        if let Ok(mut d) = DETAIL.lock() {
-            *d = detail;
-        }
-        STATE.store(state, Relaxed);
+        set_status_with(state, detail, Vec::new());
     }
 
-    /// `off`, `starting`, `on` or `unavailable`, and the run's folder (on)
-    /// or why not.
-    pub fn status() -> (&'static str, String) {
-        let state = match STATE.load(Relaxed) {
+    fn set_status_with(state: u8, detail: String, failed: Vec<(&'static str, String)>) {
+        if let Ok(mut s) = STATUS.lock() {
+            *s = (state, detail, failed);
+        }
+    }
+
+    /// `off`, `starting`, `on`, `partial` or `unavailable`; the run's folder
+    /// (on, partial) or why not; and each kind that isn't being written, with
+    /// why.
+    pub fn status() -> (&'static str, String, Vec<(&'static str, String)>) {
+        let (state, detail, failed) =
+            STATUS
+                .lock()
+                .map(|s| s.clone())
+                .unwrap_or((OFF, String::new(), Vec::new()));
+        let state = match state {
             STARTING => "starting",
             ON => "on",
+            PARTIAL => "partial",
             UNAVAILABLE => "unavailable",
             _ => "off",
         };
-        (state, DETAIL.lock().map(|d| d.clone()).unwrap_or_default())
+        (state, detail, failed)
     }
     static STARTED: OnceLock<Instant> = OnceLock::new();
 
@@ -797,6 +823,10 @@ pub mod record {
         pub static SLOW_MS: AtomicU64 = AtomicU64::new(0);
         /// Each write fails.
         pub static FAIL: AtomicBool = AtomicBool::new(false);
+        /// Opening these kinds' files fails (a bit per `Kind`, in its order).
+        pub static OPEN_FAIL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+        /// Writing these kinds' files fails (a bit per `Kind`).
+        pub static WRITE_FAIL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
         /// With `BONSAI_RT_PAUSE=<path>`, stop between making the run's
         /// folder and locking it: say so by creating `<path>.paused`, and
@@ -939,6 +969,11 @@ pub mod record {
         max_bytes: u64,
         /// This run's lock, held until the writer ends.
         lock: Option<File>,
+        /// The kinds asked for, and why each that isn't being written isn't.
+        wanted: Vec<Kind>,
+        broken: [Option<String>; 4],
+        /// Set once every file asked for has been tried.
+        opened: bool,
     }
 
     impl Writer {
@@ -1042,10 +1077,15 @@ pub mod record {
                 );
             }
             self.folder = Some(folder.clone());
-            set_status(ON, folder.display().to_string());
+            self.wanted = kinds.to_vec();
             for &kind in kinds {
                 let path = folder.join(kind.file());
-                match OpenOptions::new().create(true).append(true).open(&path) {
+                let opened = if cfg!(test) && fault_open_fail(kind) {
+                    Err(std::io::Error::other("injected failure"))
+                } else {
+                    OpenOptions::new().create(true).append(true).open(&path)
+                };
+                match opened {
                     Ok(file) => {
                         self.files[kind as usize] = Some(BufWriter::new(file));
                         self.sizes[kind as usize] = 0;
@@ -1058,10 +1098,41 @@ pub mod record {
                             "bonsai: run logs: can't open {}: {e}",
                             path.display()
                         );
+                        self.broken[kind as usize] =
+                            Some(format!("can't open {}: {e}", kind.file()));
                     }
                 }
             }
             self.flush(true);
+            // Every file has been tried (and START written, or not): say so.
+            self.opened = true;
+            self.report();
+        }
+
+        /// Set the recorder's state from which of the files asked for are
+        /// being written.
+        fn report(&self) {
+            let folder = self
+                .folder
+                .as_ref()
+                .map(|f| f.display().to_string())
+                .unwrap_or_default();
+            let failed: Vec<(&'static str, String)> = self
+                .wanted
+                .iter()
+                .filter_map(|&k| Some((k.name(), self.broken[k as usize].clone()?)))
+                .collect();
+            if failed.is_empty() {
+                set_status(ON, folder);
+            } else if failed.len() == self.wanted.len() {
+                set_status_with(
+                    UNAVAILABLE,
+                    format!("nothing can be written in {folder}"),
+                    failed,
+                );
+            } else {
+                set_status_with(PARTIAL, folder, failed);
+            }
         }
 
         /// Note lines dropped since the last note, before the next one.
@@ -1092,7 +1163,7 @@ pub mod record {
                     std::thread::sleep(Duration::from_millis(ms));
                 }
             }
-            let result = if cfg!(test) && fault_fail() {
+            let result = if cfg!(test) && (fault_fail() || fault_write_fail(kind)) {
                 Err(std::io::Error::other("injected failure"))
             } else {
                 file.write_all(text.as_bytes())
@@ -1143,8 +1214,9 @@ pub mod record {
             FAILED.fetch_add(1, Relaxed);
             self.files[kind as usize] = None;
             OPEN[kind as usize].store(false, Relaxed);
-            if self.files.iter().all(Option::is_none) {
-                set_status(UNAVAILABLE, format!("can't write {}: {e}", kind.file()));
+            self.broken[kind as usize] = Some(format!("can't write {}: {e}", kind.file()));
+            if self.opened {
+                self.report();
             }
             let _ = writeln!(
                 std::io::stderr(),
@@ -1214,6 +1286,26 @@ pub mod record {
 
     #[cfg(not(test))]
     fn fault_fail() -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn fault_open_fail(kind: Kind) -> bool {
+        fault::OPEN_FAIL.load(Relaxed) & (1 << kind as u8) != 0
+    }
+
+    #[cfg(not(test))]
+    fn fault_open_fail(_: Kind) -> bool {
+        false
+    }
+
+    #[cfg(test)]
+    fn fault_write_fail(kind: Kind) -> bool {
+        fault::WRITE_FAIL.load(Relaxed) & (1 << kind as u8) != 0
+    }
+
+    #[cfg(not(test))]
+    fn fault_write_fail(_: Kind) -> bool {
         false
     }
 
@@ -2015,8 +2107,9 @@ pub mod stats {
         /// from, message (empty for an edge's link), to, deliveries
         pub links: Vec<(&'static str, &'static str, &'static [&'static str], u64)>,
         pub sys: Option<Sys>,
-        /// The recorder's state, and its folder or why not.
-        pub record: (&'static str, String),
+        /// The recorder's state, its folder or why not, and the kinds that
+        /// aren't being written, with why.
+        pub record: (&'static str, String, Vec<(&'static str, String)>),
     }
 
     /// A link in bonsai.toml: from, message (`""` when an edge is at one
@@ -2199,7 +2292,13 @@ pub mod stats {
                 sys.mem_available_kb
             );
         }
-        o += &format!("record\t{}\t{}\n", s.record.0, clean(&s.record.1));
+        // Each kind not being written (and why) goes after the detail: an
+        // older `bonsai top` reads the first two fields only.
+        o += &format!("record\t{}\t{}", s.record.0, clean(&s.record.1));
+        for (kind, why) in &s.record.2 {
+            o += &format!("\t{kind}\t{}", clean(why));
+        }
+        o += "\n";
         for line in logs {
             o += &format!("log\t{}\n", clean(line));
         }
@@ -2233,7 +2332,11 @@ pub mod stats {
                     mem_total_kb: 4000,
                     mem_available_kb: 3000,
                 }),
-                record: ("on", "logs/2026-10-01_10-00-00".into()),
+                record: (
+                    "partial",
+                    "logs/2026-10-01_10-00-00".into(),
+                    vec![("errors", "can't open errors.log: denied".into())],
+                ),
             };
             assert_eq!(
                 render(&s, &["a line".into()]),
@@ -2242,7 +2345,7 @@ pub mod stats {
                  edge\tnet\tretrying\t1\t2\t0\t1\tbind x\t3\t1\t0\n\
                  link\tsensor\tReading\tnet,log\t3\n\
                  sys\t2048\t30\t1\t12\t4000\t3000\n\
-                 record\ton\tlogs/2026-10-01_10-00-00\n\
+                 record\tpartial\tlogs/2026-10-01_10-00-00\terrors\tcan't open errors.log: denied\n\
                  log\ta line\n\
                  end\n"
             );

@@ -1235,6 +1235,7 @@ mod tests {
             record: Some(Record {
                 state: "unavailable".into(),
                 detail: "can't make a run folder in /ro: read-only".into(),
+                failed: Vec::new(),
             }),
             ..Default::default()
         }));

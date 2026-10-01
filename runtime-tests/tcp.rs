@@ -12,6 +12,27 @@ use tokio::time::timeout;
 use super::support::{fds_to_myself, free_port, open_fds};
 use crate::bonsai::{EdgeOut, Event, Framed, Framing, Packet, Tcp, TcpConfig, spawn_edge};
 
+/// Whether a process still holds the server's end of the connection from
+/// `client` (IPv4): in /proc/net/tcp with an inode. A socket closed with
+/// data the kernel is still trying to deliver stays listed, with inode 0.
+fn server_holds(server: SocketAddr, client: SocketAddr) -> bool {
+    let hex = |a: SocketAddr| match a {
+        SocketAddr::V4(v4) => format!(
+            "{:08X}:{:04X}",
+            u32::from_ne_bytes(v4.ip().octets()),
+            v4.port()
+        ),
+        SocketAddr::V6(_) => unreachable!("the tests listen on IPv4"),
+    };
+    let (local, remote) = (hex(server), hex(client));
+    std::fs::read_to_string("/proc/net/tcp")
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|l| l.split_whitespace().collect::<Vec<_>>())
+        .any(|f| f.len() > 9 && f[1] == local && f[2] == remote && f[9] != "0")
+}
+
 /// A TCP server edge on a free port: its address, where what it receives
 /// arrives, and where to send.
 fn server(
@@ -263,25 +284,20 @@ async fn a_client_that_stops_reading_holds_up_no_one() {
     let s = crate::bonsai::stats::edge("rt_slow");
     let discarded = s.discarded.load(std::sync::atomic::Ordering::Relaxed);
     assert!(discarded > 0, "nothing counted as discarded");
-    let mut buf = vec![0u8; 1 << 20];
-    let (mut read, mut last) = (0, String::from("nothing yet"));
-    let started = std::time::Instant::now();
-    let closed = timeout(Duration::from_secs(10), async {
-        loop {
-            match slow.read(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                // What reached its socket before the cut.
-                Ok(n) => {
-                    read += n;
-                    last = format!("{n} bytes at {:?}", started.elapsed());
-                }
-            }
+    // Disconnected: the server let go of it. (What the client sees next is
+    // up to the kernels: the server's closed socket still holds what the
+    // client never read, and a kernel may give up on delivering that, or
+    // the end behind it, before the client reads again.)
+    let client = slow.local_addr().unwrap();
+    let let_go = timeout(Duration::from_secs(10), async {
+        while server_holds(addr, client) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await;
     assert!(
-        closed.is_ok(),
-        "the stalled client was never disconnected: it read {read} bytes, the last {last}"
+        let_go.is_ok(),
+        "the server still holds the stalled client's connection"
     );
 }
 

@@ -264,16 +264,25 @@ async fn a_client_that_stops_reading_holds_up_no_one() {
     let discarded = s.discarded.load(std::sync::atomic::Ordering::Relaxed);
     assert!(discarded > 0, "nothing counted as discarded");
     let mut buf = vec![0u8; 1 << 20];
+    let (mut read, mut last) = (0, String::from("nothing yet"));
+    let started = std::time::Instant::now();
     let closed = timeout(Duration::from_secs(10), async {
         loop {
             match slow.read(&mut buf).await {
                 Ok(0) | Err(_) => return,
-                Ok(_) => {} // what reached its socket before the cut
+                // What reached its socket before the cut.
+                Ok(n) => {
+                    read += n;
+                    last = format!("{n} bytes at {:?}", started.elapsed());
+                }
             }
         }
     })
     .await;
-    assert!(closed.is_ok(), "the stalled client was never disconnected");
+    assert!(
+        closed.is_ok(),
+        "the stalled client was never disconnected: it read {read} bytes, the last {last}"
+    );
 }
 
 #[tokio::test]

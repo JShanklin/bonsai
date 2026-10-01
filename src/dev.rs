@@ -8,10 +8,13 @@
 //! files are synced only with `--sync`; otherwise a stale tree isn't built.
 //! What's watched is the tree's sources (`src/**/*.rs`, bonsai.toml,
 //! Cargo.toml, .cargo/config.toml, build.rs), never target/, logs or
-//! Cargo.lock, and what `--sync` writes isn't a change. Ctrl-C stops the
-//! program (it gets SIGINT, as if run directly) and then `bonsai dev`; the
-//! program runs in its own process group and, on Linux, is ended if `bonsai
-//! dev` itself is killed, so nothing is left running.
+//! Cargo.lock, and what `--sync` writes isn't a change. Builds and the
+//! program each run as a process group of their own (`Group`), stopped as a
+//! whole: on a restart (SIGTERM), Ctrl-C (the program gets SIGINT, as if run
+//! directly), a cancelled build, or when the program exits by itself (what
+//! it left behind), with SIGKILL for whatever's left after the grace period.
+//! A process that leaves its group (`setsid`) is out of reach; if `bonsai
+//! dev` is SIGKILLed, Linux sends the program (only) SIGTERM.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -220,6 +223,11 @@ impl Group {
         })
     }
 
+    /// The leader's pid, which is also the group's id.
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Whether the leader has exited (not reaped: its id stays ours).
     fn leader_exited(&self) -> bool {
         // SAFETY: waitid on our own child, with WNOWAIT (it stays a zombie).
@@ -374,40 +382,13 @@ fn build(root: &Path, cargo: &Path, stop: &AtomicBool) -> Built {
     executable(&out).map_or(Built::Failed, Built::Program)
 }
 
-/// Start the program in its own process group (so Ctrl-C reaches `bonsai
-/// dev`, which stops it in order) that ends with `bonsai dev` on Linux.
-fn start(program: &Path, root: &Path, args: &[String]) -> std::io::Result<Child> {
-    use std::os::unix::process::CommandExt;
+/// Start the program as its own process group (so Ctrl-C reaches `bonsai
+/// dev`, which stops it in order, and everything it starts can be stopped
+/// with it).
+fn start(program: &Path, root: &Path, args: &[String]) -> std::io::Result<Group> {
     let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(root).process_group(0);
-    #[cfg(target_os = "linux")]
-    // SAFETY: prctl is async-signal-safe, and nothing else runs between fork and exec.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
-            Ok(())
-        });
-    }
-    cmd.spawn()
-}
-
-/// Ask `child` to stop with `signal`; kill it after `STOP_WAIT`. True when
-/// it had to be killed.
-fn stop_child(child: &mut Child, signal: i32) -> bool {
-    // SAFETY: kill on a pid we started and haven't reaped.
-    unsafe {
-        libc::kill(child.id() as i32, signal);
-    }
-    let until = Instant::now() + STOP_WAIT;
-    while Instant::now() < until {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-    true
+    cmd.args(args).current_dir(root);
+    Group::spawn(&mut cmd)
 }
 
 /// Wait for the sources to change from `base` and then settle; the new
@@ -416,7 +397,7 @@ fn stop_child(child: &mut Child, signal: i32) -> bool {
 fn next_change(
     root: &Path,
     base: &Snapshot,
-    running: &mut Option<Child>,
+    running: &mut Option<Group>,
     stop: &AtomicBool,
     note: &mut dyn FnMut(Note),
 ) -> Option<Snapshot> {
@@ -424,11 +405,15 @@ fn next_change(
         if stop.load(Ordering::SeqCst) {
             return None;
         }
-        if let Some(child) = running
-            && let Ok(Some(status)) = child.try_wait()
+        // It ended by itself: whatever it left running in its group goes
+        // too (SIGTERM, then SIGKILL), before it's reported.
+        if running.as_ref().is_some_and(Group::leader_exited)
+            && let Some(group) = running.take()
         {
-            note(Note::Exited(status.to_string()));
-            *running = None;
+            let (_, status) = group.stop(libc::SIGTERM, STOP_WAIT);
+            note(Note::Exited(
+                status.map_or_else(|| "unknown".to_string(), |s| s.to_string()),
+            ));
         }
         let now = snapshot(root);
         if now != *base {
@@ -455,7 +440,7 @@ fn next_change(
 /// The loop: build and run, then rebuild and restart on every change, until
 /// `stop` is set. `note` hears what happens.
 pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(Note)) {
-    let mut running: Option<Child> = None;
+    let mut running: Option<Group> = None;
     let mut base = snapshot(root);
     note(Note::Watching);
     let mut first = true;
@@ -543,10 +528,13 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
         if snapshot(root) != base {
             continue;
         }
-        if let Some(mut old) = running.take() {
-            note(Note::Stopping(old.id()));
-            if stop_child(&mut old, libc::SIGTERM) {
-                note(Note::Killed(old.id()));
+        // The old program and everything it started, gone before the new
+        // one starts.
+        if let Some(old) = running.take() {
+            let pid = old.id();
+            note(Note::Stopping(pid));
+            if old.stop(libc::SIGTERM, STOP_WAIT).0 {
+                note(Note::Killed(pid));
             }
         }
         match start(&program, root, &opts.args) {
@@ -560,10 +548,11 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
             ))),
         }
     }
-    if let Some(mut child) = running.take()
-        && stop_child(&mut child, libc::SIGINT)
-    {
-        note(Note::Killed(child.id()));
+    if let Some(group) = running.take() {
+        let pid = group.id();
+        if group.stop(libc::SIGINT, STOP_WAIT).0 {
+            note(Note::Killed(pid));
+        }
     }
     note(Note::Done);
 }
@@ -1032,7 +1021,7 @@ exit 3
         let fake = Fake::new("stall-later");
         let looping = start_loop(&fake);
         looping.saw("start", |n| matches!(n, Note::Started(_)));
-        let app = fake.pid("app1.pid");
+        let (app, app_child) = (fake.pid("app1.pid"), fake.pid("app1-child.pid"));
         fake.mode("stall");
         fake.edit(1);
         wait_until(Duration::from_secs(20), "stalled build", || {
@@ -1049,6 +1038,10 @@ exit 3
             "the build outlived bonsai dev"
         );
         assert!(!running(app), "the program outlived bonsai dev");
+        assert!(
+            !running(app_child),
+            "what the program started outlived bonsai dev"
+        );
     }
 
     #[test]
@@ -1068,13 +1061,63 @@ exit 3
         });
         assert!(running(app), "a failed build stopped the program");
         assert_eq!(looping.count(|n| matches!(n, Note::Started(_))), 1);
+        let app_child = fake.pid("app1-child.pid");
         looping.stop();
-        assert!(!running(app));
+        assert!(!running(app) && !running(app_child));
         assert!(
             running(stranger.id()),
             "a process bonsai dev didn't start was signalled"
         );
         stranger.kill().unwrap();
         stranger.wait().unwrap();
+    }
+
+    #[test]
+    fn a_restart_ends_the_old_program_and_all_it_started_before_the_new_one() {
+        let fake = Fake::new("restart");
+        let looping = start_loop(&fake);
+        looping.saw("start", |n| matches!(n, Note::Started(_)));
+        let (old, old_child) = (fake.pid("app1.pid"), fake.pid("app1-child.pid"));
+        fake.edit(1);
+        wait_until(Duration::from_secs(30), "restart", || {
+            looping.count(|n| matches!(n, Note::Started(_))) == 2
+        });
+        // The new one looked when it started: the old one's child (which
+        // ignores SIGTERM) was already gone.
+        let report = fake.dir.join("app2-saw-old");
+        wait_until(Duration::from_secs(20), "the new program's report", || {
+            std::fs::read_to_string(&report).is_ok_and(|r| r.ends_with('\n'))
+        });
+        let saw = std::fs::read_to_string(&report).unwrap();
+        assert_eq!(saw.trim(), "gone");
+        assert!(!running(old) && !running(old_child));
+        assert_eq!(
+            looping.count(|n| *n == Note::Killed(old)),
+            1,
+            "its child took SIGKILL"
+        );
+        let (new, new_child) = (fake.pid("app2.pid"), fake.pid("app2-child.pid"));
+        assert!(running(new) && running(new_child));
+        looping.stop();
+        assert!(
+            !running(new) && !running(new_child),
+            "shutdown left the program's child"
+        );
+    }
+
+    #[test]
+    fn a_program_that_ends_by_itself_leaves_nothing_running() {
+        let fake = Fake::new("exits");
+        let looping = start_loop(&fake);
+        looping.saw("start", |n| matches!(n, Note::Started(_)));
+        let (app, app_child) = (fake.pid("app1.pid"), fake.pid("app1-child.pid"));
+        std::fs::write(fake.dir.join("exit1"), "").unwrap();
+        looping.saw(
+            "exit",
+            |n| matches!(n, Note::Exited(how) if how.contains('3')),
+        );
+        assert!(!running(app));
+        assert!(!running(app_child), "the program's child outlived it");
+        looping.stop();
     }
 }

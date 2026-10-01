@@ -325,9 +325,13 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   the group id stays ours until reaped); `stop` → SIGTERM to the group,
   SIGKILL after `BUILD_STOP_WAIT` 2 s, reap; `Options::cargo` swaps in a
   fake for the tests), and
-  only on success stops the old program (SIGTERM, SIGKILL after
-  `STOP_WAIT` 5 s) and starts the new one in its own process group with
-  `PR_SET_PDEATHSIG` (Linux). A failed build keeps the old one; a save
+  only on success stops the old program's whole group (`Group::stop`:
+  SIGTERM to the group, SIGKILL after `STOP_WAIT` 5 s to whatever's left,
+  per /proc's pgrp; then reap) and starts the new one as a `Group` (its
+  own process group, `PR_SET_PDEATHSIG` on Linux: the leader only, so
+  descendants of a SIGKILLed `dev` aren't covered). A program that exits
+  by itself has its group's leftovers stopped the same way before
+  `Exited`. A failed build keeps the old one; a save
   during a build rebuilds before restarting. SIGINT/SIGTERM set `STOP`:
   the program gets SIGINT, then the loop ends. `run` reports `Note`s; the
   ignored `dev_loop_end_to_end` test drives it on `target/dev-loop/tree`.

@@ -215,7 +215,7 @@ fn check_graph(root: &Path, cfg: &crate::graph::Config, out: &mut Vec<Finding>) 
                 let (table, add) = match dir {
                     "branches" => (
                         format!("[branch.{name}]"),
-                        format!("`bonsai branch add {name}` (keeps the file)"),
+                        format!("add `[branch.{name}]` to {CONFIG}, then `bonsai sync`"),
                     ),
                     _ => (
                         format!("a custom [edge.{name}]"),

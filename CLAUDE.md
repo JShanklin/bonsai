@@ -291,7 +291,9 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `retarget`, `regrow` (which keeps the lock file through its wipe) and
   `dev --sync` (plan + apply) too. A waiter says once who holds it (the
   holder writes `cmd (pid N)` into the file), waits `lock::wait()`
-  (`BONSAI_LOCK_WAIT`, default 10 s), then exits 1 having changed nothing.
+  (`BONSAI_LOCK_WAIT`, default 10 s), then exits 1 having changed nothing
+  (`LockError::Busy`; `LockError::Failed` when the lock file can't be opened
+  or locked at all).
   `sync --dry-run`, `doctor` and `dev`'s plan read under `read_consistent`
   (a shared lock; never creates the file; reads again if a writer appeared
   meanwhile); doctor says "couldn't read the tree in one piece" when it
@@ -325,6 +327,13 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `watched` files: `src/**/*.rs`, bonsai.toml, Cargo.toml,
   .cargo/config.toml, build.rs; never target/, logs, Cargo.lock, dotfiles),
   waits `SETTLE` (0.3 s) of quiet, then `sync::plan` (errors → `Refused`,
+  read with the lock only tried, `Duration::ZERO`: a build is `pending` from
+  the start and each settled change until it's tried with the lock had;
+  `Busy` → `Waiting` once, retried by `next_change`'s `until` after
+  `LOCK_RETRY` 50 ms doubling to `LOCK_RETRY_MAX` 1 s (edits, the program and
+  `STOP` still seen to meanwhile), `StillWaiting` once past `lock::wait()`;
+  `Failed` → `LockFailed` once, then nothing until the next change;
+  `tests/dev_lock.rs`;
   stale → `Stale` unless `--sync`, whose writes are re-snapshotted so they
   aren't a change), `cargo build --message-format=json-render-diagnostics`
   (`--target host-tuple` on a Pi tree; the program from `executable`; run

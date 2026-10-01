@@ -61,6 +61,26 @@ It never writes your files unless you ask: run `bonsai sync` yourself (the
 next build follows), or start it as `bonsai dev --sync` to sync on every
 change. The bonsai commands (`link`, `rate`, …) sync anyway.
 
+## When another command is changing the tree
+
+Commands that change a tree take turns ([troubleshooting](troubleshooting.md)).
+When one is busy with the tree (a `bonsai link` in another terminal, a
+`bonsai sync`), `bonsai dev` waits for it before it builds, and builds by
+itself as soon as it's done: no need to save again. The tree that's running
+keeps running meanwhile, and edits you make while it waits are in the build:
+
+```
+bonsai dev: waiting for `bonsai sync (pid 3539)` to finish changing the tree…
+bonsai dev: `bonsai sync (pid 3539)` still holds the tree after 10s; the build starts as soon as it lets go
+bonsai dev: building…
+```
+
+It never gives up waiting (the second line comes once, after
+`BONSAI_LOCK_WAIT`, 10 s), and Ctrl-C still stops it at once. When the lock
+can't be taken at all (`.bonsai.lock` can't be opened: permissions, a
+read-only folder), waiting won't help, so it says why once and builds
+nothing until you've fixed that and saved.
+
 ## What it watches
 
 Your sources: `src/**/*.rs`, `bonsai.toml`, `Cargo.toml`,

@@ -13,8 +13,11 @@
 //! whole: on a restart (SIGTERM), Ctrl-C (the program gets SIGINT, as if run
 //! directly), a cancelled build, or when the program exits by itself (what
 //! it left behind), with SIGKILL for whatever's left after the grace period.
-//! A process that leaves its group (`setsid`) is out of reach; if `bonsai
-//! dev` is SIGKILLed, Linux sends the program (only) SIGTERM.
+//! What left the group goes too: a `setsid` child by its parentage, and a
+//! double-forked orphan because `bonsai dev` is the subreaper that adopts
+//! it (`Options::adopt`); each signalled by pidfd after its start time is
+//! checked. If `bonsai dev` is SIGKILLed, Linux sends the program (only)
+//! SIGTERM.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -184,6 +187,9 @@ pub struct Options {
     pub args: Vec<String>,
     /// What builds it: `cargo`, unless a test says otherwise.
     pub cargo: Option<PathBuf>,
+    /// `bonsai dev` is the subreaper of what it starts: orphans it adopts
+    /// (a daemon's double fork) are the program's, and go with it.
+    pub adopt: bool,
 }
 
 /// A process `bonsai dev` started as the leader of its own process group,
@@ -218,9 +224,11 @@ impl Group {
                 });
             }
         }
-        Ok(Group {
-            child: cmd.spawn()?,
-        })
+        let child = cmd.spawn()?;
+        if let Ok(mut s) = STARTED.lock() {
+            s.push(child.id());
+        }
+        Ok(Group { child })
     }
 
     /// The leader's pid, which is also the group's id.
@@ -243,61 +251,190 @@ impl Group {
         }
     }
 
-    /// Send `signal` to every process in the group.
-    fn signal(&self, signal: i32) {
+    /// What's still running of what it started: the group's members, the
+    /// leader's descendants (one that left the group with `setsid` is still
+    /// its child), and, with `adopt`, the orphans `bonsai dev` adopted.
+    fn running(&self, adopt: bool) -> Vec<Proc> {
+        let table = procs();
+        let pgid = self.child.id();
+        let mut out = descendants(&table, &[pgid]);
+        for p in &table {
+            if p.pgrp == pgid && !p.zombie && !out.iter().any(|o| o.pid == p.pid) {
+                out.push(*p);
+            }
+        }
+        if adopt {
+            for p in adopted(&table) {
+                if !out.iter().any(|o| o.pid == p.pid) {
+                    out.push(p);
+                }
+            }
+        }
+        out
+    }
+
+    /// Send `signal` to the group, and to each of `running` exactly.
+    fn signal(&self, running: &[Proc], signal: i32) {
         // SAFETY: killpg on the group whose leader we hold unreaped.
         unsafe {
             libc::killpg(self.child.id() as i32, signal);
         }
+        for p in running {
+            signal_exactly(p, signal);
+        }
     }
 
-    /// Whether anything in the group is still running (a zombie isn't).
-    fn alive(&self) -> bool {
-        !members(self.child.id()).is_empty()
-    }
-
-    /// Stop the whole group: `first` (SIGTERM, or SIGINT for Ctrl-C), then,
-    /// whatever's left after `grace`, SIGKILL; then reap the leader. Returns
-    /// whether it took SIGKILL, and how the leader ended.
-    fn stop(mut self, first: i32, grace: Duration) -> (bool, Option<std::process::ExitStatus>) {
-        self.signal(first);
+    /// Stop everything it started: `first` (SIGTERM, or SIGINT for Ctrl-C),
+    /// then, whatever's left after `grace`, SIGKILL; then reap the leader.
+    /// With `adopt`, the orphans `bonsai dev` adopted go too. Returns whether
+    /// it took SIGKILL, and how the leader ended.
+    fn stop(
+        mut self,
+        first: i32,
+        grace: Duration,
+        adopt: bool,
+    ) -> (bool, Option<std::process::ExitStatus>) {
+        self.signal(&self.running(adopt), first);
         let until = Instant::now() + grace;
-        while self.alive() && Instant::now() < until {
+        while !self.running(adopt).is_empty() && Instant::now() < until {
+            if adopt {
+                reap_adopted();
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
-        let killed = self.alive();
+        let left = self.running(adopt);
+        let killed = !left.is_empty();
         if killed {
-            self.signal(libc::SIGKILL);
+            self.signal(&left, libc::SIGKILL);
             let until = Instant::now() + Duration::from_secs(2);
-            while self.alive() && Instant::now() < until {
+            while !self.running(adopt).is_empty() && Instant::now() < until {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        (killed, self.child.wait().ok())
+        if adopt {
+            reap_adopted();
+        }
+        let status = self.child.wait().ok();
+        if let Ok(mut s) = STARTED.lock() {
+            s.retain(|&p| p != self.child.id());
+        }
+        (killed, status)
     }
 }
 
-/// The processes in process group `pgid` that are still running (zombies
-/// left out), from /proc.
-fn members(pgid: u32) -> Vec<u32> {
+/// A process as /proc shows it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Proc {
+    pid: u32,
+    ppid: u32,
+    pgrp: u32,
+    zombie: bool,
+    /// When it started (clock ticks since boot): with the pid, which process
+    /// this is, whatever the pid comes to name later.
+    start: u64,
+}
+
+/// `pid`'s entry in /proc, if it has one.
+fn proc_stat(pid: u32) -> Option<Proc> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `pid (comm) state ppid pgrp … starttime …`; comm may hold spaces and
+    // parens, so fields are counted from the last `)`.
+    let rest = &stat[stat.rfind(')')? + 1..];
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    Some(Proc {
+        pid,
+        zombie: *f.first()? == "Z",
+        ppid: f.get(1)?.parse().ok()?,
+        pgrp: f.get(2)?.parse().ok()?,
+        start: f.get(19)?.parse().ok()?,
+    })
+}
+
+/// Every process /proc shows.
+fn procs() -> Vec<Proc> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
     };
     entries
         .flatten()
         .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
-        .filter(|pid| {
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-                return false;
-            };
-            // `pid (comm) state ppid pgrp …`; comm may hold spaces and parens.
-            let Some(rest) = stat.rfind(')').map(|at| &stat[at + 1..]) else {
-                return false;
-            };
-            let fields: Vec<&str> = rest.split_whitespace().collect();
-            fields.len() > 2 && fields[0] != "Z" && fields[2] == pgid.to_string()
-        })
+        .filter_map(proc_stat)
         .collect()
+}
+
+/// The running processes descended from `roots` (them included), by their
+/// parent links in `table`.
+fn descendants(table: &[Proc], roots: &[u32]) -> Vec<Proc> {
+    let mut out: Vec<Proc> = Vec::new();
+    let mut todo: Vec<u32> = roots.to_vec();
+    while let Some(pid) = todo.pop() {
+        for p in table.iter().filter(|p| p.pid == pid || p.ppid == pid) {
+            if !out.iter().any(|o| o.pid == p.pid) {
+                if p.pid != pid {
+                    todo.push(p.pid);
+                }
+                out.push(*p);
+            }
+        }
+    }
+    out.retain(|p| !p.zombie);
+    out
+}
+
+/// Signal exactly the process `p` was: through a pidfd (which names that
+/// process, not its pid), and only if it still started when `p` did.
+fn signal_exactly(p: &Proc, signal: i32) {
+    // SAFETY: pidfd_open, pidfd_send_signal and close on our own descriptor.
+    unsafe {
+        let fd = libc::syscall(libc::SYS_pidfd_open, p.pid as libc::pid_t, 0) as i32;
+        if fd < 0 {
+            return; // gone already
+        }
+        if proc_stat(p.pid).is_some_and(|now| now.start == p.start) {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                fd,
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            );
+        }
+        libc::close(fd);
+    }
+}
+
+/// The pids `bonsai dev` started itself (group leaders, the guardian): its
+/// other children are orphans it adopted as a subreaper.
+static STARTED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn started(pid: u32) -> bool {
+    STARTED.lock().is_ok_and(|s| s.contains(&pid))
+}
+
+/// Orphans `bonsai dev` adopted (as a subreaper: ones whose parent died, a
+/// daemon's double fork) and everything they started.
+fn adopted(table: &[Proc]) -> Vec<Proc> {
+    let me = std::process::id();
+    let roots: Vec<u32> = table
+        .iter()
+        .filter(|p| p.ppid == me && !started(p.pid))
+        .map(|p| p.pid)
+        .collect();
+    descendants(table, &roots)
+}
+
+/// Reap the adopted orphans that have ended (a subreaper's job: they'd stay
+/// zombies otherwise). Never one `bonsai dev` started itself.
+fn reap_adopted() {
+    let me = std::process::id();
+    for p in procs() {
+        if p.ppid == me && p.zombie && !started(p.pid) {
+            // SAFETY: waitpid on a zombie child we adopted.
+            unsafe {
+                libc::waitpid(p.pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG);
+            }
+        }
+    }
 }
 
 /// The `cargo build` arguments for this computer: a Pi tree builds for the
@@ -360,7 +497,7 @@ fn build(root: &Path, cargo: &Path, stop: &AtomicBool) -> Built {
             out.push('\n');
         }
         if stop.load(Ordering::SeqCst) {
-            group.stop(libc::SIGTERM, BUILD_STOP_WAIT);
+            group.stop(libc::SIGTERM, BUILD_STOP_WAIT, false);
             return Built::Stopped;
         }
         if group.leader_exited() {
@@ -370,7 +507,7 @@ fn build(root: &Path, cargo: &Path, stop: &AtomicBool) -> Built {
     }
     // Cargo is done: anything it left in its group goes, then the rest of
     // its output (the pipe closes with them; a moment at most otherwise).
-    let (_, status) = group.stop(libc::SIGTERM, BUILD_STOP_WAIT);
+    let (_, status) = group.stop(libc::SIGTERM, BUILD_STOP_WAIT, false);
     let until = Instant::now() + Duration::from_secs(1);
     while let Ok(line) = out_lines.recv_timeout(until.saturating_duration_since(Instant::now())) {
         out += &line;
@@ -398,6 +535,7 @@ fn next_change(
     root: &Path,
     base: &Snapshot,
     running: &mut Option<Group>,
+    adopt: bool,
     stop: &AtomicBool,
     note: &mut dyn FnMut(Note),
 ) -> Option<Snapshot> {
@@ -405,12 +543,15 @@ fn next_change(
         if stop.load(Ordering::SeqCst) {
             return None;
         }
+        if adopt {
+            reap_adopted();
+        }
         // It ended by itself: whatever it left running in its group goes
         // too (SIGTERM, then SIGKILL), before it's reported.
         if running.as_ref().is_some_and(Group::leader_exited)
             && let Some(group) = running.take()
         {
-            let (_, status) = group.stop(libc::SIGTERM, STOP_WAIT);
+            let (_, status) = group.stop(libc::SIGTERM, STOP_WAIT, adopt);
             note(Note::Exited(
                 status.map_or_else(|| "unknown".to_string(), |s| s.to_string()),
             ));
@@ -446,7 +587,7 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
     let mut first = true;
     loop {
         if !first {
-            match next_change(root, &base, &mut running, stop, note) {
+            match next_change(root, &base, &mut running, opts.adopt, stop, note) {
                 None => break,
                 Some(now) => {
                     note(Note::Changed(changed(&base, &now)));
@@ -533,7 +674,7 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
         if let Some(old) = running.take() {
             let pid = old.id();
             note(Note::Stopping(pid));
-            if old.stop(libc::SIGTERM, STOP_WAIT).0 {
+            if old.stop(libc::SIGTERM, STOP_WAIT, opts.adopt).0 {
                 note(Note::Killed(pid));
             }
         }
@@ -550,7 +691,7 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
     }
     if let Some(group) = running.take() {
         let pid = group.id();
-        if group.stop(libc::SIGINT, STOP_WAIT).0 {
+        if group.stop(libc::SIGINT, STOP_WAIT, opts.adopt).0 {
             note(Note::Killed(pid));
         }
     }
@@ -581,6 +722,12 @@ pub fn dev(args: &[String]) -> ! {
         }
     }
     crate::tree::require_tree_unchanged("dev");
+    // `CARGO` names another cargo, as for cargo's own subcommands.
+    opts.cargo = std::env::var_os("CARGO").map(PathBuf::from);
+    // Orphans of what it starts (a daemon's double fork, a child whose
+    // parent died) come to `bonsai dev`, so they go with the program.
+    // SAFETY: prctl on this process.
+    opts.adopt = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } == 0;
     // SAFETY: the handler only stores to an atomic.
     unsafe {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);

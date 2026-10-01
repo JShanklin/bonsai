@@ -83,9 +83,13 @@ restart) to every process in it, then SIGKILL after 5 s to whatever's
 left, and only then does a new build start. When the tree exits by
 itself, whatever it left running in its group goes the same way.
 
-The limits: a process that leaves the group on purpose (`setsid`, a
-daemon) is out of reach. If `bonsai dev` is killed with SIGKILL (so it
-can't clean up), Linux sends the tree SIGTERM, but not what the tree
+That includes what leaves the group: a child that calls `setsid` is still
+the tree's child, and a daemon that double-forks (its parent exits, so it
+would be left to the system) comes to `bonsai dev` instead, which runs as
+a subreaper for exactly that. Each is matched by its process id *and*
+start time, and signalled through a pidfd, so no other process is ever
+hit, even if an id is reused. If `bonsai dev` is killed with SIGKILL (so
+it can't clean up), Linux sends the tree SIGTERM, but not what the tree
 started; those end only if the tree takes them with it.
 
 Arguments after `--` go to the tree (`bonsai dev -- <args>`), as

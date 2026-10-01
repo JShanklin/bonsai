@@ -50,6 +50,8 @@ cargo run -- record keep_runs|keep_days|max_file_kb <n>   # retention (0: no lim
 cargo run -- sync [--dry-run]   # (--dry-run: each change as a diff, nothing written) regenerate src/{bonsai,links,settings}.rs, branches/ and edges/mod.rs
 cargo run -- list           # branches, links, errors and warnings
 cargo run -- doctor [--json]   # read-only checks, each with a fix; exit 1 on an error
+cargo run -- dev [--sync] [-- args]   # run the tree here; rebuild/restart on change
+cargo test -- --ignored dev_loop   # bonsai dev end to end, on a rendered host tree
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
 cargo run -- top [user@host|local] [--port N] [--once]   # watch a running tree
 cargo test                  # run the unit tests (main.rs, graph.rs, tree.rs, tools.rs, top/)
@@ -289,6 +291,20 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   exit 0 without errors (warnings and skips allowed), 1 with any, 2 usage.
   Nothing is written, installed or contacted (rustup is asked which targets
   are installed). Tests use `TEMPLATES`' host tree in temp folders.
+- **`bonsai dev`** (`src/dev.rs`): polls `snapshot` (mtime+len of
+  `watched` files: `src/**/*.rs`, bonsai.toml, Cargo.toml,
+  .cargo/config.toml, build.rs; never target/, logs, Cargo.lock, dotfiles),
+  waits `SETTLE` (0.3 s) of quiet, then `sync::plan` (errors → `Refused`,
+  stale → `Stale` unless `--sync`, whose writes are re-snapshotted so they
+  aren't a change), `cargo build --message-format=json-render-diagnostics`
+  (`--target host-tuple` on a Pi tree; the program from `executable`), and
+  only on success stops the old program (SIGTERM, SIGKILL after
+  `STOP_WAIT` 5 s) and starts the new one in its own process group with
+  `PR_SET_PDEATHSIG` (Linux). A failed build keeps the old one; a save
+  during a build rebuilds before restarting. SIGINT/SIGTERM set `STOP`:
+  the program gets SIGINT, then the loop ends. `run` reports `Note`s; the
+  ignored `dev_loop_end_to_end` test drives it on `target/dev-loop/tree`.
+  The CLI depends on `libc` for this (signals, prctl, kill).
 - **Graph commands** (`src/tree.rs`): `branch add` writes the scaffold
   (`templates/_branch/branch.rs`, `{{branch_name}}`/`{{BranchName}}` by plain
   replace) and an empty `[branch.x]`; `branch remove` also drops its links,

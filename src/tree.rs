@@ -94,7 +94,7 @@ pub fn require_tree(cmd: &str) {
 }
 
 /// Refuse anything but a bonsai tree of this version, changing nothing.
-fn require_tree_unchanged(cmd: &str) {
+pub(crate) fn require_tree_unchanged(cmd: &str) {
     let cargo = std::fs::read_to_string("Cargo.toml").unwrap_or_default();
     if Path::new("src/sap.rs").exists() || cargo.contains("embassy-executor") {
         exit(format!(

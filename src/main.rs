@@ -1,3 +1,4 @@
+mod dev;
 mod doctor;
 mod graph;
 mod sync;
@@ -2428,6 +2429,8 @@ fn print_help() {
     println!("  bonsai sync [--dry-run]  regenerate src/links.rs after editing bonsai.toml");
     println!("                         (--dry-run: show each change, write nothing)");
     println!("  bonsai list            the tree's branches and links, and any warnings");
+    println!("  bonsai dev [--sync] [-- <args>]  run the tree here; rebuild and restart it");
+    println!("                         on every change (a failed build keeps the old one)");
     println!("  bonsai doctor [--json] check the tree, read-only: graph, files, generated");
     println!("                         code, tools; each problem with what to do");
     println!("  bonsai top [user@host|local] [--port N] [--once]");
@@ -2482,6 +2485,10 @@ fn main() -> io::Result<()> {
         ["sync", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
             tree::sync(&rest)
+        }
+        ["dev", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
+            dev::dev(&rest)
         }
         ["doctor", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();

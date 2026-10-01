@@ -34,6 +34,7 @@ to paste, and shows how to check it works.
 | [Edges: your own](guides/edges-custom.md) | the `Edge` trait, for anything the built-ins don't cover |
 | [Units](guides/units.md) | `Celsius`, `Meters`, `Knots`…: numbers the compiler won't mix up |
 | [Binary messages](guides/binary-messages.md) | compact bytes for what crosses the network (serde + postcard + COBS) |
+| [Edit and run](guides/dev-loop.md) | `bonsai dev`: rebuild and restart on every save, keeping the last good build running |
 | [Testing](guides/testing.md) | branches and the whole tree, with no network |
 | [Run logs](guides/run-logs.md) | a folder per run: your `record!` events, panics, errors, START and END |
 | [Deploy](guides/deploy.md) | release builds, running on a Pi, as a service |

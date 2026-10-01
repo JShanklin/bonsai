@@ -90,15 +90,27 @@ a subreaper for exactly that. Each is matched by its process id *and*
 start time, and signalled through a pidfd, so no other process is ever
 hit, even if an id is reused.
 
-Even if `bonsai dev` itself is killed with SIGKILL (so it can't clean
-up), nothing is left running: a small helper it starts beside it
-(`bonsai __dev-guardian`, which you'll see in `ps`) notices, and stops the
-tree and everything it started the same way, SIGTERM and then SIGKILL
-after 5 s. It finds them by what it last saw and by `BONSAI_DEV_RUN`, set
-in the environment of everything `bonsai dev` starts (a process that
-clears its environment and leaves at the same moment can escape it). The
-helper exits with `bonsai dev`; if it's killed outright as well, the
-cleanup is up to you.
+Where Linux allows it (Debian, Raspberry Pi OS, Fedora, Arch; root
+anywhere), the tree also runs in a PID namespace of its own, under a small
+wrapper (`bonsai __dev-run`, which you'll see in `ps`). When a namespace's
+first process ends, the kernel kills everything inside, so nothing the tree
+started can be left behind, whatever it did to get away (`setsid`, a double
+fork, an empty environment), and even if `bonsai dev`, the wrapper and
+everything else of bonsai's are killed outright. When only `bonsai dev`
+is killed, the tree still gets SIGTERM and 5 s first. Inside, the tree is
+pid 2 to itself; its run logs and `bonsai dev` show the id `ps` shows.
+
+Where it isn't allowed (Ubuntu 24.04 and later keep ordinary users from
+making namespaces), `bonsai dev` says so when it starts, and a helper
+(`bonsai __dev-guardian`) does the job instead: if `bonsai dev` is killed,
+it stops the tree and everything it started, SIGTERM and then SIGKILL after
+5 s, finding them by what it last saw and by `BONSAI_DEV_RUN`, set in the
+environment of everything the tree starts. Two things can get past it: a
+process that clears its environment and leaves in the moment before
+`bonsai dev` dies, and anything at all if the helper is killed outright
+too. `BONSAI_DEV_NO_NAMESPACE=1` asks for this way where namespaces work.
+
+A daemon a build leaves running (sccache's server) is never stopped.
 
 Arguments after `--` go to the tree (`bonsai dev -- <args>`), as
 `cargo run -- <args>` would pass them.

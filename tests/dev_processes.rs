@@ -1,8 +1,11 @@
 //! `bonsai dev` stops everything a program started, the real binary: with a
 //! fake cargo (`CARGO`) building a fake program whose children escape its
-//! process group (`setsid`) and its parentage (a double fork, so `bonsai
-//! dev` adopts the orphan as a subreaper). Each ignores SIGTERM, SIGINT and
-//! SIGHUP, so only SIGKILL ends it.
+//! process group (`setsid`), its parentage (a double fork) and its
+//! environment (`env -i`). Each ignores SIGTERM, SIGINT and SIGHUP, so only
+//! SIGKILL ends it. Each test runs with the program in a PID namespace (as
+//! `bonsai dev` runs it where it can) and without (`BONSAI_DEV_NO_NAMESPACE`:
+//! the subreaper and the guardian). The fake cargo leaves a daemon, as
+//! sccache does, which is never the program's to stop.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -13,21 +16,24 @@ const BONSAI: &str = env!("CARGO_BIN_EXE_bonsai");
 
 const FAKE_CARGO: &str = r#"#!/bin/sh
 D="$(cd "$(dirname "$0")" && pwd)"
+[ -e "$D/daemon.pid" ] || setsid -f sh -c 'echo $$ > "$1"; exec sleep 1000' sh "$D/daemon.pid"
 printf '{"reason":"compiler-artifact","target":{"kind":["bin"]},"executable":"%s"}\n' "$D/app.sh"
 "#;
 
 /// Generation n leaves: a child in its group, one that left it with setsid
-/// (still its child), and an orphan (setsid -f: its parent exits at once).
+/// (still its child), an orphan (setsid -f: its parent exits at once), and
+/// an orphan with an empty environment. Each writes its own pid as /proc
+/// shows it: this computer's, even in the namespace (where `$$` is its own).
 const FAKE_APP: &str = r#"#!/bin/sh
 D="$(dirname "$0")"
 n=$(( $(cat "$D/gen" 2>/dev/null || echo 0) + 1 ))
 echo $n > "$D/gen"
-echo $$ > "$D/app$n.pid"
-(trap '' TERM INT HUP; exec sleep 1000) &
-echo $! > "$D/app$n-grouped.pid"
-(exec setsid sh -c 'trap "" TERM INT HUP; exec sleep 1000') &
-echo $! > "$D/app$n-setsid.pid"
-setsid -f sh -c 'echo $$ > "$1"; trap "" TERM INT HUP; exec sleep 1000' sh "$D/app$n-orphan.pid"
+read -r p _ < /proc/self/stat; echo $p > "$D/app$n.pid"
+(trap '' TERM INT HUP; read -r p _ < /proc/self/stat; echo $p > "$D/app$n-grouped.pid"; exec sleep 1000) &
+(exec setsid sh -c 'trap "" TERM INT HUP; read -r p _ < /proc/self/stat; echo $p > "$1"; exec sleep 1000' sh "$D/app$n-setsid.pid") &
+setsid -f sh -c 'trap "" TERM INT HUP; read -r p _ < /proc/self/stat; echo $p > "$1"; exec sleep 1000' sh "$D/app$n-orphan.pid"
+S="$(command -v sleep)"
+env -i "$(command -v setsid)" -f /bin/sh -c 'trap "" TERM INT HUP; read -r p _ < /proc/self/stat; echo $p > "$1"; exec "$2" 1000' sh "$D/app$n-bare.pid" "$S"
 trap 'exit 0' TERM INT
 while :; do sleep 0.05; done
 "#;
@@ -70,10 +76,11 @@ impl Tree {
 
     /// `bonsai dev` in it, its output to a file (so nothing it leaves
     /// behind holds a pipe of ours).
-    fn dev(&self) -> Child {
+    fn dev(&self, namespace: bool) -> Child {
         let log = std::fs::File::create(self.root.join("dev.log")).unwrap();
         Command::new(BONSAI)
             .arg("dev")
+            .env("BONSAI_DEV_NO_NAMESPACE", if namespace { "" } else { "1" })
             .current_dir(&self.root)
             .env("CARGO", self.fake.join("cargo.sh"))
             .env("BONSAI_TOP", "off")
@@ -96,9 +103,10 @@ impl Tree {
             .unwrap()
     }
 
-    /// Generation n's processes: the program and the three it left.
-    fn generation(&self, n: u32) -> [u32; 4] {
-        ["", "-grouped", "-setsid", "-orphan"].map(|kind| self.pid(&format!("app{n}{kind}.pid")))
+    /// Generation n's processes: the program and the four it left.
+    fn generation(&self, n: u32) -> [u32; 5] {
+        ["", "-grouped", "-setsid", "-orphan", "-bare"]
+            .map(|kind| self.pid(&format!("app{n}{kind}.pid")))
     }
 
     fn edit(&self) {
@@ -158,17 +166,72 @@ fn sweep(pids: &[u32]) {
     }
 }
 
-#[test]
-fn what_left_the_group_goes_on_restart_and_on_ctrl_c() {
-    let tree = Tree::new("escape");
+/// Wait for `bonsai dev` to exit, at most 20 s.
+fn exited(dev: &mut Child, tree: &Tree) -> std::process::ExitStatus {
+    let until = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Some(status) = dev.try_wait().unwrap() {
+            return status;
+        }
+        assert!(
+            Instant::now() < until,
+            "bonsai dev didn't stop\n{}",
+            tree.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Wait up to 20 s for every one of `pids` to end; those still running.
+fn left_after(pids: &[u32]) -> Vec<u32> {
+    let until = Instant::now() + Duration::from_secs(20);
+    while pids.iter().any(|&p| running(p)) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let left: Vec<u32> = pids.iter().copied().filter(|&p| running(p)).collect();
+    sweep(pids);
+    left
+}
+
+/// The processes running `bonsai __dev-run` under `bonsai dev` (pid `dev`).
+fn wrappers_of(dev: u32) -> Vec<u32> {
+    let want = format!("__dev-run\0{dev}\0");
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|c| String::from_utf8_lossy(&c).contains(&want))
+        })
+        .collect()
+}
+
+/// Restart and Ctrl-C stop everything generation 1 and 2 left, nothing
+/// else (a stranger, the build's daemon), and the guardian goes.
+fn restart_and_ctrl_c(namespace: bool) {
+    let tree = Tree::new(if namespace { "escape-ns" } else { "escape" });
     let mut stranger = Command::new("sleep").arg("1000").spawn().unwrap();
-    let mut dev = tree.dev();
+    let mut dev = tree.dev(namespace);
     let first = tree.generation(1);
+    let daemon = tree.pid("daemon.pid");
     let guardian = guardian_of(dev.id()).expect("no guardian");
-    // The orphan's parent exited: `bonsai dev` adopted it.
-    wait_until("the orphan's adoption", || {
-        stat(first[3]).is_some_and(|(_, p)| p == dev.id())
-    });
+    assert_eq!(
+        wrappers_of(dev.id()).is_empty(),
+        !namespace,
+        "{}",
+        tree.log()
+    );
+    if !namespace {
+        // The orphans' parent exited: `bonsai dev` adopted them.
+        wait_until("the orphans' adoption", || {
+            [first[3], first[4]]
+                .iter()
+                .all(|&p| stat(p).is_some_and(|(_, parent)| parent == dev.id()))
+        });
+    }
     tree.edit();
     let second = tree.generation(2);
     let gone: Vec<u32> = first.iter().copied().filter(|&p| running(p)).collect();
@@ -181,26 +244,18 @@ fn what_left_the_group_goes_on_restart_and_on_ctrl_c() {
     // Ctrl-C (SIGINT, as a terminal sends it).
     // SAFETY: signals the bonsai dev this test started.
     unsafe { libc::kill(dev.id() as i32, libc::SIGINT) };
-    let until = Instant::now() + Duration::from_secs(20);
-    let status = loop {
-        if let Some(status) = dev.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            Instant::now() < until,
-            "bonsai dev didn't stop\n{}",
-            tree.log()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    };
+    let status = exited(&mut dev, &tree);
     let gone: Vec<u32> = second.iter().copied().filter(|&p| running(p)).collect();
     sweep(&second);
+    let daemon_ran = running(daemon);
+    sweep(&[daemon]);
     assert!(status.success(), "{status}\n{}", tree.log());
     assert!(
         gone.is_empty(),
         "left running after Ctrl-C: {gone:?}\n{}",
         tree.log()
     );
+    assert!(daemon_ran, "the build's daemon was stopped");
     assert!(
         running(stranger.id()),
         "a process bonsai dev didn't start was signalled"
@@ -212,25 +267,47 @@ fn what_left_the_group_goes_on_restart_and_on_ctrl_c() {
 }
 
 #[test]
-fn killing_bonsai_dev_outright_leaves_nothing_running() {
-    let tree = Tree::new("killed");
+fn what_left_the_group_goes_on_restart_and_on_ctrl_c() {
+    restart_and_ctrl_c(true);
+}
+
+#[test]
+fn what_left_the_group_goes_on_restart_and_on_ctrl_c_without_a_namespace() {
+    restart_and_ctrl_c(false);
+}
+
+/// SIGKILL `bonsai dev` (and, with `everything`, the guardian and the
+/// namespace's wrapper too): nothing generation 1 started is left.
+fn killed(namespace: bool, everything: bool) {
+    let tree = Tree::new(&format!("killed-{namespace}-{everything}"));
     let mut stranger = Command::new("sleep").arg("1000").spawn().unwrap();
-    let mut dev = tree.dev();
+    let mut dev = tree.dev(namespace);
     let first = tree.generation(1);
+    let daemon = tree.pid("daemon.pid");
     let guardian = guardian_of(dev.id()).expect("no guardian");
-    dev.kill().unwrap(); // SIGKILL: it can't clean up
-    dev.wait().unwrap();
-    // The guardian does: SIGTERM (ignored by all three), SIGKILL after 5 s.
-    let until = Instant::now() + Duration::from_secs(20);
-    while first.iter().any(|&p| running(p)) && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(20));
+    if !namespace {
+        // Without a namespace, an orphan with no environment is found only
+        // by the guardian's last look (every 100 ms) before dev dies.
+        std::thread::sleep(Duration::from_millis(500));
     }
-    let left: Vec<u32> = first.iter().copied().filter(|&p| running(p)).collect();
-    sweep(&first);
+    let wrappers = wrappers_of(dev.id());
+    dev.kill().unwrap(); // SIGKILL: it can't clean up
+    if everything {
+        for &pid in wrappers.iter().chain([&guardian]) {
+            // SAFETY: SIGKILL to processes this test's bonsai dev started.
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+    }
+    dev.wait().unwrap();
+    let left = left_after(&first);
+    let daemon_ran = running(daemon);
+    sweep(&[daemon]);
     assert!(
         left.is_empty(),
-        "left running after bonsai dev was killed: {left:?}"
+        "left running after bonsai dev was killed: {left:?}\n{}",
+        tree.log()
     );
+    assert!(daemon_ran, "the build's daemon was stopped");
     wait_until("the guardian's exit", || !running(guardian));
     assert!(
         running(stranger.id()),
@@ -238,4 +315,19 @@ fn killing_bonsai_dev_outright_leaves_nothing_running() {
     );
     stranger.kill().unwrap();
     stranger.wait().unwrap();
+}
+
+#[test]
+fn killing_bonsai_dev_outright_leaves_nothing_running() {
+    killed(true, false);
+}
+
+#[test]
+fn killing_bonsai_dev_and_its_helpers_outright_leaves_nothing_running() {
+    killed(true, true);
+}
+
+#[test]
+fn killing_bonsai_dev_outright_leaves_nothing_running_without_a_namespace() {
+    killed(false, false);
 }

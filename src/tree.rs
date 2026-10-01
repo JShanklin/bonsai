@@ -25,6 +25,8 @@ pub(crate) const SERIAL_RS: &str = "src/edges/serial.rs";
 /// Where `bonsai link` adds a receiving arm, and `bonsai message add` a type.
 pub const INPUT_ARM: &str = "// bonsai:input-arm";
 pub const MESSAGE_MARKER: &str = "// bonsai:message";
+/// Where `bonsai link` and `bonsai rate` add a test for each new input.
+pub const INPUT_TEST: &str = "// bonsai:input-test";
 
 /// The runtime every tree carries as `src/bonsai.rs`, kept current by `sync`.
 pub const RUNTIME: &str = include_str!("../templates/_tree/bonsai.rs");
@@ -490,18 +492,262 @@ fn removed_lines<'a>(before: &'a str, after: &str) -> Vec<&'a str> {
     old[head..old.len() - tail].to_vec()
 }
 
-/// Bring every branch's arms in step with a graph change: add an arm for each
-/// input it gained, remove the arm of each it lost.
+/// Bring every branch's arms, and their tests, in step with a graph change:
+/// add an arm and a test for each input it gained, remove those of each it
+/// lost.
 fn reconcile_arms(before: &Config, after: &Config) -> io::Result<()> {
+    let messages = std::fs::read_to_string(MESSAGES).unwrap_or_default();
     for b in &after.branches {
         let old = graph::input_variants(before, &b.name);
         let new = graph::input_variants(after, &b.name);
         for v in old.iter().filter(|v| !new.contains(v)) {
             remove_arm(&b.name, v)?;
+            remove_test(&b.name, v, &input_test(before, &messages, &b.name, v))?;
         }
         for v in new.iter().filter(|v| !old.contains(v)) {
             add_arm(&b.name, v)?;
+            add_test(&b.name, &input_test(after, &messages, &b.name, v))?;
         }
+    }
+    Ok(())
+}
+
+/// The fields of `pub struct name { .. }` in `src` (messages.rs): (name,
+/// type) pairs; empty for a unit struct; None when it isn't there or is a
+/// tuple struct.
+fn message_fields(src: &str, name: &str) -> Option<Vec<(String, String)>> {
+    let mut lines = src.lines().map(str::trim);
+    let open = format!("pub struct {name} {{");
+    let unit = format!("pub struct {name};");
+    for l in lines.by_ref() {
+        if l == unit {
+            return Some(Vec::new());
+        }
+        if l == open {
+            break;
+        }
+    }
+    let mut fields = Vec::new();
+    for l in lines {
+        if l.starts_with('}') {
+            return Some(fields);
+        }
+        if let Some((f, t)) = l.strip_prefix("pub ").and_then(|r| r.split_once(':')) {
+            fields.push((
+                f.trim().to_string(),
+                t.trim().trim_end_matches(',').to_string(),
+            ));
+        }
+    }
+    None
+}
+
+/// A value of `ty` for a test to start from, when there's an obvious one.
+fn starting_value(ty: &str) -> Option<String> {
+    Some(match ty {
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+        | "isize" => "0".to_string(),
+        "f32" | "f64" => "0.0".to_string(),
+        "bool" => "false".to_string(),
+        "String" => "String::new()".to_string(),
+        "char" => "' '".to_string(),
+        t if UNITS.contains(&t) => format!("{t}(0.0)"),
+        t if t.starts_with("Vec<") => "Vec::new()".to_string(),
+        t if t.starts_with("Option<") => "None".to_string(),
+        _ => return None,
+    })
+}
+
+/// The test `link`/`rate` give `branch` for its input `variant`: set it up,
+/// hand it one such input, check what it sent. It says it sends nothing;
+/// once `process` does something with the input, that's the line to change.
+/// An input with no obvious value to start from (a custom edge's, a field
+/// of a type of your own) gets a `todo!` and an `#[ignore]` until you fill
+/// it in.
+fn input_test(cfg: &Config, messages: &str, branch: &str, variant: &str) -> String {
+    let camel = graph::camel(branch);
+    let var = snake(variant);
+    let edge = cfg.edges.iter().find(|e| graph::camel(&e.name) == variant);
+    // The input's value, and what to wait for when there's no obvious one.
+    let (value, missing) = match (variant, edge) {
+        ("Tick", _) => (None, None),
+        (_, Some(e)) if matches!(e.kind, graph::EdgeKind::Custom { .. }) => {
+            let what = format!("what {} receives", e.name);
+            (Some(format!("todo!(\"{what}\")")), Some(what))
+        }
+        (_, Some(_)) => (
+            Some("crate::bonsai::Packet::new(\"hello\")".to_string()),
+            None,
+        ),
+        _ => match message_value(messages, variant) {
+            Some(v) => (Some(v), None),
+            None => (
+                Some(format!("todo!(\"a {variant}\")")),
+                Some(format!("a {variant}")),
+            ),
+        },
+    };
+    // An example of what it might send, from its own links.
+    let example = cfg
+        .links
+        .iter()
+        .find(|l| l.from == branch)
+        .and_then(|l| match (&l.message, l.to.first()) {
+            (Some(m), _) => Some(format!("Msg::{camel}{m}(_)")),
+            (None, Some(to)) => Some(format!("Msg::{camel}To{}(_)", graph::camel(to))),
+            (None, None) => None,
+        })
+        .unwrap_or_else(|| "Msg::..".to_string());
+    let what = match (variant, edge) {
+        ("Tick", _) => "a tick".to_string(),
+        (_, Some(e)) if matches!(e.kind, graph::EdgeKind::Custom { .. }) => {
+            "this input".to_string()
+        }
+        (_, Some(_)) => "this packet".to_string(),
+        (v, None) => format!("this {v}"),
+    };
+    let mut lines = vec!["#[test]".to_string()];
+    if let Some(what) = &missing {
+        lines.push(format!(
+            "#[ignore = \"give it {what} to test with, then delete this line\"]"
+        ));
+        lines.push("#[allow(unreachable_code, unused_mut, unused_variables)]".to_string());
+    }
+    lines.push(format!("fn on_{var}() {{"));
+    lines.push(format!("    let mut branch = {camel}::setup();"));
+    lines.push("    let mut out = Out::default();".to_string());
+    let input = match value {
+        None => "Input::Tick".to_string(),
+        Some(value) => {
+            for (i, l) in format!("let {var} = {value};").lines().enumerate() {
+                lines.push(if i == 0 {
+                    format!("    {l}")
+                } else {
+                    l.to_string()
+                });
+            }
+            format!("Input::{variant}({var})")
+        }
+    };
+    lines.push(format!("    branch.process({input}, &mut out);"));
+    lines.push(format!(
+        "    // What should {what} make it send? out.sent() lists it, oldest first."
+    ));
+    lines.push(format!(
+        "    // For example: assert!(matches!(out.sent(), [{example}]));"
+    ));
+    lines.push("    assert!(out.sent().is_empty(), \"it sends {:?}\", out.sent());".to_string());
+    lines.push("}".to_string());
+    lines.join("\n") + "\n"
+}
+
+/// A value of message `name` (from `messages.rs`) to test with: each field
+/// its type's obvious starting value, laid out as rustfmt would. None when
+/// a field has no obvious one (a type of your own) or the struct isn't found.
+fn message_value(messages: &str, name: &str) -> Option<String> {
+    let fields = message_fields(messages, name)?;
+    if fields.is_empty() {
+        return Some(name.to_string());
+    }
+    let values = fields
+        .iter()
+        .map(|(f, t)| starting_value(t).map(|v| format!("{f}: {v}")))
+        .collect::<Option<Vec<String>>>()?;
+    let inline = values.join(", ");
+    Some(if inline.len() <= 18 {
+        format!("{name} {{ {inline} }}")
+    } else {
+        let fields: String = values.iter().map(|v| format!("        {v},\n")).collect();
+        format!("{name} {{\n{fields}    }}")
+    })
+}
+
+/// Add `test` above `branch`'s input-test marker, unless it has one by that
+/// name already. A branch without the marker (from before branches had
+/// tests) is left alone.
+fn add_test(branch: &str, test: &str) -> io::Result<()> {
+    let path = branch_file(branch);
+    let Ok(src) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Some(name) = test.lines().find_map(|l| l.strip_prefix("fn ")) else {
+        return Ok(());
+    };
+    if src
+        .lines()
+        .any(|l| l.trim().strip_prefix("fn ") == Some(name))
+    {
+        return Ok(());
+    }
+    let Some(at) = src
+        .split_inclusive('\n')
+        .position(|l| l.trim() == INPUT_TEST)
+    else {
+        return Ok(());
+    };
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    let indent: String = lines[at].chars().take_while(|c| *c == ' ').collect();
+    let mut block: String = test
+        .lines()
+        .map(|l| {
+            if l.is_empty() {
+                "\n".to_string()
+            } else {
+                format!("{indent}{l}\n")
+            }
+        })
+        .collect();
+    block.push('\n');
+    let new = lines[..at].concat() + &block + &lines[at..].concat();
+    std::fs::write(&path, new)
+}
+
+/// Take `branch`'s test for an input out (attributes and all), saying so
+/// when it isn't the one `bonsai` wrote (`generated`): your changes go with
+/// it.
+fn remove_test(branch: &str, variant: &str, generated: &str) -> io::Result<()> {
+    let path = branch_file(branch);
+    let Ok(src) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let head = format!("fn on_{}() {{", snake(variant));
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    let Some(at) = lines.iter().position(|l| l.trim() == head) else {
+        return Ok(());
+    };
+    let mut start = at;
+    while start > 0 && lines[start - 1].trim_start().starts_with("#[") {
+        start -= 1;
+    }
+    let mut end = at;
+    let mut depth = crate::bracket_depth(lines[at]);
+    while depth > 0 && end + 1 < lines.len() {
+        end += 1;
+        depth += crate::bracket_depth(lines[end]);
+    }
+    let removed = lines[start..=end].concat();
+    // The blank line `add_test` put after it goes too.
+    if end + 1 < lines.len() && lines[end + 1].trim().is_empty() {
+        end += 1;
+    }
+    let new = lines[..start].concat() + &lines[end + 1..].concat();
+    std::fs::write(&path, new)?;
+    // Its example comment follows the branch's links, so it isn't compared.
+    let code = |s: &str| {
+        s.lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let ours = code(&removed) == code(generated);
+    if !ours {
+        println!(
+            "note: removed the test `on_{}` from {}, with your changes to it ({} lines)",
+            snake(variant),
+            path.display(),
+            removed.lines().count()
+        );
     }
     Ok(())
 }
@@ -1240,6 +1486,62 @@ pub fn with_macro_use(main_src: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_input_test_starts_from_each_fields_obvious_value() {
+        let messages = "#[derive(Clone, Debug)]\npub struct Reading {\n    pub temp: Celsius,\n    pub n: u32,\n}\n\
+                        pub struct Ping;\npub struct Odd {\n    pub at: std::time::Instant,\n}\n";
+        assert_eq!(
+            message_fields(messages, "Reading").unwrap(),
+            [
+                ("temp".to_string(), "Celsius".to_string()),
+                ("n".to_string(), "u32".to_string())
+            ]
+        );
+        assert_eq!(message_fields(messages, "Ping").unwrap(), []);
+        assert_eq!(message_fields(messages, "Gone"), None);
+        assert_eq!(
+            message_value(messages, "Reading").unwrap(),
+            "Reading {\n        temp: Celsius(0.0),\n        n: 0,\n    }"
+        );
+        assert_eq!(message_value(messages, "Ping").unwrap(), "Ping");
+        assert_eq!(message_value(messages, "Odd"), None);
+        assert_eq!(starting_value("Vec<u8>").unwrap(), "Vec::new()");
+        assert_eq!(starting_value("Option<String>").unwrap(), "None");
+    }
+
+    #[test]
+    fn an_input_test_hands_its_input_over_and_checks_what_was_sent() {
+        let cfg = graph::parse(
+            "[branch.sensor]\nrate = 1\n[branch.display]\n[edge.radio]\nkind = \"custom\"\n\
+             [[link]]\nfrom = \"sensor\"\nmessage = \"Ping\"\nto = [\"display\"]\n\
+             [[link]]\nfrom = \"radio\"\nto = [\"display\"]\n",
+        )
+        .unwrap();
+        let tick = input_test(&cfg, "pub struct Ping;\n", "sensor", "Tick");
+        assert_eq!(
+            tick,
+            "#[test]\nfn on_tick() {\n    let mut branch = Sensor::setup();\n    let mut out = Out::default();\n    \
+             branch.process(Input::Tick, &mut out);\n    \
+             // What should a tick make it send? out.sent() lists it, oldest first.\n    \
+             // For example: assert!(matches!(out.sent(), [Msg::SensorPing(_)]));\n    \
+             assert!(out.sent().is_empty(), \"it sends {:?}\", out.sent());\n}\n"
+        );
+        let ping = input_test(&cfg, "pub struct Ping;\n", "display", "Ping");
+        assert!(
+            ping.contains(
+                "    let ping = Ping;\n    branch.process(Input::Ping(ping), &mut out);\n"
+            ),
+            "{ping}"
+        );
+        assert!(!ping.contains("#[ignore"), "{ping}");
+        let radio = input_test(&cfg, "", "display", "Radio");
+        assert!(radio.starts_with("#[test]\n#[ignore = \"give it what radio receives to test with, then delete this line\"]\n"), "{radio}");
+        assert!(
+            radio.contains("let radio = todo!(\"what radio receives\");"),
+            "{radio}"
+        );
+    }
 
     #[test]
     fn removed_lines_are_the_span_taken_out() {

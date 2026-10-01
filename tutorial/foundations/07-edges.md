@@ -73,7 +73,8 @@ links:
 record: events, panics → logs/
 ```
 
-The watchdog gained an `Input::Uplink(_uplink) => {}` arm, and an
+The watchdog gained an `Input::Uplink(_uplink) => {}` arm, a test for it
+(`on_uplink`, which hands it `Packet::new("hello")`), and an
 `out.to_uplink(packet)` to send with.
 
 ## Decide what the bytes mean
@@ -217,9 +218,9 @@ cargo local-test
 ```
 
 ```
----- branches::watchdog::tests::alarms_only_above_the_limit stdout ----
+---- branches::watchdog::tests::on_reading stdout ----
 
-thread 'branches::watchdog::tests::alarms_only_above_the_limit' (10700) panicked at src/branches/watchdog.rs:81:9:
+thread 'branches::watchdog::tests::on_reading' (12272) panicked at src/branches/watchdog.rs:80:9:
 assertion failed: matches!(out.sent(), [Msg::WatchdogAlarm(alarm)] if alarm.temp ==
     Celsius(31.0))
 ```
@@ -265,7 +266,7 @@ mod tests {
 ```
 test tests::a_lower_limit_sets_off_an_alarm ... ok
 
-test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
 ```sh

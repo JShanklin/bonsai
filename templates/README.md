@@ -94,6 +94,10 @@ mistaken for it), keep them intact:
   `bonsai rate` add an arm above it; `unlink` and `rate … off` remove it.
 - `// bonsai:message` in `src/messages.rs`: `bonsai message add` puts a struct
   above it.
+- `// bonsai:input-test` in each branch's `mod tests`: `bonsai link` and
+  `bonsai rate` add a test for each new input above it (`on_<input>`), and
+  `unlink`/`rate … off` take it out. Branches from before it have none, and
+  get no tests added.
 
 ## Generated files
 

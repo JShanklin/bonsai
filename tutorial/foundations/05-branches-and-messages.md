@@ -122,8 +122,9 @@ record: events, panics → logs/
 
 ## What each branch receives
 
-Each link also added an arm to its receivers' `match input`. The display's
-`process` now reads:
+Each link also added an arm to its receivers' `match input` (and a test for
+it at the bottom of the file, which [chapter 6](06-order-and-tests.md#test-a-branch)
+puts to work). The display's `process` now reads:
 
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {

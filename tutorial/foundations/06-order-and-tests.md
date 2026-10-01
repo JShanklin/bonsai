@@ -58,94 +58,128 @@ event, logs an error, and goes on with the next event.
 
 `process` is an ordinary function with no I/O, so a test can call it
 directly: make the branch with `setup`, hand it an input, look at what it
-sent with `out.sent()`. Add this to the bottom of
-`src/branches/watchdog.rs`:
+sent with `out.sent()`. bonsai has written one already for each input you
+gave a branch: `bonsai link` and `bonsai rate` add a test next to each arm,
+in the `mod tests` at the bottom of the branch's file. The watchdog's, for
+the `Reading` it receives:
 
 ```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::links::Msg;
-
     #[test]
-    fn alarms_only_above_the_limit() {
-        let mut watchdog = Watchdog::setup();
-
+    fn on_reading() {
+        let mut branch = Watchdog::setup();
         let mut out = Out::default();
         let reading = Reading {
-            temp: Celsius(30.0),
-            humidity: Percent(55.0),
+            temp: Celsius(0.0),
+            humidity: Percent(0.0),
         };
-        watchdog.process(Input::Reading(reading), &mut out);
-        assert!(out.sent().is_empty());
-
-        let mut out = Out::default();
-        let reading = Reading {
-            temp: Celsius(31.0),
-            humidity: Percent(55.0),
-        };
-        watchdog.process(Input::Reading(reading), &mut out);
-        assert!(matches!(
-            out.sent(),
-            [Msg::WatchdogAlarm(alarm)] if alarm.temp == Celsius(31.0)
-        ));
+        branch.process(Input::Reading(reading), &mut out);
+        // What should this Reading make it send? out.sent() lists it, oldest first.
+        // For example: assert!(matches!(out.sent(), [Msg::..]));
+        assert!(out.sent().is_empty(), "it sends {:?}", out.sent());
     }
-}
 ```
 
-What a branch sends is a list of `Msg`s, one variant per link, named after
-the sender and the message: `WatchdogAlarm` is the watchdog's `Alarm` link.
-
-And one for the sensor, at the bottom of `src/branches/sensor.rs`. Its state
-carries over from one input to the next, so drive it for several ticks:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::links::Msg;
-
-    #[test]
-    fn warms_then_starts_over() {
-        let mut sensor = Sensor::setup();
-        let mut temps = Vec::new();
-        for _ in 0..8 {
-            let mut out = Out::default();
-            sensor.process(Input::Tick, &mut out);
-            if let [Msg::SensorReading(reading)] = out.sent() {
-                temps.push(reading.temp.0);
-            }
-        }
-        assert_eq!(temps, [26.5, 28.0, 29.5, 31.0, 32.5, 34.0, 25.0, 26.5]);
-    }
-}
-```
-
-Run the tests on your computer (plain `cargo test` would build them for the
-Pi):
+It starts every field at zero and checks the branch sends nothing, which
+was true when bonsai wrote it. Run the tests on your computer (plain `cargo
+test` would build them for the Pi):
 
 ```sh
 cargo local-test
 ```
 
 ```
-running 11 tests
-test bonsai::stats::tests::a_snapshot_renders_as_tab_separated_rows ... ok
-test bonsai::log::tests::filter_takes_a_default_and_per_source_levels ... ok
-test bonsai::log::tests::a_branch_being_processed_tags_its_lines ... ok
-test bonsai::log::tests::lines_carry_utc_time_level_and_source ... ok
-test bonsai::stats::tests::the_same_name_gets_the_same_counts ... ok
-test bonsai::top::tests::bonsai_top_picks_the_address ... ok
-test bonsai::units::tests::a_kind_converts_both_ways ... ok
-test bonsai::units::tests::units_multiply_into_others ... ok
-test bonsai::units::tests::units_print_with_their_symbol ... ok
-test branches::sensor::tests::warms_then_starts_over ... ok
-test branches::watchdog::tests::alarms_only_above_the_limit ... ok
+test branches::sensor::tests::on_tick ... FAILED
 
-test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+---- branches::sensor::tests::on_tick stdout ----
+
+thread 'branches::sensor::tests::on_tick' (11742) panicked at src/branches/sensor.rs:62:9:
+it sends [SensorReading(Reading { temp: Celsius(26.5), humidity: Percent(55.0) })]
 ```
 
-The first nine are bonsai's own, in `src/bonsai.rs`. Chapter 7 adds a test
+The sensor sends a reading on every tick now, so its test is out of date,
+and says what it sends instead. Make each test say what the branch should
+do. The watchdog's: nothing at the limit, an alarm just above it:
+
+```rust
+    #[test]
+    fn on_reading() {
+        let mut branch = Watchdog::setup();
+
+        let mut out = Out::default();
+        let reading = Reading {
+            temp: Celsius(30.0),
+            humidity: Percent(55.0),
+        };
+        branch.process(Input::Reading(reading), &mut out);
+        assert!(out.sent().is_empty(), "it sends {:?}", out.sent());
+
+        let mut out = Out::default();
+        let reading = Reading {
+            temp: Celsius(31.0),
+            humidity: Percent(55.0),
+        };
+        branch.process(Input::Reading(reading), &mut out);
+        assert!(matches!(
+            out.sent(),
+            [Msg::WatchdogAlarm(alarm)] if alarm.temp == Celsius(31.0)
+        ));
+    }
+```
+
+What a branch sends is a list of `Msg`s, one variant per link, named after
+the sender and the message: `WatchdogAlarm` is the watchdog's `Alarm` link.
+
+The sensor's state carries over from one input to the next, so drive it
+for several ticks:
+
+```rust
+    #[test]
+    fn on_tick() {
+        let mut branch = Sensor::setup();
+        let mut temps = Vec::new();
+        for _ in 0..8 {
+            let mut out = Out::default();
+            branch.process(Input::Tick, &mut out);
+            if let [Msg::SensorReading(reading)] = out.sent() {
+                temps.push(reading.temp.0);
+            }
+        }
+        assert_eq!(temps, [26.5, 28.0, 29.5, 31.0, 32.5, 34.0, 25.0, 26.5]);
+    }
+```
+
+Keep the names: if you `unlink` an input later, bonsai takes its arm and
+its `on_…` test out together (and says so when you'd changed them). The
+display's two tests still pass as written: it logs, and sends nothing.
+
+```sh
+cargo local-test
+```
+
+```
+running 17 tests
+test bonsai::log::tests::a_branch_being_processed_tags_its_lines ... ok
+test bonsai::log::tests::lines_carry_utc_time_level_and_source ... ok
+test bonsai::log::tests::filter_takes_a_default_and_per_source_levels ... ok
+test bonsai::record::tests::a_run_ended_when_its_last_line_is_end ... ok
+test bonsai::record::tests::durations_read_at_a_glance ... ok
+test bonsai::record::tests::names_and_lines_use_local_time ... ok
+test bonsai::stats::tests::a_snapshot_renders_as_tab_separated_rows ... ok
+test bonsai::stats::tests::proc_files_give_the_process_and_the_computer ... ok
+test bonsai::units::tests::a_kind_converts_both_ways ... ok
+test bonsai::stats::tests::the_same_name_gets_the_same_counts ... ok
+test bonsai::units::tests::units_multiply_into_others ... ok
+test bonsai::top::tests::bonsai_top_picks_the_address ... ok
+test bonsai::units::tests::units_print_with_their_symbol ... ok
+test branches::sensor::tests::on_tick ... ok
+test branches::display::tests::on_alarm ... ok
+test branches::display::tests::on_reading ... ok
+test branches::watchdog::tests::on_reading ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The first thirteen are bonsai's own, in `src/bonsai.rs`. Chapter 7 adds a test
 that drives the whole tree. The [testing guide](../guides/testing.md) has
 more.
 

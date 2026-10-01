@@ -29,3 +29,14 @@ impl Branch for {{BranchName}} {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[allow(unused_imports)] // what its tests use
+    use super::*;
+    #[allow(unused_imports)] // what it sends, as its tests see it
+    use crate::links::Msg;
+
+    // `bonsai link` and `bonsai rate` add a test here for each new input
+    // bonsai:input-test
+}

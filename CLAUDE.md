@@ -299,7 +299,13 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   branch's `input_variants` before and after, adds an arm for each gained and
   removes (`remove_balanced_span`, so filled-in multi-line arms go whole) each
   lost — so `unlink`, `rate`, `branch remove` and `edge remove` all stay in
-  step. `edge add` builds the table from `--key value` flags (the pure
+  step. Each arm comes with a test (`input_test`: `on_<snake>`, setup →
+  one input → `assert!(out.sent().is_empty(), ..)`, a value from the
+  message's fields via `message_fields`/`starting_value`, or `Packet::new`
+  for a built-in edge; anything else `todo!` + `#[ignore]`), added above
+  `// bonsai:input-test` in the scaffold's `mod tests` (`add_test`; none
+  without the marker) and removed with its attributes (`remove_test`, a
+  note when it isn't the one bonsai wrote). `edge add` builds the table from `--key value` flags (the pure
   `edge_table`: `--reply`, repeatable `--join`, a flag followed by nothing or
   another flag refused with what it takes, `wants`) and saves only if
   `graph::parse` accepts it; an edge may be linked one way only;
@@ -443,8 +449,8 @@ check, not a hardware test).
 ## Invariants to preserve
 
 - **Marker lines** `// bonsai:input-arm` (inside every branch's `match
-  input`) and `// bonsai:message` (in `src/messages.rs`) are where the
-  commands insert. `insert_before_marker`/`insert_indented_before` match them
+  input`), `// bonsai:input-test` (in its `mod tests`) and `// bonsai:message`
+  (in `src/messages.rs`) are where the commands insert. `insert_before_marker`/`insert_indented_before` match them
   as a **whole trimmed line**, so never remove them and never let a template's
   only occurrence be inside prose. A missing arm marker only prints a note
   (the compiler still demands the arm). `cargo fmt` pulls the arm marker up

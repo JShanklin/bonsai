@@ -276,19 +276,444 @@ pub fn summary(changes: &[Change]) -> String {
         .join(", ")
 }
 
+/// Left in the tree while a sync writes its changes, naming them: a tree
+/// that has it was interrupted mid-sync, and `bonsai sync` (which works the
+/// changes out again from bonsai.toml) finishes it. `bonsai doctor` says so.
+pub const JOURNAL: &str = ".bonsai-sync";
+
+/// Whether a sync of the tree at `root` started and didn't finish.
+pub fn interrupted(root: &Path) -> bool {
+    root.join(JOURNAL).exists()
+}
+
+/// Replace `path` with `content` in one step: written in full to a file
+/// beside it, synced, then renamed over it. A reader (or a crash) sees the
+/// old file or the new one, never part of one.
+pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let temp = dir.join(format!(".{name}.bonsai-new"));
+    let result = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        if let Ok(old) = std::fs::metadata(path) {
+            file.set_permissions(old.permissions())?;
+        }
+        std::fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
 /// Write the plan's changes to the tree at `root`.
+///
+/// Each file is replaced atomically. The set isn't: a crash part way leaves
+/// some files new and some old. So the journal goes down first and comes
+/// off last, and a tree left with it is reported, and finished by the next
+/// sync, rather than looking synced. A file that changed since the plan was
+/// made (another program, an editor) stops the sync before it's touched.
 pub fn apply(root: &Path, plan: &Plan) -> io::Result<()> {
-    for change in &plan.changes {
+    if plan.changes.is_empty() {
+        // Nothing to write; a journal left by an interrupted sync is done
+        // with, since the tree is now what the plan says it should be.
+        return remove_journal(root);
+    }
+    let names: String = plan
+        .changes
+        .iter()
+        .map(|c| format!("{}\n", c.path))
+        .collect();
+    write_atomic(
+        &root.join(JOURNAL),
+        format!("bonsai sync in progress; run `bonsai sync` to finish it\n{names}").as_bytes(),
+    )?;
+    for (done, change) in plan.changes.iter().enumerate() {
         let path = root.join(&change.path);
-        match &change.after {
-            Some(content) => {
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                std::fs::write(&path, content)?;
+        let now = std::fs::read_to_string(&path).ok();
+        let step = if now != change.before {
+            Err(io::Error::other(format!(
+                "{} changed while syncing; nothing more was written",
+                change.path
+            )))
+        } else {
+            match &change.after {
+                Some(content) => write_atomic(&path, content.as_bytes()),
+                None => std::fs::remove_file(&path),
             }
-            None => std::fs::remove_file(&path)?,
+        };
+        if let Err(e) = step {
+            return Err(io::Error::new(
+                e.kind(),
+                format!(
+                    "sync stopped after {done} of {} files: {e}. Run `bonsai sync` again to finish ({JOURNAL} marks the tree until then)",
+                    plan.changes.len()
+                ),
+            ));
         }
     }
-    Ok(())
+    remove_journal(root)
+}
+
+fn remove_journal(root: &Path) -> io::Result<()> {
+    match std::fs::remove_file(root.join(JOURNAL)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// A unified diff of `before` to `after` (lines), with `context` lines
+/// around each change, or None when they're the same.
+pub fn diff(
+    path: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+    context: usize,
+) -> Option<String> {
+    if before == after {
+        return None;
+    }
+    let old: Vec<&str> = before.map(|s| s.lines().collect()).unwrap_or_default();
+    let new: Vec<&str> = after.map(|s| s.lines().collect()).unwrap_or_default();
+    let ops = line_ops(&old, &new);
+    let mut out = format!(
+        "--- {}\n+++ {}\n",
+        if before.is_some() {
+            format!("a/{path}")
+        } else {
+            "/dev/null".to_string()
+        },
+        if after.is_some() {
+            format!("b/{path}")
+        } else {
+            "/dev/null".to_string()
+        },
+    );
+    // Group the ops into hunks: changes and `context` lines either side.
+    let changed: Vec<usize> = (0..ops.len()).filter(|&i| ops[i].0 != ' ').collect();
+    let mut i = 0;
+    while i < changed.len() {
+        let start = changed[i].saturating_sub(context);
+        let mut end = (changed[i] + context + 1).min(ops.len());
+        while i + 1 < changed.len() && changed[i + 1] <= end + context {
+            i += 1;
+            end = (changed[i] + context + 1).min(ops.len());
+        }
+        let (mut a, mut b) = (1, 1);
+        for op in &ops[..start] {
+            if op.0 != '+' {
+                a += 1;
+            }
+            if op.0 != '-' {
+                b += 1;
+            }
+        }
+        let hunk = &ops[start..end];
+        let a_len = hunk.iter().filter(|o| o.0 != '+').count();
+        let b_len = hunk.iter().filter(|o| o.0 != '-').count();
+        let at = |n: usize, len: usize| if len == 0 { n - 1 } else { n };
+        out += &format!(
+            "@@ -{},{a_len} +{},{b_len} @@\n",
+            at(a, a_len),
+            at(b, b_len)
+        );
+        for (op, line) in hunk {
+            out += &format!("{op}{line}\n");
+        }
+        i += 1;
+    }
+    Some(out)
+}
+
+/// The edit from `old` to `new`, line by line: ' ' kept, '-' removed, '+'
+/// added. Common ends are matched first; the middle by longest common
+/// subsequence (or wholly replaced, when it's too big to compare).
+fn line_ops<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<(char, &'a str)> {
+    let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (o, n) = (&old[head..old.len() - tail], &new[head..new.len() - tail]);
+    let mut ops: Vec<(char, &str)> = old[..head].iter().map(|l| (' ', *l)).collect();
+    if o.len().saturating_mul(n.len()) > 4_000_000 {
+        ops.extend(o.iter().map(|l| ('-', *l)));
+        ops.extend(n.iter().map(|l| ('+', *l)));
+    } else {
+        // lcs[i][j]: the longest common subsequence of o[i..] and n[j..].
+        let mut lcs = vec![vec![0u32; n.len() + 1]; o.len() + 1];
+        for i in (0..o.len()).rev() {
+            for j in (0..n.len()).rev() {
+                lcs[i][j] = if o[i] == n[j] {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < o.len() || j < n.len() {
+            if i < o.len() && j < n.len() && o[i] == n[j] {
+                ops.push((' ', o[i]));
+                i += 1;
+                j += 1;
+            } else if i < o.len() && (j == n.len() || lcs[i + 1][j] >= lcs[i][j + 1]) {
+                ops.push(('-', o[i]));
+                i += 1;
+            } else {
+                ops.push(('+', n[j]));
+                j += 1;
+            }
+        }
+    }
+    ops.extend(old[old.len() - tail..].iter().map(|l| (' ', *l)));
+    ops
+}
+
+/// What `bonsai sync --dry-run` prints: each change, with its diff.
+pub fn render_dry_run(plan: &Plan) -> String {
+    if plan.changes.is_empty() {
+        return format!("nothing to change: generated code is in step with {CONFIG}\n");
+    }
+    let mut s = format!(
+        "`bonsai sync` would change {} file(s); nothing has been written:\n",
+        plan.changes.len()
+    );
+    for c in &plan.changes {
+        s += &format!("  {:8} {}\n", c.kind(), c.path);
+    }
+    for c in &plan.changes {
+        s += "\n";
+        s += &diff(&c.path, c.before.as_deref(), c.after.as_deref(), 3).unwrap_or_default();
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh host tree in its own folder, with a branch `sensor` added by
+    /// hand (its table and file, not yet synced).
+    fn tree_with_a_new_branch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("bonsai-sync-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let tmpl = crate::TEMPLATES.get_dir("linux/host").unwrap();
+        crate::extract_dir(tmpl, tmpl.path(), &root).unwrap();
+        let toml = std::fs::read_to_string(root.join(CONFIG)).unwrap();
+        std::fs::write(
+            root.join(CONFIG),
+            format!("{toml}\n[branch.sensor]\nrate = 1\n"),
+        )
+        .unwrap();
+        let scaffold = crate::tree::BRANCH_TEMPLATE
+            .replace("{{branch_name}}", "sensor")
+            .replace("{{BranchName}}", "Sensor");
+        std::fs::write(root.join("src/branches/sensor.rs"), scaffold).unwrap();
+        root
+    }
+
+    fn snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out: Vec<_> = rust_files(&root.join("src"))
+            .unwrap()
+            .into_iter()
+            .chain([root.join(CONFIG), root.join("Cargo.toml")])
+            .map(|p| (p.clone(), std::fs::read(&p).unwrap()))
+            .collect();
+        out.push((
+            root.join(JOURNAL),
+            std::fs::read(root.join(JOURNAL)).unwrap_or_default(),
+        ));
+        out
+    }
+
+    #[test]
+    fn the_preview_and_the_sync_are_the_same_plan() {
+        let root = tree_with_a_new_branch("same-plan");
+        let before = snapshot(&root);
+        let planned = plan(&root).unwrap();
+        let shown = render_dry_run(&planned);
+        assert_eq!(
+            snapshot(&root),
+            before,
+            "planning or previewing wrote something"
+        );
+        let paths: Vec<&str> = planned.changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, ["src/links.rs", "src/branches/mod.rs"]);
+        for c in &planned.changes {
+            assert!(
+                shown.contains(&format!("  changed  {}\n", c.path)),
+                "{shown}"
+            );
+            assert!(shown.contains(&format!("+++ b/{}\n", c.path)), "{shown}");
+        }
+        assert!(shown.contains("+pub mod sensor;\n"), "{shown}");
+        apply(&root, &planned).unwrap();
+        for c in &planned.changes {
+            let now = std::fs::read_to_string(root.join(&c.path)).unwrap();
+            assert_eq!(
+                Some(now),
+                c.after,
+                "{} isn't what the preview showed",
+                c.path
+            );
+        }
+        assert!(
+            plan(&root).unwrap().changes.is_empty(),
+            "a second sync would change more"
+        );
+        assert!(!interrupted(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_invalid_graph_plans_nothing_and_changes_nothing() {
+        let root = tree_with_a_new_branch("invalid");
+        let toml = std::fs::read_to_string(root.join(CONFIG)).unwrap();
+        std::fs::write(
+            root.join(CONFIG),
+            format!("{toml}\n[[link]]\nfrom = \"sensor\"\nmessage = \"Nope\"\nto = [\"ghost\"]\n"),
+        )
+        .unwrap();
+        let before = snapshot(&root);
+        match plan(&root) {
+            Err(Refused::Errors(errors)) => {
+                assert!(errors.iter().any(|e| e.contains("ghost")), "{errors:?}")
+            }
+            other => panic!("expected the graph's errors, got {other:?}"),
+        }
+        std::fs::write(root.join(CONFIG), "[branch.sensor\n").unwrap();
+        assert!(matches!(plan(&root), Err(Refused::Config(_))));
+        let mut after = snapshot(&root);
+        after.retain(|(p, _)| !p.ends_with(CONFIG));
+        let mut before = before;
+        before.retain(|(p, _)| !p.ends_with(CONFIG));
+        assert_eq!(after, before);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_sync_that_fails_part_way_is_marked_and_the_next_one_finishes_it() {
+        let root = tree_with_a_new_branch("fails");
+        let plan1 = plan(&root).unwrap();
+        // The second file can't be replaced: a folder is in its way.
+        let second = root.join(&plan1.changes[1].path);
+        let saved = std::fs::read(&second).unwrap();
+        std::fs::remove_file(&second).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        std::fs::write(second.join("x"), "").unwrap();
+        let err = apply(&root, &plan1).unwrap_err().to_string();
+        assert!(err.contains("sync stopped after 1 of 2 files"), "{err}");
+        assert!(interrupted(&root), "the tree looks synced");
+        let findings = crate::doctor::check(&root);
+        assert!(
+            findings.iter().any(|f| f.id == "generated"
+                && f.status == crate::doctor::Status::Error
+                && f.subject.as_deref() == Some(JOURNAL)),
+            "{findings:?}"
+        );
+        // Put it back; the next sync works the rest out and finishes.
+        std::fs::remove_dir_all(&second).unwrap();
+        std::fs::write(&second, saved).unwrap();
+        let plan2 = plan(&root).unwrap();
+        let paths: Vec<&str> = plan2.changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["src/branches/mod.rs"],
+            "only what wasn't written yet"
+        );
+        apply(&root, &plan2).unwrap();
+        assert!(!interrupted(&root));
+        assert!(plan(&root).unwrap().changes.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_changed_after_planning_is_never_overwritten() {
+        let root = tree_with_a_new_branch("raced");
+        let planned = plan(&root).unwrap();
+        let first = root.join(&planned.changes[0].path);
+        std::fs::write(&first, "// edited meanwhile\n").unwrap();
+        let err = apply(&root, &planned).unwrap_err().to_string();
+        assert!(err.contains("changed while syncing"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "// edited meanwhile\n"
+        );
+        assert!(interrupted(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_sync_touches_generated_files_only() {
+        let root = tree_with_a_new_branch("own-code");
+        let generated = [
+            RUNTIME_RS,
+            LINKS_RS,
+            SETTINGS_RS,
+            BRANCHES_MOD,
+            EDGES_MOD,
+            SERIAL_RS,
+        ];
+        for c in plan(&root).unwrap().changes {
+            assert!(
+                generated.contains(&c.path.as_str()),
+                "{} isn't generated",
+                c.path
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn diffs_are_unified_with_context() {
+        let before = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        let after = "a\nb\nc\nD\ne\nf\ng\nh\ni\n";
+        assert_eq!(
+            diff("x.rs", Some(before), Some(after), 1).unwrap(),
+            "--- a/x.rs\n+++ b/x.rs\n@@ -3,3 +3,3 @@\n c\n-d\n+D\n e\n@@ -8,1 +8,2 @@\n h\n+i\n"
+        );
+        assert_eq!(
+            diff("n.rs", None, Some("one\n"), 3).unwrap(),
+            "--- /dev/null\n+++ b/n.rs\n@@ -0,0 +1,1 @@\n+one\n"
+        );
+        assert_eq!(
+            diff("g.rs", Some("one\n"), None, 3).unwrap(),
+            "--- a/g.rs\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-one\n"
+        );
+        assert_eq!(diff("s.rs", Some("same\n"), Some("same\n"), 3), None);
+    }
+
+    #[test]
+    fn an_atomic_write_leaves_nothing_beside_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("bonsai-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.rs");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(names, ["f.rs"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

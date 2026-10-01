@@ -101,7 +101,8 @@ to = ["display"]
 ```
 
 You can edit `bonsai.toml` by hand too; run `bonsai sync` afterwards to
-regenerate `src/links.rs`. Check the whole graph with:
+regenerate `src/links.rs` (`bonsai sync --dry-run` first shows what it would
+change, as a diff, and writes nothing). Check the whole graph with:
 
 ```sh
 bonsai list

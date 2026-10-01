@@ -244,6 +244,17 @@ fn check_graph(root: &Path, cfg: &crate::graph::Config, out: &mut Vec<Finding>) 
     out.extend(sources);
 
     // Generated files: what `bonsai sync` would change.
+    if sync::interrupted(root) {
+        out.push(
+            finding(
+                "generated",
+                Status::Error,
+                "a `bonsai sync` didn't finish: some files may be from before it, some after",
+            )
+            .about(sync::JOURNAL)
+            .fix("`bonsai sync` finishes it"),
+        );
+    }
     match sync::plan(root) {
         Err(Refused::Errors(_)) => out.push(finding(
             "generated",
@@ -277,7 +288,7 @@ fn check_graph(root: &Path, cfg: &crate::graph::Config, out: &mut Vec<Finding>) 
                         ),
                     )
                     .about(change.path.clone())
-                    .fix("`bonsai sync` regenerates it"),
+                    .fix("`bonsai sync --dry-run` shows the change; `bonsai sync` makes it"),
                 );
             }
         }

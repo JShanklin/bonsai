@@ -81,8 +81,18 @@ fn usage(msg: impl std::fmt::Display) -> ! {
     std::process::exit(2);
 }
 
-/// Refuse anything but a bonsai tree of this version.
+/// Refuse anything but a bonsai tree of this version (and rename an older
+/// tree's `[[wire]]` tables to `[[link]]`).
 pub fn require_tree(cmd: &str) {
+    require_tree_unchanged(cmd);
+    if let Some(src) = with_links(&read(CONFIG)) {
+        std::fs::write(CONFIG, src).unwrap_or_else(|e| exit(format!("can't write {CONFIG}: {e}")));
+        println!("{CONFIG}: [[wire]] tables are [[link]] now");
+    }
+}
+
+/// Refuse anything but a bonsai tree of this version, changing nothing.
+fn require_tree_unchanged(cmd: &str) {
     let cargo = std::fs::read_to_string("Cargo.toml").unwrap_or_default();
     if Path::new("src/sap.rs").exists() || cargo.contains("embassy-executor") {
         exit(format!(
@@ -94,10 +104,6 @@ pub fn require_tree(cmd: &str) {
         exit(format!(
             "run `bonsai {cmd}` inside a bonsai tree (no bonsai.toml and Cargo.toml stamp here)"
         ));
-    }
-    if let Some(src) = with_links(&read(CONFIG)) {
-        std::fs::write(CONFIG, src).unwrap_or_else(|e| exit(format!("can't write {CONFIG}: {e}")));
-        println!("{CONFIG}: [[wire]] tables are [[link]] now");
     }
 }
 
@@ -170,17 +176,14 @@ fn edge_file(name: &str) -> PathBuf {
 /// (`sync::plan`) before anything is written.
 pub fn sync_tree() -> io::Result<()> {
     let root = Path::new(".");
-    let plan = match crate::sync::plan(root) {
-        Ok(plan) => plan,
-        Err(crate::sync::Refused::Config(e)) => exit(e),
-        Err(crate::sync::Refused::Errors(errors)) => {
-            for e in &errors {
-                eprintln!("error: {e}");
-            }
-            exit("the tree has errors; nothing was generated");
-        }
-    };
-    crate::sync::apply(root, &plan)?;
+    let plan = planned(root);
+    if crate::sync::interrupted(root) {
+        println!("finishing a sync that didn't finish");
+    }
+    crate::sync::apply(root, &plan).map_err(|e| {
+        eprintln!("error: {e}");
+        e
+    })?;
     if plan.changes.is_empty() {
         println!("generated code is in step with {CONFIG}");
     } else {
@@ -192,10 +195,42 @@ pub fn sync_tree() -> io::Result<()> {
     Ok(())
 }
 
-/// `bonsai sync`.
-pub fn sync() -> io::Result<()> {
-    require_tree("sync");
-    sync_tree()
+/// What a sync of `root` would change; exits (1) with the tree's errors
+/// when it would generate nothing.
+fn planned(root: &Path) -> crate::sync::Plan {
+    match crate::sync::plan(root) {
+        Ok(plan) => plan,
+        Err(crate::sync::Refused::Config(e)) => exit(e),
+        Err(crate::sync::Refused::Errors(errors)) => {
+            for e in &errors {
+                eprintln!("error: {e}");
+            }
+            exit("the tree has errors; nothing was generated");
+        }
+    }
+}
+
+/// `bonsai sync [--dry-run]`.
+pub fn sync(args: &[String]) -> io::Result<()> {
+    match args {
+        [] => {
+            require_tree_unchanged("sync");
+            sync_tree()
+        }
+        [a] if a == "--dry-run" => {
+            require_tree_unchanged("sync");
+            let plan = planned(Path::new("."));
+            if crate::sync::interrupted(Path::new(".")) {
+                println!("a sync didn't finish; `bonsai sync` finishes it");
+            }
+            print!("{}", crate::sync::render_dry_run(&plan));
+            for w in &plan.warnings {
+                println!("warning: {w}");
+            }
+            Ok(())
+        }
+        _ => usage("usage: bonsai sync [--dry-run]"),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -423,9 +458,36 @@ fn remove_arm(branch: &str, variant: &str) -> io::Result<()> {
     // Put a pulled-up marker back first, so it isn't removed with its arm.
     let fixed = crate::marker_on_own_line(&src, INPUT_ARM);
     if let Some(new) = crate::remove_balanced_span(&fixed, |l| is_input_arm(l, variant)) {
-        std::fs::write(&path, new)?;
+        std::fs::write(&path, &new)?;
+        // Say so when it held code of the user's, not just the empty arm
+        // `link` put there: that's their work going.
+        let removed = removed_lines(&fixed, &new);
+        let empty = matches!(removed.as_slice(), [line]
+            if line.trim_end().trim_end_matches(',').ends_with("=> {}"));
+        if !empty {
+            println!(
+                "note: removed the `Input::{variant}` arm from {}, with its code ({} lines)",
+                path.display(),
+                removed.len()
+            );
+        }
     }
     Ok(())
+}
+
+/// The lines `before` has and `after` doesn't, when `after` is `before`
+/// with one span taken out.
+fn removed_lines<'a>(before: &'a str, after: &str) -> Vec<&'a str> {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    old[head..old.len() - tail].to_vec()
 }
 
 /// Bring every branch's arms in step with a graph change: add an arm for each
@@ -536,8 +598,10 @@ pub fn branch_remove(name: &str) -> io::Result<()> {
     let path = branch_file(name);
     if path.exists() {
         std::fs::remove_file(&path)?;
+        println!("removed branch {name} and its code, {}", path.display());
+    } else {
+        println!("removed branch {name}");
     }
-    println!("removed branch {name}");
     sync_tree()
 }
 
@@ -648,10 +712,24 @@ pub fn edge_remove(name: &str) -> io::Result<()> {
     let after = remove_node(&mut doc, "edge", name)?;
     reconcile_arms(&before, &after)?;
     let path = edge_file(name);
+    let mut what = format!("removed edge {name}");
     if custom && path.exists() {
         std::fs::remove_file(&path)?;
+        what += &format!(" and its code, {}", path.display());
     }
-    println!("removed edge {name}");
+    // Branches that sent to it still call `out.to_<name>(..)`: say where.
+    let senders: Vec<&str> = before
+        .links
+        .iter()
+        .filter(|l| {
+            l.message.is_none() && before.is_branch(&l.from) && l.to.iter().any(|t| t == name)
+        })
+        .map(|l| l.from.as_str())
+        .collect();
+    if !senders.is_empty() {
+        what += &format!("; take `out.to_{name}(..)` out of {}", senders.join(", "));
+    }
+    println!("{what}");
     sync_tree()
 }
 
@@ -1162,6 +1240,17 @@ pub fn with_macro_use(main_src: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_lines_are_the_span_taken_out() {
+        let before = "a\n  X => {\n    work();\n  }\n  // m\n";
+        let after = "a\n  // m\n";
+        assert_eq!(
+            removed_lines(before, after),
+            ["  X => {", "    work();", "  }"]
+        );
+        assert_eq!(removed_lines("a\nb\n", "a\n"), ["b"]);
+    }
 
     #[test]
     fn the_wiring_module_becomes_links() {

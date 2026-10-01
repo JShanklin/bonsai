@@ -79,8 +79,18 @@ pub struct Sys {
     pub mem_available_kb: u64,
 }
 
+/// What the tree's recorder (its run logs) is doing.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Record {
+    /// `off`, `starting`, `on` or `unavailable`.
+    pub state: String,
+    /// The run's folder (on), or why not.
+    pub detail: String,
+}
+
 /// One report from the tree: its counts, and the log lines since the last.
-/// A tree from before `link` and `sys` rows sends none of either.
+/// A tree from before `link` and `sys` rows sends none of either, and one
+/// from before `record` rows none of those.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub uptime_ms: u64,
@@ -91,6 +101,7 @@ pub struct Snapshot {
     pub edges: Vec<Edge>,
     pub links: Vec<Link>,
     pub sys: Option<Sys>,
+    pub record: Option<Record>,
     pub logs: Vec<String>,
 }
 
@@ -183,11 +194,136 @@ pub fn parse(lines: &[String]) -> io::Result<Snapshot> {
                     mem_available_kb: num(f.next())?,
                 })
             }
+            Some("record") => {
+                s.record = Some(Record {
+                    state: f.next().unwrap_or_default().to_string(),
+                    detail: f.next().unwrap_or_default().to_string(),
+                })
+            }
             Some("log") => s.logs.push(line["log\t".len()..].to_string()),
             _ => {} // a row kind from a newer tree: skip it
         }
     }
     Ok(s)
+}
+
+// ---------------------------------------------------------------------------
+// Why a part is quiet: from the counts, never guessing past them
+// ---------------------------------------------------------------------------
+
+/// How a branch, edge or the recorder is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Health {
+    /// Working as far as the counts show.
+    Ok,
+    /// Nothing seen yet: not a fault, but worth knowing.
+    Quiet,
+    /// Something's wrong: out of service, retrying, losing messages.
+    Problem,
+}
+
+/// What a branch is doing, or why it's quiet, as far as the counts say.
+pub fn branch_status(b: &Branch, s: &Snapshot) -> (Health, String) {
+    if b.failed {
+        return (
+            Health::Problem,
+            format!(
+                "out of service: its setup panicked; set up again on a later input ({} inputs dropped)",
+                b.discarded
+            ),
+        );
+    }
+    if b.inputs > 0 {
+        return (Health::Ok, "running".to_string());
+    }
+    // A tree from before link rows can't say what feeds a branch.
+    if s.links.is_empty() && s.sys.is_none() {
+        return (Health::Quiet, "no input observed".to_string());
+    }
+    let feeding: Vec<&Link> = s.links.iter().filter(|l| l.to.contains(&b.name)).collect();
+    if feeding.is_empty() {
+        return (
+            Health::Quiet,
+            "no input observed; nothing is linked to it, so only a rate would feed it".to_string(),
+        );
+    }
+    let from: Vec<&str> = feeding.iter().map(|l| l.from.as_str()).collect();
+    (
+        Health::Quiet,
+        format!(
+            "no input observed; nothing has come over its links yet (from {})",
+            from.join(", ")
+        ),
+    )
+}
+
+/// What an edge is doing, and what it's lost, as far as the counts say.
+pub fn edge_status(e: &Edge) -> (Health, String) {
+    let mut health = Health::Ok;
+    let mut parts = Vec::new();
+    match e.state.as_str() {
+        "retrying" => {
+            health = Health::Problem;
+            parts.push(if e.error.is_empty() {
+                "retrying".to_string()
+            } else {
+                format!("retrying: {}", e.error)
+            });
+        }
+        "up" => parts.push("up".to_string()),
+        _ => {
+            health = Health::Quiet;
+            parts.push("connecting: not up yet".to_string());
+        }
+    }
+    if e.dropped > 0 {
+        health = Health::Problem;
+        parts.push(format!("{} dropped: its queue was full", e.dropped));
+    }
+    if e.lost() > 0 {
+        health = Health::Problem;
+        parts.push(format!(
+            "{} lost ({} failed to send, {} not delivered)",
+            e.lost(),
+            e.failed,
+            e.discarded
+        ));
+    }
+    if health == Health::Ok && e.received == 0 && e.sent == 0 {
+        health = Health::Quiet;
+        parts.push("no traffic observed".to_string());
+    }
+    if e.state == "up" && !e.error.is_empty() {
+        parts.push(format!("last error: {}", e.error));
+    }
+    (health, parts.join("; "))
+}
+
+/// The recorder's state, in a line.
+pub fn record_status(s: &Snapshot) -> (Health, String) {
+    let Some(r) = &s.record else {
+        return (
+            Health::Quiet,
+            "run logs: not reported by this tree (`bonsai sync` brings its runtime up to date)"
+                .to_string(),
+        );
+    };
+    let detail = |what: &str| {
+        if r.detail.is_empty() {
+            what.to_string()
+        } else {
+            format!("{what} ({})", r.detail)
+        }
+    };
+    match r.state.as_str() {
+        "on" => (Health::Ok, format!("run logs: on, in {}", r.detail)),
+        "starting" => (Health::Quiet, format!("run logs: {}", detail("starting"))),
+        "unavailable" => (
+            Health::Problem,
+            format!("run logs: unavailable: {}", r.detail),
+        ),
+        _ => (Health::Quiet, format!("run logs: {}", detail("off"))),
+    }
 }
 
 /// Per second, from two counts `ms` apart.
@@ -238,8 +374,14 @@ pub fn destination(arg: Option<&str>, env: Option<&str>, config: Option<&str>) -
 // ---------------------------------------------------------------------------
 
 pub(crate) enum Update {
-    Snapshot(Snapshot),
+    Snapshot(Box<Snapshot>),
     Down(String),
+}
+
+impl From<Snapshot> for Update {
+    fn from(s: Snapshot) -> Self {
+        Update::Snapshot(Box::new(s))
+    }
 }
 
 /// A connection to a tree: its reader, and the ssh process behind it.
@@ -309,7 +451,7 @@ fn reader(
                 let why = loop {
                     match read_snapshot(&mut r) {
                         Ok(Some(s)) => {
-                            if tx.send(Update::Snapshot(s)).is_err() {
+                            if tx.send(Update::from(s)).is_err() {
                                 return;
                             }
                         }
@@ -410,18 +552,15 @@ fn print_once(dest: &Option<String>, port: u16, title: &str) -> io::Result<()> {
         took(b.max_event_us),
         b.inbox
     );
+    println!("{}", record_status(&b).1);
     println!(
-        "{:<16} {:>9} {:>9} {:>9} {:>9} {:>7}",
+        "{:<16} {:>9} {:>9} {:>9} {:>9} {:>7}  status",
         "branch", "inputs/s", "sent/s", "avg µs", "max µs", "panics"
     );
     for (i, br) in b.branches.iter().enumerate() {
         let before = a.branches.get(i).filter(|x| x.name == br.name);
         let (inputs, sent) = before.map_or((0, 0), |x| (x.inputs, x.sent));
-        let out = if br.failed {
-            format!("  out of service ({} inputs dropped)", br.discarded)
-        } else {
-            String::new()
-        };
+        let out = format!("  {}", branch_status(br, &b).1);
         println!(
             "{:<16} {:>9.1} {:>9.1} {:>9} {:>9} {:>7}{out}",
             br.name,
@@ -434,7 +573,7 @@ fn print_once(dest: &Option<String>, port: u16, title: &str) -> io::Result<()> {
     }
     if !b.edges.is_empty() {
         println!(
-            "{:<16} {:>9} {:>9} {:>9} {:>9} {:>9} {:>7}  last error",
+            "{:<16} {:>9} {:>9} {:>9} {:>9} {:>9} {:>7}  status",
             "edge", "state", "in/s", "out/s", "dropped", "lost", "restarts"
         );
         for (i, e) in b.edges.iter().enumerate() {
@@ -449,7 +588,7 @@ fn print_once(dest: &Option<String>, port: u16, title: &str) -> io::Result<()> {
                 e.dropped,
                 e.lost(),
                 e.restarts,
-                e.error
+                edge_status(e).1
             );
         }
     }
@@ -492,6 +631,7 @@ mod tests {
     const REPORT: &str = "bonsai-top 1\t1500\t3\t40\t0\n\
          branch\tsensor\t3\t0\t0\t12\t5\t1\t4\n\
          edge\tnet\tretrying\t1\t2\t0\t1\tbind x\t3\t1\t0\n\
+         record\ton\tlogs/2026-10-01_10-00-00\n\
          log\t14:05:03.123Z  INFO sensor: 26.5 °C\n\
          end\n\
          bonsai-top 1\t2000\t4\t40\t0\n\
@@ -526,9 +666,18 @@ mod tests {
             (3, 1, 0)
         );
         assert_eq!(s.logs, ["14:05:03.123Z  INFO sensor: 26.5 °C"]);
+        assert_eq!(
+            s.record,
+            Some(Record {
+                state: "on".into(),
+                detail: "logs/2026-10-01_10-00-00".into()
+            })
+        );
         let s = read_snapshot(&mut r).unwrap().unwrap();
         assert_eq!(s.uptime_ms, 2000);
         assert!(s.branches.is_empty());
+        // A tree from before record rows: no recorder state.
+        assert_eq!(s.record, None);
         // A tree from before the queue counts: they read as 0.
         assert_eq!((s.edges[0].sent, s.edges[0].accepted), (6, 0));
         assert_eq!(read_snapshot(&mut r).unwrap(), None);
@@ -586,5 +735,156 @@ mod tests {
             destination(Some("x@y"), None, Some(pi)).as_deref(),
             Some("x@y")
         );
+    }
+
+    fn branch(name: &str, inputs: u64) -> Branch {
+        Branch {
+            name: name.into(),
+            inputs,
+            ..Default::default()
+        }
+    }
+
+    fn link(from: &str, to: &str, count: u64) -> Link {
+        Link {
+            from: from.into(),
+            label: "Reading".into(),
+            to: vec![to.into()],
+            count,
+        }
+    }
+
+    #[test]
+    fn a_quiet_branch_says_what_is_known_and_no_more() {
+        let newer = Snapshot {
+            links: vec![link("sensor", "display", 0)],
+            sys: Some(Sys::default()),
+            ..Default::default()
+        };
+        let quiet = |b: &Branch, s: &Snapshot| branch_status(b, s);
+        assert_eq!(
+            quiet(&branch("display", 3), &newer),
+            (Health::Ok, "running".into())
+        );
+        assert_eq!(
+            quiet(&branch("display", 0), &newer),
+            (
+                Health::Quiet,
+                "no input observed; nothing has come over its links yet (from sensor)".into()
+            )
+        );
+        assert_eq!(
+            quiet(&branch("sensor", 0), &newer),
+            (
+                Health::Quiet,
+                "no input observed; nothing is linked to it, so only a rate would feed it".into()
+            )
+        );
+        // An older tree doesn't say what feeds what: no more than that.
+        assert_eq!(
+            quiet(&branch("sensor", 0), &Snapshot::default()),
+            (Health::Quiet, "no input observed".into())
+        );
+        let failed = Branch {
+            failed: true,
+            discarded: 4,
+            ..branch("display", 9)
+        };
+        let (health, text) = quiet(&failed, &newer);
+        assert_eq!(health, Health::Problem);
+        assert!(
+            text.starts_with("out of service: its setup panicked")
+                && text.contains("4 inputs dropped"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_edge_says_whether_its_up_and_what_it_lost() {
+        let edge = |state: &str, error: &str| Edge {
+            name: "uplink".into(),
+            state: state.into(),
+            error: error.into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            edge_status(&edge("retrying", "bind 0.0.0.0:6969: in use")),
+            (
+                Health::Problem,
+                "retrying: bind 0.0.0.0:6969: in use".into()
+            )
+        );
+        assert_eq!(
+            edge_status(&edge("starting", "")),
+            (Health::Quiet, "connecting: not up yet".into())
+        );
+        assert_eq!(
+            edge_status(&edge("up", "")),
+            (Health::Quiet, "up; no traffic observed".into())
+        );
+        let busy = Edge {
+            received: 5,
+            sent: 9,
+            ..edge("up", "connect: refused")
+        };
+        assert_eq!(
+            edge_status(&busy),
+            (Health::Ok, "up; last error: connect: refused".into())
+        );
+        let losing = Edge {
+            dropped: 3,
+            failed: 1,
+            discarded: 2,
+            ..busy
+        };
+        assert_eq!(
+            edge_status(&losing),
+            (
+                Health::Problem,
+                "up; 3 dropped: its queue was full; 3 lost (1 failed to send, 2 not delivered); last error: connect: refused".into()
+            )
+        );
+    }
+
+    #[test]
+    fn the_recorder_says_off_starting_on_or_unavailable() {
+        let with = |state: &str, detail: &str| Snapshot {
+            record: Some(Record {
+                state: state.into(),
+                detail: detail.into(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            record_status(&with("on", "logs/2026-10-01_10-00-00")),
+            (
+                Health::Ok,
+                "run logs: on, in logs/2026-10-01_10-00-00".into()
+            )
+        );
+        assert_eq!(
+            record_status(&with("off", "BONSAI_RECORD=off")),
+            (Health::Quiet, "run logs: off (BONSAI_RECORD=off)".into())
+        );
+        assert_eq!(
+            record_status(&with("starting", "making a run folder in logs")),
+            (
+                Health::Quiet,
+                "run logs: starting (making a run folder in logs)".into()
+            )
+        );
+        assert_eq!(
+            record_status(&with(
+                "unavailable",
+                "another tree held logs/.bonsai-record.lock for 5s"
+            )),
+            (
+                Health::Problem,
+                "run logs: unavailable: another tree held logs/.bonsai-record.lock for 5s".into()
+            )
+        );
+        let (health, text) = record_status(&Snapshot::default());
+        assert_eq!(health, Health::Quiet);
+        assert!(text.contains("not reported"), "{text}");
     }
 }

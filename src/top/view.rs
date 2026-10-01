@@ -20,7 +20,10 @@ use ratatui::widgets::{Block, Gauge, Paragraph, Row, Table, TableState};
 use ratatui::{DefaultTerminal, Frame};
 
 use super::graph::{self, Canvas, Node};
-use super::{Snapshot, Update, WINDOW_MS, avg_us, per_sec, source, took, uptime};
+use super::{
+    Health, Snapshot, Update, WINDOW_MS, avg_us, branch_status, edge_status, per_sec,
+    record_status, source, took, uptime,
+};
 
 /// Log lines top keeps.
 const KEEP: usize = 1000;
@@ -108,7 +111,8 @@ impl App {
 
     pub fn update(&mut self, u: Update) {
         match u {
-            Update::Snapshot(mut s) => {
+            Update::Snapshot(s) => {
+                let mut s = *s;
                 self.status = None;
                 // A restarted tree starts its counts again.
                 if self.now.as_ref().is_some_and(|n| s.uptime_ms < n.uptime_ms) {
@@ -303,6 +307,10 @@ impl App {
                     s.inbox
                 )));
             }
+        }
+        if let Some(s) = &self.now {
+            let (health, text) = record_status(s);
+            header.push(Span::styled(format!("  {text}"), health_style(health)));
         }
         if self.paused {
             header.push(Span::styled("  paused", Style::new().fg(Color::Yellow)));
@@ -569,6 +577,8 @@ impl App {
                     ", OUT OF SERVICE: its setup panicked ({} inputs dropped)",
                     b.discarded
                 );
+            } else if b.inputs == 0 {
+                line += &format!(", {}", branch_status(b, now).1);
             }
             return line;
         }
@@ -582,7 +592,10 @@ impl App {
                 e.lost(),
                 e.restarts
             );
-            if !e.error.is_empty() {
+            let (health, status) = edge_status(e);
+            if health != Health::Ok {
+                s += &format!(": {status}");
+            } else if !e.error.is_empty() {
                 s += &format!(" (last: {})", e.error);
             }
             return s;
@@ -611,6 +624,7 @@ impl App {
             } else {
                 Line::from(b.name.clone())
             };
+            let (health, status) = branch_status(b, s);
             Row::new(vec![
                 name,
                 Line::from(format!("{:.1}", per_sec(inputs, b.inputs, ms))).right_aligned(),
@@ -618,19 +632,23 @@ impl App {
                 Line::from(avg_us(b).to_string()).right_aligned(),
                 Line::from(b.max_us.to_string()).right_aligned(),
                 Line::from(panics).right_aligned(),
+                Line::from(Span::styled(status, health_style(health))),
             ])
         });
         let widths = [
-            Constraint::Min(16),
+            Constraint::Length(16),
             Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Length(9),
             Constraint::Length(7),
+            Constraint::Min(10),
         ];
-        let heads = ["branch", "inputs/s", "sent/s", "avg µs", "max µs", "panics"];
+        let heads = [
+            "branch", "inputs/s", "sent/s", "avg µs", "max µs", "panics", "status",
+        ];
         let table = Table::new(rows, widths)
-            .header(header_row(&heads, &["branch"]))
+            .header(header_row(&heads, &["branch", "status"]))
             .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .block(Block::bordered().title(" branches "));
         let n = s.branches.len();
@@ -660,7 +678,10 @@ impl App {
                 Line::from(e.dropped.to_string()).right_aligned(),
                 Line::from(e.lost().to_string()).right_aligned(),
                 Line::from(e.restarts.to_string()).right_aligned(),
-                Line::from(e.error.clone()),
+                {
+                    let (health, status) = edge_status(e);
+                    Line::from(Span::styled(status, health_style(health)))
+                },
             ])
         });
         let widths = [
@@ -674,17 +695,10 @@ impl App {
             Constraint::Min(10),
         ];
         let heads = [
-            "edge",
-            "state",
-            "in/s",
-            "out/s",
-            "dropped",
-            "lost",
-            "restarts",
-            "last error",
+            "edge", "state", "in/s", "out/s", "dropped", "lost", "restarts", "status",
         ];
         let table = Table::new(rows, widths)
-            .header(header_row(&heads, &["edge", "state", "last error"]))
+            .header(header_row(&heads, &["edge", "state", "status"]))
             .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED))
             .block(Block::bordered().title(" edges "));
         let b = s.branches.len();
@@ -921,6 +935,15 @@ impl App {
     }
 }
 
+/// How a status reads: green when working, gray when quiet, red when wrong.
+fn health_style(health: Health) -> Style {
+    Style::new().fg(match health {
+        Health::Ok => Color::Green,
+        Health::Quiet => Color::DarkGray,
+        Health::Problem => Color::Red,
+    })
+}
+
 fn next_tab(tab: Tab, by: usize) -> Tab {
     let i = TABS.iter().position(|(t, _)| *t == tab).unwrap_or(0);
     TABS[(i + by) % TABS.len()].0
@@ -1036,7 +1059,7 @@ mod tests {
     use crate::top::{Branch, Link};
 
     fn snapshot(ms: u64) -> Update {
-        Update::Snapshot(Snapshot {
+        Update::from(Snapshot {
             uptime_ms: ms,
             ..Default::default()
         })
@@ -1086,7 +1109,7 @@ mod tests {
             "12:00:00.000Z  WARN display: too hot".into(),
             "12:00:00.000Z DEBUG sensor: raw 265".into(),
         ];
-        app.update(Update::Snapshot(s));
+        app.update(Update::from(s));
         assert_eq!(app.shown_logs(None).len(), 3);
         assert_eq!(app.shown_logs(Some("display")).len(), 2);
         app.tab = Tab::Log;
@@ -1115,7 +1138,7 @@ mod tests {
     #[test]
     fn a_branch_out_of_service_is_red_and_says_so() {
         let mut app = App::new("t".into());
-        app.update(Update::Snapshot(Snapshot {
+        app.update(Update::from(Snapshot {
             uptime_ms: 500,
             branches: vec![Branch {
                 name: "display".into(),
@@ -1142,7 +1165,7 @@ mod tests {
     fn a_recent_panic_turns_a_branch_red() {
         let mut app = App::new("t".into());
         let at = |ms: u64, panics: u64| {
-            Update::Snapshot(Snapshot {
+            Update::from(Snapshot {
                 uptime_ms: ms,
                 branches: vec![Branch {
                     name: "display".into(),
@@ -1161,5 +1184,75 @@ mod tests {
         assert_eq!(app.color(&node), Color::DarkGray);
         app.update(at(500, 1));
         assert_eq!(app.color(&node), Color::Red);
+    }
+
+    /// What a tab shows, as text.
+    fn drawn(app: &mut App, tab: Tab) -> String {
+        app.tab = tab;
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 12)).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let mut text = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                text += buf[(x, y)].symbol();
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn quiet_and_failing_parts_say_why_in_their_tables() {
+        use crate::top::{Edge, Record};
+        let mut app = App::new("t".into());
+        app.update(Update::from(Snapshot {
+            uptime_ms: 500,
+            branches: vec![
+                Branch {
+                    name: "sensor".into(),
+                    inputs: 4,
+                    sent: 4,
+                    ..Default::default()
+                },
+                Branch {
+                    name: "display".into(),
+                    ..Default::default()
+                },
+            ],
+            edges: vec![Edge {
+                name: "uplink".into(),
+                state: "retrying".into(),
+                error: "bind 0.0.0.0:6969: in use".into(),
+                ..Default::default()
+            }],
+            links: vec![Link {
+                from: "sensor".into(),
+                label: "Alarm".into(),
+                to: vec!["display".into()],
+                count: 0,
+            }],
+            record: Some(Record {
+                state: "unavailable".into(),
+                detail: "can't make a run folder in /ro: read-only".into(),
+            }),
+            ..Default::default()
+        }));
+        let branches = drawn(&mut app, Tab::Branches);
+        assert!(branches.contains("running"), "{branches}");
+        assert!(
+            branches
+                .contains("no input observed; nothing has come over its links yet (from sensor)"),
+            "{branches}"
+        );
+        assert!(
+            branches.contains("run logs: unavailable: can't make a run folder in /ro"),
+            "{branches}"
+        );
+        let edges = drawn(&mut app, Tab::Edges);
+        assert!(
+            edges.contains("retrying: bind 0.0.0.0:6969: in use"),
+            "{edges}"
+        );
     }
 }

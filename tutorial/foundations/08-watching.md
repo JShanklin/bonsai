@@ -147,22 +147,18 @@ click:
 
 1. **Graph**, above. `←→↑↓` select a node; `enter` opens its log.
 2. **Branches**: each branch in the order the core runs them, with inputs
-   and sends a second, the average and longest time `process` took, and
-   panics.
-
-   ```
-   ┌ branches ──────────────────────────────────────────────────────────────────────────────┐
-   │branch                                    inputs/s    sent/s    avg µs    max µs  panics│
-   │sensor                                         1.0       1.0         4         6       0│
-   │watchdog                                       1.0       2.0         3         7       0│
-   │display                                        2.0       0.0        19        32       1│
-   │                                                                                        │
-   ```
-
+   and sends a second, the average and longest time `process` took,
+   panics, and a **status**: `running`, `out of service` (its setup
+   panicked), or, for a branch that hasn't had a single input, why it's
+   quiet as far as the tree can tell: `no input observed; nothing is linked
+   to it, so only a rate would feed it`, or `nothing has come over its
+   links yet (from sensor)`. It never guesses past what it saw.
 3. **Edges**: `up` or `retrying`, packets in and out a second, what was
    **dropped** because the edge's queue was full, what was **lost** after
    the edge took it (it failed carrying it out, or couldn't deliver it to a
-   slow client), restarts, and why it last failed.
+   slow client), restarts, and a status that puts it in words: `retrying:
+   bind 0.0.0.0:6969: Address already in use…`, `connecting: not up yet`,
+   `up; no traffic observed`, `3 dropped: its queue was full`.
 4. **Log**: the lines as they come. `↑↓`/`PgUp`/`PgDn` scroll back, `/`
    searches, `l` steps through the levels shown (all, info+, warn+,
    errors), `esc` clears.
@@ -171,7 +167,9 @@ click:
 
 **The header** above the tabs is the core, on every tab: how long it's run,
 events a second, the slowest event so far, and how many are waiting (more
-than a few means the core is falling behind). `p` pauses the numbers; `q`
+than a few means the core is falling behind). Then the [run
+logs](../guides/run-logs.md): `on, in logs/…`, `off` (and why: no
+`[record]`, `BONSAI_RECORD=off`), `starting`, or `unavailable` and why. `p` pauses the numbers; `q`
 quits. It's all one program in one terminal: no tmux or zellij needed.
 
 Why `local`? The greenhouse is a Pi tree, so plain `bonsai top` goes to the
@@ -191,18 +189,19 @@ bonsai top local --once
 ```
 
 ```
-greenhouse: up 9s, 1 events/s, slowest event 143 µs, 0 waiting
-branch            inputs/s    sent/s    avg µs    max µs  panics
-sensor                 1.0       1.0         4         5       0
-watchdog               1.0       0.0         2         7       0
-display                1.0       0.0        21        32       1
-edge                 state      in/s     out/s   dropped      lost restarts  last error
-uplink                  up       0.0       0.0         0         0       0  
+greenhouse: up 11s, 1 events/s, slowest event 70.5 ms, 0 waiting
+run logs: on, in logs/2026-10-01_02-46-54
+branch            inputs/s    sent/s    avg µs    max µs  panics  status
+sensor                 1.2       1.2         4         5       0  running
+watchdog               1.2       1.6         6        37       0  running
+display                2.0       0.0        33        57       1  running
+edge                 state      in/s     out/s   dropped      lost restarts  status
+uplink                  up       0.0       0.8         0         0       0  up
 link                                                msgs/s
-sensor --Reading--> watchdog, display                  1.0
-watchdog --Alarm--> display                            0.0
+sensor --Reading--> watchdog, display                  1.2
+watchdog --Alarm--> display                            0.8
 uplink --> watchdog                                    0.0
-watchdog --> uplink                                    0.0
+watchdog --> uplink                                    0.8
 ```
 
 The tree serves these on `127.0.0.1:7777`, on its own computer only (ssh is
@@ -211,7 +210,10 @@ ports: `BONSAI_TOP=7778 cargo local`, then `bonsai top local --port 7778`.
 `BONSAI_TOP=off` turns it off.
 
 Counting what branches do never changes what they send: the tree behaves
-the same with `bonsai top` watching or not.
+the same with `bonsai top` watching or not. A tree whose `src/bonsai.rs`
+is older than a `bonsai top` shows what it does report, says what it
+doesn't (`run logs: not reported by this tree`), and `bonsai sync` brings
+it up to date.
 
 Now delete the `assert!` from the display, and commit.
 

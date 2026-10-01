@@ -9,7 +9,7 @@ tree builds with are installed; each problem comes with what to do:
 ```
   ok    graph             2 branch(es), 1 edge(s), 3 link(s)
   ERROR generated         src/settings.rs is out of date: `bonsai sync` would change it
-                          → `bonsai sync` regenerates it
+                          → `bonsai sync --dry-run` shows the change; `bonsai sync` makes it
 ```
 
 It exits 1 when something's an error (0 with only warnings), and

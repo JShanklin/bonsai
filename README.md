@@ -143,7 +143,8 @@ bonsai link <from> <to> [<to> …]                with an edge at one end: no me
 bonsai rate <branch> <hz|off>                   tick a branch this many times a second
 bonsai list                                     branches, links, warnings
 bonsai doctor [--json]                          check the tree (read-only) and say what to fix
-bonsai sync                                     regenerate src/links.rs after editing bonsai.toml
+bonsai sync [--dry-run]                         regenerate src/links.rs after editing bonsai.toml
+                                                (--dry-run: show each change as a diff, write nothing)
 bonsai top [user@host] [--once]                 watch a running tree, here or on a Pi
 bonsai update                                   refresh template crates and Cargo.lock
 bonsai regrow                                   reset the tree to a fresh template

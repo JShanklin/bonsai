@@ -1363,7 +1363,7 @@ mod tests {
         tree::rate("sensor", "10").unwrap();
         tree::record(&args(&["errors", "on"])).unwrap();
         tree::record(&args(&["dir", "/srv/gh"])).unwrap();
-        tree::sync().unwrap();
+        tree::sync(&[]).unwrap();
 
         let toml = read("bonsai.toml");
         assert!(toml.contains("[branch.sensor]\nrate = 10\n"), "{toml}");
@@ -2421,7 +2421,8 @@ fn print_help() {
     println!(
         "  bonsai record keep_runs|keep_days|max_file_kb <n>   how much to keep (0: no limit)"
     );
-    println!("  bonsai sync            regenerate src/links.rs after editing bonsai.toml");
+    println!("  bonsai sync [--dry-run]  regenerate src/links.rs after editing bonsai.toml");
+    println!("                         (--dry-run: show each change, write nothing)");
     println!("  bonsai list            the tree's branches and links, and any warnings");
     println!("  bonsai doctor [--json] check the tree, read-only: graph, files, generated");
     println!("                         code, tools; each problem with what to do");
@@ -2474,7 +2475,10 @@ fn main() -> io::Result<()> {
             let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
             tree::record(&rest)
         }
-        ["sync"] => tree::sync(),
+        ["sync", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
+            tree::sync(&rest)
+        }
         ["doctor", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|a| a.to_string()).collect();
             doctor::doctor(&rest)

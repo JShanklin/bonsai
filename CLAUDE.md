@@ -47,7 +47,7 @@ cargo run -- rate <branch> <hz|off>       # Input::Tick at that rate
 cargo run -- record [<kind> on|off]       # run logs: events, panics, errors, edges ([record])
 cargo run -- record dir <folder>          # where each run's folder goes
 cargo run -- record keep_runs|keep_days|max_file_kb <n>   # retention (0: no limit)
-cargo run -- sync           # regenerate src/{bonsai,links,settings}.rs, branches/ and edges/mod.rs
+cargo run -- sync [--dry-run]   # (--dry-run: each change as a diff, nothing written) regenerate src/{bonsai,links,settings}.rs, branches/ and edges/mod.rs
 cargo run -- list           # branches, links, errors and warnings
 cargo run -- doctor [--json]   # read-only checks, each with a fix; exit 1 on an error
 cargo run -- retarget <board>  # move the tree to another board (pi5, zero-2w, zero-w, host)
@@ -272,7 +272,16 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   before/after, a `label` for the `updated …` line; migrations included:
   `[[wire]]`, `src/wiring.rs`, `#[macro_use]`, Cargo.toml deps), reading
   only, refused (`Refused`) on config or graph errors or missing
-  branch/custom-edge files; `tree::sync_tree` applies it. `src/doctor.rs`:
+  branch/custom-edge files; `tree::sync_tree` applies it (`sync::apply`:
+  each file by `write_atomic`, temp beside it, fsync, rename; a file that
+  differs from the plan's `before` stops it; the set isn't atomic, so the
+  `.bonsai-sync` journal (`JOURNAL`) is written first and removed last: a
+  tree left with it is "interrupted", reported by doctor and finished by
+  the next sync, which plans again from bonsai.toml) and `--dry-run`
+  prints `render_dry_run` (`diff`: unified, LCS on lines, 3 lines of
+  context) from the same plan. Graph commands say when they remove an arm
+  with code in it, a branch's or custom edge's file, or an edge other
+  branches still send to. `src/doctor.rs`:
   `bonsai doctor [--json]`, read-only `Finding`s (`id` stable: tree, config,
   graph, sources, generated, markers, toolchain.cargo/target/linker,
   tools.<name>, deploy.address; `status` ok/skipped/warning/error;

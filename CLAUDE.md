@@ -267,7 +267,9 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   settings become `UdpConfig`/`TcpConfig`/`SerialConfig` consts. `Core` holds a
   `Slot` per branch and an `EdgeOut` per edge, delivers each `Msg` and each
   `Event::Edge` to its `to` list in order (cloning for all but the last), and
-  `start_edges` spawns every edge. A branch's struct is
+  `start_edges` spawns every edge. For tests, `tick_<branch>()` (rated
+  branches) and `from_<edge>(value)` (every edge) hand the core one
+  `Event::Tick(i)`/`Event::Edge(..)` by name, beside `drain_<edge>()`. A branch's struct is
   `branches::<name>::<CamelName>`, a custom edge's `edges::<name>::<CamelName>`
   (its `In`/`Out` used as `<T as Edge>::In`). Runtime types are written fully
   qualified, so a message can't shadow them; `Packet` and friends are also

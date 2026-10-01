@@ -72,22 +72,29 @@ sensor over eight ticks).
 
 ## The whole tree
 
-`Core::new()` sets up every branch; `core.handle(event)` runs one event to
-completion, exactly as the running tree does. With no edges started, what
-branches send an edge is kept, and `core.drain_<edge>()` returns it:
+`Core::new()` sets up every branch. Each of these runs one event to
+completion, exactly as the running tree does:
+
+- `core.tick_<branch>()`: one tick of a branch's rate (there's one for each
+  branch with a `rate`).
+- `core.from_<edge>(value)`: something an edge received. For built-in edges,
+  `value` is a `Packet`; set `peer` to test replies (`Packet { bytes:
+  b"hello".to_vec(), peer: "10.0.0.7:5000".parse().ok() }`).
+
+With no edges started, what branches send an edge is kept, and
+`core.drain_<edge>()` returns it:
 
 ```rust
 #[cfg(test)]
 mod tests {
-    use crate::bonsai::{Event, Packet, Tree};
-    use crate::links::{Core, EdgeIn};
+    use crate::bonsai::Packet;
+    use crate::links::Core;
 
     #[test]
     fn a_lower_limit_sets_off_an_alarm() {
         let mut core = Core::new();
-        let limit = Packet::new("limit 26");
-        core.handle(Event::Edge(EdgeIn::Uplink(limit)));
-        core.handle(Event::Tick(0)); // sensor, the first branch: 26.5 °C
+        core.from_uplink(Packet::new("limit 26"));
+        core.tick_sensor(); // 26.5 °C
         assert_eq!(
             core.drain_uplink(),
             [Packet::new("ok, limit 26.0 °C\n"), Packet::new("alarm 26.5\n")]
@@ -96,11 +103,20 @@ mod tests {
 }
 ```
 
-- `Event::Edge(EdgeIn::<Edge>(value))` is something an edge received.
-  For built-in edges, `value` is a `Packet`; set `peer` to test replies
-  (`Packet { bytes: b"hello".to_vec(), peer: "10.0.0.7:5000".parse().ok() }`).
-- `Event::Tick(n)` is a tick for branch `n`, counting from 0 in
-  `bonsai.toml`'s order.
+A sequence is a loop: replay a list of what came in, in order, and check
+what went out:
+
+```rust
+for line in ["limit 26", "hello", "limit 30"] {
+    core.from_uplink(Packet::new(line));
+}
+```
+
+They're named after the branches and edges, so a test that ticks a branch
+whose rate was taken off, or feeds an edge that's gone, doesn't compile.
+(Underneath, each is `core.handle(event)` with an `Event::Tick(n)`, `n`
+counting branches from 0 in `bonsai.toml`'s order, or an
+`Event::Edge(EdgeIn::<Edge>(value))`.)
 
 Put tree-wide tests at the bottom of `src/main.rs`.
 

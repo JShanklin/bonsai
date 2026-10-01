@@ -1,6 +1,7 @@
 mod dev;
 mod doctor;
 mod graph;
+mod lock;
 mod sync;
 mod tools;
 mod top;
@@ -602,6 +603,7 @@ fn tools_command(names: &[String]) -> io::Result<()> {
         picked
     };
     let usable = tools::install(&picked);
+    let _lock = tree::lock_tree("tools");
     apply_tools(&root, &usable)
 }
 
@@ -826,7 +828,8 @@ fn prompt_text_valid(
 
 /// `bonsai branch` with no name: ask for it in a TUI, then add the branch.
 fn branch_interactive() -> io::Result<()> {
-    tree::require_tree("branch add");
+    // Checked only: branch_add takes the tree's lock once there's a name.
+    tree::require_tree_unchanged("branch add");
     let mut term = ratatui::init();
     let name = prompt_text_valid(
         &mut term,
@@ -848,7 +851,7 @@ fn branch_interactive() -> io::Result<()> {
 
 /// `bonsai message` with no name: enter the name and its fields in a TUI.
 fn message_interactive() -> io::Result<()> {
-    tree::require_tree("message add");
+    tree::require_tree_unchanged("message add");
     let mut term = ratatui::init();
     let entered = (|| -> io::Result<Option<(String, Vec<String>)>> {
         let Some(name) = prompt_text_valid(
@@ -2006,7 +2009,7 @@ mod update_tests {
 fn update() -> io::Result<()> {
     let root = std::env::current_dir()?;
     let manifest_path = root.join("Cargo.toml");
-    tree::require_tree("update");
+    let _lock = tree::require_tree("update");
     let old_manifest = std::fs::read_to_string(&manifest_path)?;
     let board = parse_board(&old_manifest)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing board stamp"))?;
@@ -2158,7 +2161,7 @@ fn retargeted_main(current: &str, template: &str) -> Option<String> {
 /// code stays; the build settings (target, linker, runner,
 /// release profile, board crates) become the new board's.
 fn retarget(new_board: &str) -> io::Result<()> {
-    tree::require_tree("retarget");
+    let _lock = tree::require_tree("retarget");
     let root = std::env::current_dir()?;
     let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     let Some(board) = parse_board(&manifest).filter(|b| chip_of(b).is_some()) else {
@@ -2328,6 +2331,7 @@ fn regrow() -> io::Result<()> {
         println!("cancelled");
         return Ok(());
     }
+    let _lock = tree::lock_tree("regrow");
 
     // Render the fresh template into a staging dir *inside* the tree — same
     // filesystem, so the move afterwards is a rename — and only wipe once it
@@ -2368,7 +2372,10 @@ fn regrow() -> io::Result<()> {
         for entry in std::fs::read_dir(&root)? {
             let entry = entry?;
             let entry_name = entry.file_name();
-            if entry_name == ".git" || entry_name == ".bonsai-regrow" {
+            if entry_name == ".git"
+                || entry_name == ".bonsai-regrow"
+                || entry_name == crate::lock::LOCK_FILE
+            {
                 continue;
             }
             if entry.file_type()?.is_dir() {

@@ -297,9 +297,23 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
     };
     std::fs::create_dir_all(dir)?;
     let name = path.file_name().unwrap_or_default().to_string_lossy();
-    let temp = dir.join(format!(".{name}.bonsai-new"));
+    // A temp file of this write's own: named for this process and a count,
+    // and created only if no such file exists, so no two writes share one.
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (temp, mut file) = loop {
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = dir.join(format!(".{name}.{}-{n}.bonsai-new", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => break (temp, file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    };
     let result = (|| {
-        let mut file = std::fs::File::create(&temp)?;
         file.write_all(content)?;
         file.sync_all()?;
         if let Ok(old) = std::fs::metadata(path) {
@@ -313,14 +327,15 @@ pub fn write_atomic(path: &Path, content: &[u8]) -> io::Result<()> {
     result
 }
 
-/// Write the plan's changes to the tree at `root`.
+/// Write the plan's changes to the tree at `root`, whose lock the caller
+/// holds (and held while the plan was made).
 ///
 /// Each file is replaced atomically. The set isn't: a crash part way leaves
 /// some files new and some old. So the journal goes down first and comes
 /// off last, and a tree left with it is reported, and finished by the next
 /// sync, rather than looking synced. A file that changed since the plan was
 /// made (another program, an editor) stops the sync before it's touched.
-pub fn apply(root: &Path, plan: &Plan) -> io::Result<()> {
+pub fn apply(root: &Path, plan: &Plan, _lock: &crate::lock::TreeLock) -> io::Result<()> {
     if plan.changes.is_empty() {
         // Nothing to write; a journal left by an interrupted sync is done
         // with, since the tree is now what the plan says it should be.
@@ -349,6 +364,10 @@ pub fn apply(root: &Path, plan: &Plan) -> io::Result<()> {
                 None => std::fs::remove_file(&path),
             }
         };
+        #[cfg(debug_assertions)]
+        if done == 0 {
+            pause_for_tests();
+        }
         if let Err(e) = step {
             return Err(io::Error::new(
                 e.kind(),
@@ -360,6 +379,21 @@ pub fn apply(root: &Path, plan: &Plan) -> io::Result<()> {
         }
     }
     remove_journal(root)
+}
+
+/// Debug builds only, for tests: with `BONSAI_TEST_PAUSE_APPLY=<path>`, stop
+/// after the first file of a sync is written (lock held, journal down), say
+/// so with `<path>.paused`, and go on once `<path>.go` exists.
+#[cfg(debug_assertions)]
+fn pause_for_tests() {
+    let Some(at) = std::env::var_os("BONSAI_TEST_PAUSE_APPLY") else {
+        return;
+    };
+    let at = std::path::PathBuf::from(at);
+    let _ = std::fs::write(at.with_extension("paused"), "");
+    while !at.with_extension("go").exists() {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 fn remove_journal(root: &Path) -> io::Result<()> {
@@ -502,6 +536,10 @@ pub fn render_dry_run(plan: &Plan) -> String {
 mod tests {
     use super::*;
 
+    fn locked(root: &Path) -> crate::lock::TreeLock {
+        crate::lock::acquire(root, "test", std::time::Duration::ZERO).unwrap()
+    }
+
     /// A fresh host tree in its own folder, with a branch `sensor` added by
     /// hand (its table and file, not yet synced).
     fn tree_with_a_new_branch(name: &str) -> PathBuf {
@@ -557,7 +595,7 @@ mod tests {
             assert!(shown.contains(&format!("+++ b/{}\n", c.path)), "{shown}");
         }
         assert!(shown.contains("+pub mod sensor;\n"), "{shown}");
-        apply(&root, &planned).unwrap();
+        apply(&root, &planned, &locked(&root)).unwrap();
         for c in &planned.changes {
             let now = std::fs::read_to_string(root.join(&c.path)).unwrap();
             assert_eq!(
@@ -611,7 +649,9 @@ mod tests {
         std::fs::remove_file(&second).unwrap();
         std::fs::create_dir(&second).unwrap();
         std::fs::write(second.join("x"), "").unwrap();
-        let err = apply(&root, &plan1).unwrap_err().to_string();
+        let err = apply(&root, &plan1, &locked(&root))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("sync stopped after 1 of 2 files"), "{err}");
         assert!(interrupted(&root), "the tree looks synced");
         let findings = crate::doctor::check(&root);
@@ -631,7 +671,7 @@ mod tests {
             ["src/branches/mod.rs"],
             "only what wasn't written yet"
         );
-        apply(&root, &plan2).unwrap();
+        apply(&root, &plan2, &locked(&root)).unwrap();
         assert!(!interrupted(&root));
         assert!(plan(&root).unwrap().changes.is_empty());
         let _ = std::fs::remove_dir_all(&root);
@@ -643,7 +683,9 @@ mod tests {
         let planned = plan(&root).unwrap();
         let first = root.join(&planned.changes[0].path);
         std::fs::write(&first, "// edited meanwhile\n").unwrap();
-        let err = apply(&root, &planned).unwrap_err().to_string();
+        let err = apply(&root, &planned, &locked(&root))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("changed while syncing"), "{err}");
         assert_eq!(
             std::fs::read_to_string(&first).unwrap(),
@@ -702,8 +744,13 @@ mod tests {
         let path = dir.join("f.rs");
         std::fs::write(&path, "old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        // Another writer's temp file, mid-write, beside it: not used, not removed.
+        let theirs = dir.join(".f.rs.1-0.bonsai-new");
+        std::fs::write(&theirs, "theirs").unwrap();
         write_atomic(&path, b"new").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+        std::fs::remove_file(&theirs).unwrap();
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o640

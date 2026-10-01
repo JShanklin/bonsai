@@ -11,6 +11,7 @@ use std::str::FromStr;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::graph::{self, Config};
+use crate::lock::TreeLock;
 
 pub const CONFIG: &str = "bonsai.toml";
 pub const MESSAGES: &str = "src/messages.rs";
@@ -83,14 +84,24 @@ fn usage(msg: impl std::fmt::Display) -> ! {
     std::process::exit(2);
 }
 
-/// Refuse anything but a bonsai tree of this version (and rename an older
-/// tree's `[[wire]]` tables to `[[link]]`).
-pub fn require_tree(cmd: &str) {
+/// Refuse anything but a bonsai tree of this version, and take its lock
+/// (`crate::lock`) for `cmd` to change it: held until the returned guard is
+/// dropped, from before anything is read. An older tree's `[[wire]]` tables
+/// become `[[link]]`.
+pub fn require_tree(cmd: &str) -> TreeLock {
     require_tree_unchanged(cmd);
+    let lock = lock_tree(cmd);
     if let Some(src) = with_links(&read(CONFIG)) {
         std::fs::write(CONFIG, src).unwrap_or_else(|e| exit(format!("can't write {CONFIG}: {e}")));
         println!("{CONFIG}: [[wire]] tables are [[link]] now");
     }
+    lock
+}
+
+/// The lock on the tree in the cwd, for `cmd`; exits (1), having changed
+/// nothing, when another command holds it past `lock::wait()`.
+pub fn lock_tree(cmd: &str) -> TreeLock {
+    crate::lock::acquire(Path::new("."), cmd, crate::lock::wait()).unwrap_or_else(|e| exit(e))
 }
 
 /// Refuse anything but a bonsai tree of this version, changing nothing.
@@ -176,13 +187,13 @@ fn edge_file(name: &str) -> PathBuf {
 /// Regenerate everything the graph implies. Refuses (exit 1) when the graph
 /// has errors, leaving every file as it was: the whole change is worked out
 /// (`sync::plan`) before anything is written.
-pub fn sync_tree() -> io::Result<()> {
+pub fn sync_tree(lock: &TreeLock) -> io::Result<()> {
     let root = Path::new(".");
     let plan = planned(root);
     if crate::sync::interrupted(root) {
         println!("finishing a sync that didn't finish");
     }
-    crate::sync::apply(root, &plan).map_err(|e| {
+    crate::sync::apply(root, &plan, lock).map_err(|e| {
         eprintln!("error: {e}");
         e
     })?;
@@ -216,13 +227,29 @@ fn planned(root: &Path) -> crate::sync::Plan {
 pub fn sync(args: &[String]) -> io::Result<()> {
     match args {
         [] => {
-            require_tree_unchanged("sync");
-            sync_tree()
+            let lock = require_tree("sync");
+            sync_tree(&lock)
         }
         [a] if a == "--dry-run" => {
             require_tree_unchanged("sync");
-            let plan = planned(Path::new("."));
-            if crate::sync::interrupted(Path::new(".")) {
+            // Read under a shared lock: never a change half made.
+            let root = Path::new(".");
+            let (plan, interrupted) =
+                crate::lock::read_consistent(root, crate::lock::wait(), || {
+                    (crate::sync::plan(root), crate::sync::interrupted(root))
+                })
+                .unwrap_or_else(|e| exit(e));
+            let plan = match plan {
+                Ok(plan) => plan,
+                Err(crate::sync::Refused::Config(e)) => exit(e),
+                Err(crate::sync::Refused::Errors(errors)) => {
+                    for e in &errors {
+                        eprintln!("error: {e}");
+                    }
+                    exit("the tree has errors; nothing would be generated");
+                }
+            };
+            if interrupted {
                 println!("a sync didn't finish; `bonsai sync` finishes it");
             }
             print!("{}", crate::sync::render_dry_run(&plan));
@@ -769,7 +796,7 @@ fn check_new_name(cfg: &Config, name: &str, what: &str) {
 
 /// `bonsai branch add <name>`.
 pub fn branch_add(name: &str) -> io::Result<()> {
-    require_tree("branch add");
+    let lock = require_tree("branch add");
     let cfg = load();
     check_new_name(&cfg, name, "branch");
     let path = branch_file(name);
@@ -785,7 +812,7 @@ pub fn branch_add(name: &str) -> io::Result<()> {
     tables(&mut doc, "branch").insert(name, Item::Table(Table::new()));
     save_doc(&doc)?;
     println!("added branch {name}: {}", path.display());
-    sync_tree()
+    sync_tree(&lock)
 }
 
 /// Remove a branch's or edge's table and every link from it, and take it
@@ -833,7 +860,7 @@ fn remove_node(doc: &mut DocumentMut, kind: &str, name: &str) -> io::Result<Conf
 /// `bonsai branch remove <name>`: its file, its table, and every link from or
 /// to it (with the arms those links put in other branches).
 pub fn branch_remove(name: &str) -> io::Result<()> {
-    require_tree("branch remove");
+    let lock = require_tree("branch remove");
     let before = load();
     if !before.is_branch(name) {
         exit(format!("no branch `{name}` in {CONFIG}"));
@@ -848,12 +875,12 @@ pub fn branch_remove(name: &str) -> io::Result<()> {
     } else {
         println!("removed branch {name}");
     }
-    sync_tree()
+    sync_tree(&lock)
 }
 
 /// `bonsai edge add <name> <kind> [--key value …]`, or `--custom`.
 pub fn edge_add(name: &str, args: &[String]) -> io::Result<()> {
-    require_tree("edge add");
+    let lock = require_tree("edge add");
     let cfg = load();
     check_new_name(&cfg, name, "edge");
     let (kind, rest) = match args.split_first() {
@@ -881,7 +908,7 @@ pub fn edge_add(name: &str, args: &[String]) -> io::Result<()> {
     println!(
         "link it one way or both: `bonsai link {name} <branch>` (what it receives), `bonsai link <branch> {name}` (what it sends)"
     );
-    sync_tree()
+    sync_tree(&lock)
 }
 
 /// An edge's `bonsai.toml` table from `edge add`'s `--key value` flags.
@@ -948,7 +975,7 @@ fn wants(key: &str) -> &'static str {
 /// `bonsai edge remove <name>`: its table, its links and the arms they fed,
 /// and a custom edge's file.
 pub fn edge_remove(name: &str) -> io::Result<()> {
-    require_tree("edge remove");
+    let lock = require_tree("edge remove");
     let before = load();
     let Some(edge) = before.edge(name) else {
         exit(format!("no edge `{name}` in {CONFIG}"));
@@ -976,7 +1003,7 @@ pub fn edge_remove(name: &str) -> io::Result<()> {
         what += &format!("; take `out.to_{name}(..)` out of {}", senders.join(", "));
     }
     println!("{what}");
-    sync_tree()
+    sync_tree(&lock)
 }
 
 fn is_message_name(name: &str) -> bool {
@@ -1000,7 +1027,7 @@ fn message_struct(name: &str, fields: &[(String, String)]) -> String {
 
 /// `bonsai message add <Name> [field:type …]`.
 pub fn message_add(name: &str, fields: &[String]) -> io::Result<()> {
-    require_tree("message add");
+    let _lock = require_tree("message add");
     if !is_message_name(name) {
         usage(format!(
             "`{name}`: a message name is an UpperCamelCase identifier"
@@ -1096,7 +1123,7 @@ fn without_struct(src: &str, name: &str) -> Option<String> {
 
 /// `bonsai message remove <Name>`: refused while a link carries it.
 pub fn message_remove(name: &str) -> io::Result<()> {
-    require_tree("message remove");
+    let _lock = require_tree("message remove");
     let cfg = load();
     let users: Vec<String> = cfg
         .links
@@ -1131,7 +1158,7 @@ fn split_link_args(args: &[String]) -> (Option<&str>, &[String]) {
 
 /// `bonsai link <from> [<Message>] <to …>`.
 pub fn link(from: &str, args: &[String]) -> io::Result<()> {
-    require_tree("link");
+    let lock = require_tree("link");
     let (message, to) = split_link_args(args);
     if to.is_empty() {
         usage(
@@ -1207,12 +1234,12 @@ pub fn link(from: &str, args: &[String]) -> io::Result<()> {
                 .join(", ")
         ),
     }
-    sync_tree()
+    sync_tree(&lock)
 }
 
 /// `bonsai unlink <from> [<Message>] [<to …>]`: all receivers when none named.
 pub fn unlink(from: &str, args: &[String]) -> io::Result<()> {
-    require_tree("unlink");
+    let lock = require_tree("unlink");
     let (message, to) = split_link_args(args);
     let before = load();
     let mut doc = load_doc();
@@ -1266,12 +1293,12 @@ pub fn unlink(from: &str, args: &[String]) -> io::Result<()> {
         _ => String::new(),
     };
     println!("unlinked {from} from {}{sender_note}", dropped.join(", "));
-    sync_tree()
+    sync_tree(&lock)
 }
 
 /// `bonsai rate <branch> <hz|off>`: tick the branch this many times a second.
 pub fn rate(branch: &str, hz: &str) -> io::Result<()> {
-    require_tree("rate");
+    let lock = require_tree("rate");
     let before = load();
     let mut doc = load_doc();
     let Some(t) = tables(&mut doc, "branch")
@@ -1306,12 +1333,12 @@ pub fn rate(branch: &str, hz: &str) -> io::Result<()> {
     }
     let after = save_checked(&doc)?;
     reconcile_arms(&before, &after)?;
-    sync_tree()
+    sync_tree(&lock)
 }
 
 /// `bonsai list`: the tree's branches, edges and links.
 pub fn list() -> io::Result<()> {
-    require_tree("list");
+    let _lock = require_tree("list");
     let cargo = std::fs::read_to_string("Cargo.toml").unwrap_or_default();
     let name = crate::parse_package_name(&cargo).unwrap_or_else(|| "?".to_string());
     let board = crate::parse_board(&cargo)
@@ -1407,7 +1434,7 @@ fn set_keeping_comment(t: &mut Table, key: &str, new: toml_edit::Value) {
 
 /// `bonsai record [<kind> on|off | dir <folder>]`: which run logs to keep.
 pub fn record(args: &[String]) -> io::Result<()> {
-    require_tree("record");
+    let lock = require_tree("record");
     let mut doc = load_doc();
     if !doc.contains_key("record") {
         if args.is_empty() {
@@ -1459,7 +1486,7 @@ pub fn record(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Ok(());
     }
-    sync_tree()
+    sync_tree(&lock)
 }
 
 /// `main_src` with `#[macro_use]` above `mod bonsai;` (so every module can

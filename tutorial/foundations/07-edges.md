@@ -236,23 +236,24 @@ so. Update what it expects:
         ));
 ```
 
-A test can also drive the whole tree, edges included, with no sockets:
-`core.handle(..)` takes one event, as the running tree would, and
+A test can also drive the whole tree, edges included, with no sockets.
+`core.from_uplink(packet)` hands the core a packet as if the uplink had
+received it, `core.tick_sensor()` gives the sensor one tick of its rate, and
+each runs everything it sets off, in order, as the running tree would.
 `drain_uplink()` returns everything sent to the edge. Add this to the bottom
 of `src/main.rs`:
 
 ```rust
 #[cfg(test)]
 mod tests {
-    use crate::bonsai::{Event, Packet, Tree};
-    use crate::links::{Core, EdgeIn};
+    use crate::bonsai::Packet;
+    use crate::links::Core;
 
     #[test]
     fn a_lower_limit_sets_off_an_alarm() {
         let mut core = Core::new();
-        let limit = Packet::new("limit 26");
-        core.handle(Event::Edge(EdgeIn::Uplink(limit)));
-        core.handle(Event::Tick(0)); // sensor, the first branch: 26.5 °C
+        core.from_uplink(Packet::new("limit 26"));
+        core.tick_sensor(); // 26.5 °C
         assert_eq!(
             core.drain_uplink(),
             [Packet::new("ok, limit 26.0 °C\n"), Packet::new("alarm 26.5\n")]
@@ -261,7 +262,9 @@ mod tests {
 }
 ```
 
-`Event::Tick(0)` is a tick for branch 0, the first in `bonsai.toml`.
+There's a `tick_<branch>()` for every branch with a rate, and a
+`from_<edge>(..)` for every edge, so the compiler tells you if a test still
+ticks a branch whose rate you took off.
 
 ```
 test tests::a_lower_limit_sets_off_an_alarm ... ok

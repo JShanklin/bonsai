@@ -1181,6 +1181,33 @@ pub mod {name} {{
             t = edge_types(e).1
         ));
     }
+    // By name, for tests: what a rate or an edge would hand the core.
+    for (i, b) in cfg.branches.iter().enumerate() {
+        if b.rate.is_some() {
+            o.push_str(&format!(
+                "
+    /// One tick for {n}, as its rate gives it, and everything it sets off.
+    pub fn tick_{n}(&mut self) {{
+        crate::bonsai::Tree::handle(self, Event::Tick({i}));
+    }}
+",
+                n = b.name
+            ));
+        }
+    }
+    for e in &cfg.edges {
+        o.push_str(&format!(
+            "
+    /// Something the {n} edge received, and everything it sets off.
+    pub fn from_{n}(&mut self, value: {t}) {{
+        crate::bonsai::Tree::handle(self, Event::Edge(EdgeIn::{c}(value)));
+    }}
+",
+            n = e.name,
+            t = edge_types(e).0,
+            c = camel(&e.name)
+        ));
+    }
     o.push_str(
         "
     /// Hand one message to every branch or edge linked to it, in
@@ -1578,6 +1605,12 @@ to = ["pilot"]
     #[test]
     fn links_type_each_branch_and_delivers_in_order() {
         let w = render_links(&parse(TREE).unwrap());
+        // A rated branch's tick, by name, for tests; none for the others.
+        assert!(
+            w.contains("    pub fn tick_pulse(&mut self) {\n        crate::bonsai::Tree::handle(self, Event::Tick(0));\n    }\n"),
+            "{w}"
+        );
+        assert!(!w.contains("pub fn tick_log("), "{w}");
         // Inputs: the rate's Tick, then each linked message.
         assert!(w.contains("pub mod pulse {"), "{w}");
         assert!(w.contains("        Tick,\n    }"), "{w}");
@@ -1867,6 +1900,15 @@ to = ["b"]
         // Tests can see what the core sent an edge.
         assert!(
             w.contains("pub fn drain_beacon(&mut self) -> Vec<crate::bonsai::Packet> {"),
+            "{w}"
+        );
+        // ...and hand the core what an edge received, by the edge's name.
+        assert!(
+            w.contains("    pub fn from_beacon(&mut self, value: crate::bonsai::Packet) {\n        crate::bonsai::Tree::handle(self, Event::Edge(EdgeIn::Beacon(value)));\n    }\n"),
+            "{w}"
+        );
+        assert!(
+            w.contains("pub fn from_radio(&mut self, value: <crate::edges::radio::Radio as crate::bonsai::Edge>::In) {"),
             "{w}"
         );
     }

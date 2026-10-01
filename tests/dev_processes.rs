@@ -209,6 +209,19 @@ fn wrappers_of(dev: u32) -> Vec<u32> {
         .collect()
 }
 
+/// Whether this computer lets `bonsai dev` make a PID namespace; if not,
+/// a namespace test says it's skipped.
+fn namespaces_here(test: &str) -> bool {
+    let ok = Command::new(BONSAI)
+        .args(["__dev-run", "--probe"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !ok {
+        eprintln!("{test}: skipped: no PID namespace can be made here");
+    }
+    ok
+}
+
 /// Restart and Ctrl-C stop everything generation 1 and 2 left, nothing
 /// else (a stranger, the build's daemon), and the guardian goes.
 fn restart_and_ctrl_c(namespace: bool) {
@@ -268,7 +281,9 @@ fn restart_and_ctrl_c(namespace: bool) {
 
 #[test]
 fn what_left_the_group_goes_on_restart_and_on_ctrl_c() {
-    restart_and_ctrl_c(true);
+    if namespaces_here("restart_and_ctrl_c") {
+        restart_and_ctrl_c(true);
+    }
 }
 
 #[test]
@@ -319,12 +334,16 @@ fn killed(namespace: bool, everything: bool) {
 
 #[test]
 fn killing_bonsai_dev_outright_leaves_nothing_running() {
-    killed(true, false);
+    if namespaces_here("killed") {
+        killed(true, false);
+    }
 }
 
 #[test]
 fn killing_bonsai_dev_and_its_helpers_outright_leaves_nothing_running() {
-    killed(true, true);
+    if namespaces_here("killed with its helpers") {
+        killed(true, true);
+    }
 }
 
 #[test]

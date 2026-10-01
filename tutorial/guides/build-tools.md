@@ -56,7 +56,9 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
   installed, and for the Zero W they build real ARMv6 code.
 - **mold** only touches builds for this computer, so it speeds up
   `cargo local` and `cargo local-test`, not the Pi's builds.
-- **bacon** writes nothing: run `bacon` in the tree and leave it open.
+- **bacon** writes nothing: run `bacon` in the tree and leave it open. To
+  run the tree as well, restarting it on each good build, use `bonsai dev`
+  ([edit and run](dev-loop.md)).
 - **sccache** keeps its cache in your home folder, shared by every tree. After
   a `cargo clean`, a rebuild comes from the cache instead of compiling again.
 

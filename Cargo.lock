@@ -94,6 +94,7 @@ name = "bonsai"
 version = "0.1.0"
 dependencies = [
  "include_dir",
+ "libc",
  "ratatui",
  "toml_edit",
 ]

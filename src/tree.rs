@@ -14,13 +14,13 @@ use crate::graph::{self, Config};
 
 pub const CONFIG: &str = "bonsai.toml";
 pub const MESSAGES: &str = "src/messages.rs";
-const RUNTIME_RS: &str = "src/bonsai.rs";
-const LINKS_RS: &str = "src/links.rs";
-const OLD_WIRING_RS: &str = "src/wiring.rs";
-const SETTINGS_RS: &str = "src/settings.rs";
-const BRANCHES_MOD: &str = "src/branches/mod.rs";
-const EDGES_MOD: &str = "src/edges/mod.rs";
-const SERIAL_RS: &str = "src/edges/serial.rs";
+pub(crate) const RUNTIME_RS: &str = "src/bonsai.rs";
+pub(crate) const LINKS_RS: &str = "src/links.rs";
+pub(crate) const OLD_WIRING_RS: &str = "src/wiring.rs";
+pub(crate) const SETTINGS_RS: &str = "src/settings.rs";
+pub(crate) const BRANCHES_MOD: &str = "src/branches/mod.rs";
+pub(crate) const EDGES_MOD: &str = "src/edges/mod.rs";
+pub(crate) const SERIAL_RS: &str = "src/edges/serial.rs";
 
 /// Where `bonsai link` adds a receiving arm, and `bonsai message add` a type.
 pub const INPUT_ARM: &str = "// bonsai:input-arm";
@@ -31,9 +31,9 @@ pub const RUNTIME: &str = include_str!("../templates/_tree/bonsai.rs");
 /// The serial edge, written to `src/edges/serial.rs` while a tree has one.
 pub const SERIAL: &str = include_str!("../templates/_tree/serial.rs");
 /// The crate the serial edge needs, added and removed with it.
-const TOKIO_SERIAL: (&str, &str) = ("tokio-serial", "5.5");
+pub(crate) const TOKIO_SERIAL: (&str, &str) = ("tokio-serial", "5.5");
 /// The runtime reads the local time with it (for run logs).
-const LIBC: (&str, &str) = ("libc", "0.2");
+pub(crate) const LIBC: (&str, &str) = ("libc", "0.2");
 /// The scaffolds. `{{branch_name}}`/`{{BranchName}}` and
 /// `{{edge_name}}`/`{{EdgeName}}` are plain replacements, not Liquid.
 pub const BRANCH_TEMPLATE: &str = include_str!("../templates/_branch/branch.rs");
@@ -101,20 +101,6 @@ pub fn require_tree(cmd: &str) {
     }
 }
 
-/// Every `.rs` file under `dir`, recursively.
-fn rust_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            out.extend(rust_files(&path)?);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-    Ok(out)
-}
-
 /// Source from a tree whose generated module was `wiring`, using `links`
 /// instead (`mod links;`, `crate::links::…`, `links::Core`); None when it
 /// never names it.
@@ -179,108 +165,28 @@ fn edge_file(name: &str) -> PathBuf {
     Path::new("src/edges").join(format!("{name}.rs"))
 }
 
-/// Write `content` to `path` if it differs. True when it changed.
-fn write_if_changed(path: &str, content: &str) -> io::Result<bool> {
-    if std::fs::read_to_string(path).is_ok_and(|old| old == content) {
-        return Ok(false);
-    }
-    if let Some(dir) = Path::new(path).parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, content)?;
-    Ok(true)
-}
-
 /// Regenerate everything the graph implies. Refuses (exit 1) when the graph
-/// has errors, leaving the generated files as they were.
+/// has errors, leaving every file as it was: the whole change is worked out
+/// (`sync::plan`) before anything is written.
 pub fn sync_tree() -> io::Result<()> {
-    let cfg = load();
-    let report = graph::check(&cfg, &messages());
-    let mut missing = Vec::new();
-    for b in &cfg.branches {
-        if !branch_file(&b.name).is_file() {
-            missing.push(format!(
-                "[branch.{0}] has no src/branches/{0}.rs (`bonsai branch add {0}` makes one)",
-                b.name
-            ));
-        }
-    }
-    for e in &cfg.edges {
-        if matches!(e.kind, graph::EdgeKind::Custom { .. }) && !edge_file(&e.name).is_file() {
-            missing.push(format!(
-                "[edge.{0}] is custom but has no src/edges/{0}.rs (`bonsai edge add {0} --custom` makes one)",
-                e.name
-            ));
-        }
-    }
-    if !report.errors.is_empty() || !missing.is_empty() {
-        for e in report.errors.iter().chain(&missing) {
-            eprintln!("error: {e}");
-        }
-        exit("the tree has errors; nothing was generated");
-    }
-    let mut changed = Vec::new();
-    // Trees from before src/wiring.rs was src/links.rs: move their code across.
-    if Path::new(OLD_WIRING_RS).exists() {
-        let mut moved = 0;
-        for path in rust_files(Path::new("src"))? {
-            if let Some(new) = with_links_module(&std::fs::read_to_string(&path)?) {
-                std::fs::write(&path, new)?;
-                moved += 1;
+    let root = Path::new(".");
+    let plan = match crate::sync::plan(root) {
+        Ok(plan) => plan,
+        Err(crate::sync::Refused::Config(e)) => exit(e),
+        Err(crate::sync::Refused::Errors(errors)) => {
+            for e in &errors {
+                eprintln!("error: {e}");
             }
+            exit("the tree has errors; nothing was generated");
         }
-        std::fs::remove_file(OLD_WIRING_RS)?;
-        changed.push(format!(
-            "{OLD_WIRING_RS} → {LINKS_RS} ({moved} files now use crate::links)"
-        ));
-    }
-    for (path, content) in [
-        (RUNTIME_RS, RUNTIME.to_string()),
-        (LINKS_RS, graph::render_links(&cfg)),
-        (SETTINGS_RS, graph::render_settings(&cfg)),
-        (BRANCHES_MOD, graph::render_mod(&cfg)),
-        (EDGES_MOD, graph::render_edges_mod(&cfg)),
-    ] {
-        if write_if_changed(path, &content)? {
-            changed.push(path.to_string());
-        }
-    }
-    // Trees from before the log macros: bring them into scope.
-    if let Some(new) = with_macro_use(&read("src/main.rs")) {
-        std::fs::write("src/main.rs", new)?;
-        changed.push("src/main.rs (#[macro_use] mod bonsai)".to_string());
-    }
-    // The serial edge's code and crate come and go with the tree's serial edges.
-    let manifest = read("Cargo.toml");
-    if cfg.has_serial() {
-        if write_if_changed(SERIAL_RS, SERIAL)? {
-            changed.push(SERIAL_RS.to_string());
-        }
-        if let Some(new) = crate::with_dependency(&manifest, TOKIO_SERIAL)? {
-            std::fs::write("Cargo.toml", new)?;
-            changed.push(format!("Cargo.toml (+{})", TOKIO_SERIAL.0));
-        }
-    } else {
-        if Path::new(SERIAL_RS).exists() {
-            std::fs::remove_file(SERIAL_RS)?;
-            changed.push(format!("{SERIAL_RS} (removed)"));
-        }
-        if let Some(new) = crate::without_dependency(&manifest, TOKIO_SERIAL.0)? {
-            std::fs::write("Cargo.toml", new)?;
-            changed.push(format!("Cargo.toml (-{})", TOKIO_SERIAL.0));
-        }
-    }
-    // Trees from before run logs: the runtime needs libc now.
-    if let Some(new) = crate::with_dependency(&read("Cargo.toml"), LIBC)? {
-        std::fs::write("Cargo.toml", new)?;
-        changed.push(format!("Cargo.toml (+{})", LIBC.0));
-    }
-    if changed.is_empty() {
+    };
+    crate::sync::apply(root, &plan)?;
+    if plan.changes.is_empty() {
         println!("generated code is in step with {CONFIG}");
     } else {
-        println!("updated {}", changed.join(", "));
+        println!("updated {}", crate::sync::summary(&plan.changes));
     }
-    for w in &report.warnings {
+    for w in &plan.warnings {
         println!("warning: {w}");
     }
     Ok(())

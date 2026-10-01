@@ -1,5 +1,20 @@
 # Troubleshooting
 
+Start with `bonsai doctor` inside the tree. It checks, without changing
+anything, that `bonsai.toml` reads and its graph holds together, that every
+branch has its file (and every file in `src/branches/` is a branch), that
+the generated code is in step with `bonsai.toml`, and that the tools the
+tree builds with are installed; each problem comes with what to do:
+
+```
+  ok    graph             2 branch(es), 1 edge(s), 3 link(s)
+  ERROR generated         src/settings.rs is out of date: `bonsai sync` would change it
+                          → `bonsai sync` regenerates it
+```
+
+It exits 1 when something's an error (0 with only warnings), and
+`bonsai doctor --json` prints one JSON object, for scripts and CI.
+
 ## Setup
 
 | symptom | cause | fix |

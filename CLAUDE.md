@@ -274,13 +274,30 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   (its `In`/`Out` used as `<T as Edge>::In`). Runtime types are written fully
   qualified, so a message can't shadow them; `Packet` and friends are also
   reserved message names (`tree::RESERVED`), and `serial` an edge/branch name.
+- **The tree's lock** (`src/lock.rs`): every command that changes a tree
+  takes an exclusive `flock` on `.bonsai.lock` (git-ignored) before it reads
+  what it'll change: `tree::require_tree(cmd)` returns the `TreeLock`
+  (`#[must_use]`), `sync_tree`/`sync::apply` take `&TreeLock`, so it's taken
+  once per command and handed down (the interactive prompts only
+  `require_tree_unchanged`, then the command locks); `tools`, `update`,
+  `retarget`, `regrow` (which keeps the lock file through its wipe) and
+  `dev --sync` (plan + apply) too. A waiter says once who holds it (the
+  holder writes `cmd (pid N)` into the file), waits `lock::wait()`
+  (`BONSAI_LOCK_WAIT`, default 10 s), then exits 1 having changed nothing.
+  `sync --dry-run`, `doctor` and `dev`'s plan read under `read_consistent`
+  (a shared lock; never creates the file; reads again if a writer appeared
+  meanwhile); doctor says "couldn't read the tree in one piece" when it
+  can't. The OS releases a killed holder's lock. `tests/project_lock.rs`
+  runs the real binary against overlaps (debug builds pause a sync after its
+  first file with `BONSAI_TEST_PAUSE_APPLY`).
 - **Sync plan and doctor.** `src/sync.rs`: `sync::plan(root)` works out
   every file `bonsai sync` would create, change or remove (`Change`
   before/after, a `label` for the `updated …` line; migrations included:
   `[[wire]]`, `src/wiring.rs`, `#[macro_use]`, Cargo.toml deps), reading
   only, refused (`Refused`) on config or graph errors or missing
   branch/custom-edge files; `tree::sync_tree` applies it (`sync::apply`:
-  each file by `write_atomic`, temp beside it, fsync, rename; a file that
+  each file by `write_atomic`, a temp of its own beside it (`.<name>.<pid>-<n>.bonsai-new`,
+  created `O_EXCL`, removed only by its writer), fsync, rename; a file that
   differs from the plan's `before` stops it; the set isn't atomic, so the
   `.bonsai-sync` journal (`JOURNAL`) is written first and removed last: a
   tree left with it is "interrupted", reported by doctor and finished by

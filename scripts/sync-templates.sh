@@ -8,6 +8,7 @@ cd "$(dirname "$0")/.."
 cargo build --quiet
 for board in templates/linux/*/; do
     (cd "$board" && ../../../target/debug/bonsai sync >/dev/null)
+    rm -f "$board/.bonsai.lock" # the sync's lock: not part of the template
 done
 if [ "${1:-}" = "--check" ]; then
     git diff --exit-code -- templates/linux || {

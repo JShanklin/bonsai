@@ -63,8 +63,25 @@ impl Finding {
     }
 }
 
-/// Run every check on the tree at `root`.
+/// Run every check on the tree at `root`, under its shared lock
+/// (`crate::lock`), so a command changing the tree meanwhile isn't seen half
+/// done; when no consistent reading can be had, say so and check nothing.
 pub fn check(root: &Path) -> Vec<Finding> {
+    match crate::lock::read_consistent(root, crate::lock::wait(), || check_now(root)) {
+        Ok(findings) => findings,
+        Err(why) => vec![
+            finding(
+                "tree",
+                Status::Skipped,
+                format!("couldn't read the tree in one piece: {why}"),
+            )
+            .fix("run `bonsai doctor` again once that command is done"),
+        ],
+    }
+}
+
+/// Every check, on the tree as it is now.
+fn check_now(root: &Path) -> Vec<Finding> {
     let mut out = Vec::new();
     let cargo = std::fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     if root.join("src/sap.rs").exists() || cargo.contains("embassy-executor") {

@@ -105,6 +105,10 @@ pub enum Note {
     Synced(String),
     /// The graph can't be built from; nothing was built.
     Refused(Vec<String>),
+    /// Another command is changing the tree; it waits for it.
+    Waiting(String),
+    /// Another command held the tree past `lock::wait()`; not built.
+    Busy(String),
     /// Generated files are out of date and `--sync` wasn't asked for.
     Stale(Vec<String>),
     Building,
@@ -145,6 +149,8 @@ impl Note {
                 "not building: generated code is out of date ({}); run `bonsai sync`, or `bonsai dev --sync` to sync on every change",
                 files.join(", ")
             ),
+            Note::Waiting(who) => format!("waiting for {who} to finish changing the tree…"),
+            Note::Busy(why) => format!("not building: {why}; trying again on the next change"),
             Note::Building => "building…".to_string(),
             Note::BuildFailed {
                 still_running: true,
@@ -305,8 +311,31 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
             }
         }
         first = false;
-        // The graph first: errors, then generated files.
-        match crate::sync::plan(root) {
+        // The graph first: errors, then generated files. With --sync, under
+        // the tree's lock from planning to writing; without, read under a
+        // shared one, so no other command's change is seen half made.
+        let wait = crate::lock::wait();
+        let held = if opts.sync {
+            crate::lock::acquire_telling(root, "dev --sync", wait, &mut |who| {
+                note(Note::Waiting(who.to_string()))
+            })
+            .map(Some)
+        } else {
+            Ok(None)
+        };
+        let planned = match &held {
+            Ok(Some(_)) => Ok(crate::sync::plan(root)),
+            Ok(None) => crate::lock::read_consistent(root, wait, || crate::sync::plan(root)),
+            Err(e) => Err(e.clone()),
+        };
+        let planned = match planned {
+            Ok(planned) => planned,
+            Err(why) => {
+                note(Note::Busy(why));
+                continue;
+            }
+        };
+        match planned {
             Err(crate::sync::Refused::Config(e)) => {
                 note(Note::Refused(vec![e]));
                 continue;
@@ -322,7 +351,10 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
                     ));
                     continue;
                 }
-                if let Err(e) = crate::sync::apply(root, &plan) {
+                let Ok(Some(lock)) = &held else {
+                    continue; // --sync holds the lock (above)
+                };
+                if let Err(e) = crate::sync::apply(root, &plan, lock) {
                     note(Note::Refused(vec![e.to_string()]));
                     continue;
                 }
@@ -332,6 +364,7 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
             }
             Ok(_) => {}
         }
+        drop(held);
         note(Note::Building);
         let built = build(root, stop);
         if stop.load(Ordering::SeqCst) {

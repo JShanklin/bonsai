@@ -73,7 +73,8 @@ another build before anything is restarted.
 ## Stopping
 
 Ctrl-C stops the tree (it gets Ctrl-C, as if you'd run it yourself), then
-`bonsai dev`. A tree that doesn't stop within 5 s is killed. The tree runs
+`bonsai dev`. During a build, the build is stopped too, whatever it's doing:
+cargo and everything it started get SIGTERM, then SIGKILL after 2 s. A tree that doesn't stop within 5 s is killed. The tree runs
 in its own process group and, on Linux, is ended if `bonsai dev` is killed,
 so nothing is left running in the background.
 

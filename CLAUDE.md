@@ -319,7 +319,12 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   waits `SETTLE` (0.3 s) of quiet, then `sync::plan` (errors → `Refused`,
   stale → `Stale` unless `--sync`, whose writes are re-snapshotted so they
   aren't a change), `cargo build --message-format=json-render-diagnostics`
-  (`--target host-tuple` on a Pi tree; the program from `executable`), and
+  (`--target host-tuple` on a Pi tree; the program from `executable`; run
+  as a `Group`: its own process group, stdout read on a detached thread
+  while the loop polls `stop` and the leader's exit (`waitid` WNOWAIT, so
+  the group id stays ours until reaped); `stop` → SIGTERM to the group,
+  SIGKILL after `BUILD_STOP_WAIT` 2 s, reap; `Options::cargo` swaps in a
+  fake for the tests), and
   only on success stops the old program (SIGTERM, SIGKILL after
   `STOP_WAIT` 5 s) and starts the new one in its own process group with
   `PR_SET_PDEATHSIG` (Linux). A failed build keeps the old one; a save

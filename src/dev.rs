@@ -25,6 +25,8 @@ const POLL: Duration = Duration::from_millis(200);
 pub const SETTLE: Duration = Duration::from_millis(300);
 /// How long a program gets to stop before it's killed.
 pub const STOP_WAIT: Duration = Duration::from_secs(5);
+/// How long a build being cancelled gets to stop before it's killed.
+pub const BUILD_STOP_WAIT: Duration = Duration::from_secs(2);
 
 /// The state of the watched files: path → (modified, length).
 pub type Snapshot = BTreeMap<PathBuf, (Option<SystemTime>, u64)>;
@@ -177,6 +179,117 @@ pub struct Options {
     pub sync: bool,
     /// Arguments for the program.
     pub args: Vec<String>,
+    /// What builds it: `cargo`, unless a test says otherwise.
+    pub cargo: Option<PathBuf>,
+}
+
+/// A process `bonsai dev` started as the leader of its own process group,
+/// and everything it starts. The group is signalled only while its leader
+/// is ours and not yet reaped (its exit is seen without reaping it), so its
+/// id can't have passed to anyone else's processes. A descendant that leaves
+/// the group (`setsid`, a daemon) is out of reach.
+struct Group {
+    child: Child,
+}
+
+impl Group {
+    /// Start `cmd` as a new group's leader. On Linux it also gets SIGTERM if
+    /// `bonsai dev` itself dies (its own children don't: see `stop`).
+    fn spawn(cmd: &mut Command) -> std::io::Result<Group> {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: getpid is async-signal-safe.
+            let parent = unsafe { libc::getpid() };
+            // SAFETY: prctl and getppid are async-signal-safe, and nothing
+            // else runs between fork and exec.
+            unsafe {
+                cmd.pre_exec(move || {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    // Already orphaned before the prctl took: don't start.
+                    if libc::getppid() != parent {
+                        return Err(std::io::Error::other("bonsai dev has gone"));
+                    }
+                    Ok(())
+                });
+            }
+        }
+        Ok(Group {
+            child: cmd.spawn()?,
+        })
+    }
+
+    /// Whether the leader has exited (not reaped: its id stays ours).
+    fn leader_exited(&self) -> bool {
+        // SAFETY: waitid on our own child, with WNOWAIT (it stays a zombie).
+        unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            let found = libc::waitid(
+                libc::P_PID,
+                self.child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            found == 0 && info.si_pid() != 0
+        }
+    }
+
+    /// Send `signal` to every process in the group.
+    fn signal(&self, signal: i32) {
+        // SAFETY: killpg on the group whose leader we hold unreaped.
+        unsafe {
+            libc::killpg(self.child.id() as i32, signal);
+        }
+    }
+
+    /// Whether anything in the group is still running (a zombie isn't).
+    fn alive(&self) -> bool {
+        !members(self.child.id()).is_empty()
+    }
+
+    /// Stop the whole group: `first` (SIGTERM, or SIGINT for Ctrl-C), then,
+    /// whatever's left after `grace`, SIGKILL; then reap the leader. Returns
+    /// whether it took SIGKILL, and how the leader ended.
+    fn stop(mut self, first: i32, grace: Duration) -> (bool, Option<std::process::ExitStatus>) {
+        self.signal(first);
+        let until = Instant::now() + grace;
+        while self.alive() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let killed = self.alive();
+        if killed {
+            self.signal(libc::SIGKILL);
+            let until = Instant::now() + Duration::from_secs(2);
+            while self.alive() && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        (killed, self.child.wait().ok())
+    }
+}
+
+/// The processes in process group `pgid` that are still running (zombies
+/// left out), from /proc.
+fn members(pgid: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+        .filter(|pid| {
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false;
+            };
+            // `pid (comm) state ppid pgrp …`; comm may hold spaces and parens.
+            let Some(rest) = stat.rfind(')').map(|at| &stat[at + 1..]) else {
+                return false;
+            };
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            fields.len() > 2 && fields[0] != "Z" && fields[2] == pgid.to_string()
+        })
+        .collect()
 }
 
 /// The `cargo build` arguments for this computer: a Pi tree builds for the
@@ -193,26 +306,72 @@ fn build_args(root: &Path) -> Vec<String> {
     args
 }
 
-/// Build the tree; the program, or None when the build failed (cargo's
-/// errors are on stderr already).
-fn build(root: &Path, stop: &AtomicBool) -> Option<PathBuf> {
-    let mut child = Command::new("cargo")
-        .args(build_args(root))
+/// How a build ended.
+#[derive(Debug, PartialEq)]
+enum Built {
+    Program(PathBuf),
+    Failed,
+    /// `stop` was set: the build was stopped, and everything it started.
+    Stopped,
+}
+
+/// Build the tree in its own process group. Cargo's diagnostics go to
+/// stderr as they come; its JSON (stdout) is read on a thread of its own,
+/// so a build that stalls, or leaves something holding its stdout open,
+/// can't keep `stop` from being seen. When `stop` is set the group is
+/// stopped (SIGTERM, then SIGKILL after `BUILD_STOP_WAIT`) and reaped.
+fn build(root: &Path, cargo: &Path, stop: &AtomicBool) -> Built {
+    use std::io::BufRead;
+    let mut cmd = Command::new(cargo);
+    cmd.args(build_args(root))
         .current_dir(root)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::inherit());
+    let Ok(mut group) = Group::spawn(&mut cmd) else {
+        return Built::Failed;
+    };
+    let (lines, out_lines) = std::sync::mpsc::channel::<String>();
+    if let Some(stdout) = group.child.stdout.take() {
+        // Ends when every writer of the pipe has gone; nobody waits for it.
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if lines.send(line).is_err() {
+                    return;
+                }
+            }
+        });
+    }
     let mut out = String::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        use std::io::Read;
-        let _ = stdout.read_to_string(&mut out);
+    loop {
+        while let Ok(line) = out_lines.try_recv() {
+            out += &line;
+            out.push('\n');
+        }
+        if stop.load(Ordering::SeqCst) {
+            group.stop(libc::SIGTERM, BUILD_STOP_WAIT);
+            return Built::Stopped;
+        }
+        if group.leader_exited() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    let status = child.wait().ok()?;
-    if stop.load(Ordering::SeqCst) || !status.success() {
-        return None;
+    // Cargo is done: anything it left in its group goes, then the rest of
+    // its output (the pipe closes with them; a moment at most otherwise).
+    let (_, status) = group.stop(libc::SIGTERM, BUILD_STOP_WAIT);
+    let until = Instant::now() + Duration::from_secs(1);
+    while let Ok(line) = out_lines.recv_timeout(until.saturating_duration_since(Instant::now())) {
+        out += &line;
+        out.push('\n');
     }
-    executable(&out)
+    if !status.is_some_and(|s| s.success()) {
+        return Built::Failed;
+    }
+    executable(&out).map_or(Built::Failed, Built::Program)
 }
 
 /// Start the program in its own process group (so Ctrl-C reaches `bonsai
@@ -366,16 +525,20 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
         }
         drop(held);
         note(Note::Building);
-        let built = build(root, stop);
+        let cargo = opts.cargo.clone().unwrap_or_else(|| PathBuf::from("cargo"));
+        let program = match build(root, &cargo, stop) {
+            Built::Stopped => break,
+            Built::Failed => {
+                note(Note::BuildFailed {
+                    still_running: running.is_some(),
+                });
+                continue;
+            }
+            Built::Program(program) => program,
+        };
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        let Some(program) = built else {
-            note(Note::BuildFailed {
-                still_running: running.is_some(),
-            });
-            continue;
-        };
         // Edited again while building: build that instead of starting this.
         if snapshot(root) != base {
             continue;
@@ -682,5 +845,236 @@ mod tests {
         assert!(!alive(third), "the program outlived bonsai dev");
         assert_eq!(notes.lock().unwrap().last(), Some(&Note::Done));
         std::fs::write(&main_rs, main).unwrap();
+    }
+
+    // -----------------------------------------------------------------
+    // A fake cargo and a fake program, to drive the loop's processes.
+    // -----------------------------------------------------------------
+
+    /// What the fake cargo does is in `<fake>/mode`: `stall` (ignores
+    /// SIGTERM, and leaves a child that ignores it too holding its stdout
+    /// open), `fail`, or anything else to build `<fake>/app.sh`.
+    const FAKE_CARGO: &str = r#"#!/bin/sh
+D="$(dirname "$0")"
+echo $$ > "$D/build.pid"
+case "$(cat "$D/mode")" in
+stall)
+    trap '' TERM
+    (trap '' TERM; exec sleep 1000) &
+    echo $! > "$D/build-child.pid"
+    echo started > "$D/building"
+    while :; do sleep 1; done ;;
+fail)
+    echo "error: on purpose" >&2
+    exit 101 ;;
+*)
+    printf '{"reason":"compiler-artifact","target":{"kind":["bin"]},"executable":"%s"}\n' "$D/app.sh" ;;
+esac
+"#;
+
+    /// The program: each run is generation n. It leaves a child that ignores
+    /// SIGTERM and SIGINT, says whether the last generation's child was
+    /// still running when it started, and exits by itself once `<fake>/exit<n>`
+    /// exists.
+    const FAKE_APP: &str = r#"#!/bin/sh
+D="$(dirname "$0")"
+n=$(( $(cat "$D/gen" 2>/dev/null || echo 0) + 1 ))
+echo $n > "$D/gen"
+echo $$ > "$D/app$n.pid"
+(trap '' TERM INT; exec sleep 1000) &
+echo $! > "$D/app$n-child.pid"
+p=$(cat "$D/app$((n - 1))-child.pid" 2>/dev/null)
+st=$(awk '{print $3}' "/proc/$p/stat" 2>/dev/null)
+if [ -n "$p" ] && [ -n "$st" ] && [ "$st" != Z ]; then echo alive; else echo gone; fi > "$D/app$n-saw-old"
+trap 'exit 0' TERM INT
+while [ ! -f "$D/exit$n" ]; do sleep 0.05; done
+exit 3
+"#;
+
+    struct Fake {
+        root: PathBuf,
+        dir: PathBuf,
+    }
+
+    impl Fake {
+        fn new(name: &str) -> Fake {
+            use std::os::unix::fs::PermissionsExt;
+            let root =
+                std::env::temp_dir().join(format!("bonsai-dev-fake-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let tmpl = crate::TEMPLATES.get_dir("linux/host").unwrap();
+            crate::extract_dir(tmpl, tmpl.path(), &root).unwrap();
+            let dir = root.join("fake");
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, text) in [("cargo.sh", FAKE_CARGO), ("app.sh", FAKE_APP)] {
+                std::fs::write(dir.join(name), text).unwrap();
+                std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755))
+                    .unwrap();
+            }
+            std::fs::write(dir.join("mode"), "ok").unwrap();
+            Fake { root, dir }
+        }
+        fn mode(&self, mode: &str) {
+            std::fs::write(self.dir.join("mode"), mode).unwrap();
+        }
+        fn pid(&self, file: &str) -> u32 {
+            let path = self.dir.join(file);
+            wait_until(Duration::from_secs(20), file, || path.exists());
+            let until = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(&path)
+                    .unwrap_or_default()
+                    .trim()
+                    .parse()
+                {
+                    return pid;
+                }
+                assert!(Instant::now() < until, "{file} holds no pid");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        /// An edit, for the loop to rebuild on.
+        fn edit(&self, n: u32) {
+            let main = self.root.join("src/main.rs");
+            let text = std::fs::read_to_string(&main).unwrap();
+            std::fs::write(&main, format!("{text}// edit {n}\n")).unwrap();
+        }
+        fn options(&self) -> Options {
+            Options {
+                cargo: Some(self.dir.join("cargo.sh")),
+                ..Options::default()
+            }
+        }
+    }
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Whether `pid` is running (a zombie, or gone, isn't).
+    fn running(pid: u32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rfind(')')
+                .and_then(|at| stat[at + 1..].split_whitespace().next())
+                .is_some_and(|state| state != "Z")
+        })
+    }
+
+    fn wait_until(within: Duration, what: &str, done: impl Fn() -> bool) {
+        let until = Instant::now() + within;
+        while !done() {
+            assert!(Instant::now() < until, "no {what} within {within:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The loop on its own thread, its notes, and its stop switch.
+    struct Looping {
+        notes: std::sync::Arc<std::sync::Mutex<Vec<Note>>>,
+        stop: &'static AtomicBool,
+        done: std::sync::mpsc::Receiver<()>,
+    }
+
+    fn start_loop(fake: &Fake) -> Looping {
+        let notes: std::sync::Arc<std::sync::Mutex<Vec<Note>>> = Default::default();
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let (tx, done) = std::sync::mpsc::channel();
+        let (root, opts, n) = (fake.root.clone(), fake.options(), notes.clone());
+        std::thread::spawn(move || {
+            run(&root, &opts, stop, &mut |note| n.lock().unwrap().push(note));
+            let _ = tx.send(());
+        });
+        Looping { notes, stop, done }
+    }
+
+    impl Looping {
+        fn saw(&self, what: &str, f: impl Fn(&Note) -> bool) {
+            wait_until(Duration::from_secs(20), what, || {
+                self.notes.lock().unwrap().iter().any(&f)
+            });
+        }
+        fn count(&self, f: impl Fn(&Note) -> bool) -> usize {
+            self.notes.lock().unwrap().iter().filter(|n| f(n)).count()
+        }
+        /// Stop it; how long it took to finish.
+        fn stop(self) -> Duration {
+            let asked = Instant::now();
+            self.stop.store(true, Ordering::SeqCst);
+            self.done
+                .recv_timeout(Duration::from_secs(30))
+                .expect("bonsai dev didn't stop");
+            asked.elapsed()
+        }
+    }
+
+    #[test]
+    fn stopping_during_a_stalled_first_build_ends_it_and_all_it_started() {
+        let fake = Fake::new("stall-first");
+        fake.mode("stall");
+        let looping = start_loop(&fake);
+        let (build, child) = (fake.pid("build.pid"), fake.pid("build-child.pid"));
+        wait_until(Duration::from_secs(20), "stalled build", || {
+            fake.dir.join("building").exists()
+        });
+        let took = looping.stop();
+        // Its SIGTERM is ignored: SIGKILL after BUILD_STOP_WAIT, and no longer.
+        assert!(took < BUILD_STOP_WAIT + Duration::from_secs(3), "{took:?}");
+        assert!(
+            !running(build) && !running(child),
+            "the build outlived bonsai dev"
+        );
+    }
+
+    #[test]
+    fn stopping_during_a_later_build_ends_the_build_and_the_program() {
+        let fake = Fake::new("stall-later");
+        let looping = start_loop(&fake);
+        looping.saw("start", |n| matches!(n, Note::Started(_)));
+        let app = fake.pid("app1.pid");
+        fake.mode("stall");
+        fake.edit(1);
+        wait_until(Duration::from_secs(20), "stalled build", || {
+            fake.dir.join("building").exists()
+        });
+        let (build, child) = (fake.pid("build.pid"), fake.pid("build-child.pid"));
+        let took = looping.stop();
+        assert!(
+            took < BUILD_STOP_WAIT + STOP_WAIT + Duration::from_secs(3),
+            "{took:?}"
+        );
+        assert!(
+            !running(build) && !running(child),
+            "the build outlived bonsai dev"
+        );
+        assert!(!running(app), "the program outlived bonsai dev");
+    }
+
+    #[test]
+    fn stopping_between_builds_and_failed_builds_keep_the_program() {
+        let fake = Fake::new("between");
+        // Not ours: never signalled.
+        let mut stranger = Command::new("sleep").arg("1000").spawn().unwrap();
+        let looping = start_loop(&fake);
+        looping.saw("start", |n| matches!(n, Note::Started(_)));
+        let app = fake.pid("app1.pid");
+        fake.mode("fail");
+        fake.edit(1);
+        looping.saw("build failure", |n| {
+            *n == Note::BuildFailed {
+                still_running: true,
+            }
+        });
+        assert!(running(app), "a failed build stopped the program");
+        assert_eq!(looping.count(|n| matches!(n, Note::Started(_))), 1);
+        looping.stop();
+        assert!(!running(app));
+        assert!(
+            running(stranger.id()),
+            "a process bonsai dev didn't start was signalled"
+        );
+        stranger.kill().unwrap();
+        stranger.wait().unwrap();
     }
 }

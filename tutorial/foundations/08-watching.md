@@ -169,7 +169,8 @@ click:
 events a second, the slowest event so far, and how many are waiting (more
 than a few means the core is falling behind). Then the [run
 logs](../guides/run-logs.md): `on, in logs/…`, `off` (and why: no
-`[record]`, `BONSAI_RECORD=off`), `starting`, or `unavailable` and why. `p` pauses the numbers; `q`
+`[record]`, `BONSAI_RECORD=off`), `starting`, `partly` (which files aren't
+being written, and why), or `unavailable` and why. `p` pauses the numbers; `q`
 quits. It's all one program in one terminal: no tmux or zellij needed.
 
 Why `local`? The greenhouse is a Pi tree, so plain `bonsai top` goes to the

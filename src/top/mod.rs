@@ -82,10 +82,13 @@ pub struct Sys {
 /// What the tree's recorder (its run logs) is doing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Record {
-    /// `off`, `starting`, `on` or `unavailable`.
+    /// `off`, `starting`, `on`, `partial` or `unavailable`.
     pub state: String,
-    /// The run's folder (on), or why not.
+    /// The run's folder (on, partial), or why not.
     pub detail: String,
+    /// Each kind asked for that isn't being written, and why (none from a
+    /// tree older than this list).
+    pub failed: Vec<(String, String)>,
 }
 
 /// One report from the tree: its counts, and the log lines since the last.
@@ -195,9 +198,18 @@ pub fn parse(lines: &[String]) -> io::Result<Snapshot> {
                 })
             }
             Some("record") => {
+                let state = f.next().unwrap_or_default().to_string();
+                let detail = f.next().unwrap_or_default().to_string();
+                // Then kind, why; kind, why; …
+                let rest: Vec<&str> = f.collect();
+                let failed = rest
+                    .chunks(2)
+                    .map(|p| (p[0].to_string(), p.get(1).unwrap_or(&"").to_string()))
+                    .collect();
                 s.record = Some(Record {
-                    state: f.next().unwrap_or_default().to_string(),
-                    detail: f.next().unwrap_or_default().to_string(),
+                    state,
+                    detail,
+                    failed,
                 })
             }
             Some("log") => s.logs.push(line["log\t".len()..].to_string()),
@@ -315,8 +327,22 @@ pub fn record_status(s: &Snapshot) -> (Health, String) {
             format!("{what} ({})", r.detail)
         }
     };
+    let failed = r
+        .failed
+        .iter()
+        .map(|(kind, why)| format!("{kind} ({why})"))
+        .collect::<Vec<_>>()
+        .join(", ");
     match r.state.as_str() {
         "on" => (Health::Ok, format!("run logs: on, in {}", r.detail)),
+        "partial" => (
+            Health::Problem,
+            format!("run logs: partly, in {}; not written: {failed}", r.detail),
+        ),
+        "unavailable" if !failed.is_empty() => (
+            Health::Problem,
+            format!("run logs: unavailable: {}: {failed}", r.detail),
+        ),
         "starting" => (Health::Quiet, format!("run logs: {}", detail("starting"))),
         "unavailable" => (
             Health::Problem,
@@ -631,7 +657,7 @@ mod tests {
     const REPORT: &str = "bonsai-top 1\t1500\t3\t40\t0\n\
          branch\tsensor\t3\t0\t0\t12\t5\t1\t4\n\
          edge\tnet\tretrying\t1\t2\t0\t1\tbind x\t3\t1\t0\n\
-         record\ton\tlogs/2026-10-01_10-00-00\n\
+         record\tpartial\tlogs/2026-10-01_10-00-00\terrors\tcan't open errors.log: denied\n\
          log\t14:05:03.123Z  INFO sensor: 26.5 °C\n\
          end\n\
          bonsai-top 1\t2000\t4\t40\t0\n\
@@ -669,8 +695,9 @@ mod tests {
         assert_eq!(
             s.record,
             Some(Record {
-                state: "on".into(),
-                detail: "logs/2026-10-01_10-00-00".into()
+                state: "partial".into(),
+                detail: "logs/2026-10-01_10-00-00".into(),
+                failed: vec![("errors".into(), "can't open errors.log: denied".into())],
             })
         );
         let s = read_snapshot(&mut r).unwrap().unwrap();
@@ -852,9 +879,45 @@ mod tests {
             record: Some(Record {
                 state: state.into(),
                 detail: detail.into(),
+                failed: Vec::new(),
             }),
             ..Default::default()
         };
+        let failing = |state: &str, detail: &str, failed: &[(&str, &str)]| Snapshot {
+            record: Some(Record {
+                state: state.into(),
+                detail: detail.into(),
+                failed: failed
+                    .iter()
+                    .map(|(k, w)| (k.to_string(), w.to_string()))
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        // Some files written, some not: never shown as healthy.
+        assert_eq!(
+            record_status(&failing(
+                "partial",
+                "logs/r1",
+                &[("errors", "can't open errors.log: denied")]
+            )),
+            (
+                Health::Problem,
+                "run logs: partly, in logs/r1; not written: errors (can't open errors.log: denied)"
+                    .into()
+            )
+        );
+        assert_eq!(
+            record_status(&failing(
+                "unavailable",
+                "nothing can be written in logs/r1",
+                &[("events", "can't open events.log: denied"), ("panics", "can't write panics.log: full")]
+            )),
+            (
+                Health::Problem,
+                "run logs: unavailable: nothing can be written in logs/r1: events (can't open events.log: denied), panics (can't write panics.log: full)".into()
+            )
+        );
         assert_eq!(
             record_status(&with("on", "logs/2026-10-01_10-00-00")),
             (

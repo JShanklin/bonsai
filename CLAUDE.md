@@ -192,9 +192,15 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   or `off`; a bind failure is one WARN) as `stats::render` text every 500 ms:
   `bonsai-top 1\t…` then `branch`/`edge`/`link`/`sys`/`record`/`log` rows
   (tab-separated) and `end`; `record` is `record::status()` (`off`,
-  `starting`, `on`, `unavailable`, then the folder or why: `set_status`
-  where `start`/`Writer::start`/`fail` decide; a short Mutex, never held
-  over I/O). Links: the generated `Core::new` registers a
+  `starting`, `on`, `partial`, `unavailable`; then the folder or why; then
+  a kind/why pair per file asked for that isn't being written, which
+  older tops ignore): one Mutex holds all three, set by `start` (off,
+  starting), `Writer::start` (unavailable before any file) and
+  `Writer::report`, which `Writer::start` calls once every requested file
+  has been tried (on: all written; partial; unavailable: none) and `fail`
+  calls again on any later write/flush failure (`broken` per kind).
+  `fault::OPEN_FAIL`/`WRITE_FAIL` bitmasks inject per-kind failures in the
+  runtime tests). Links: the generated `Core::new` registers a
   `LINKS` table (from, message or `""`, to…; `stats::links`, first call
   wins) and `deliver`/`handle` bump `stats::link(i)` per message link,
   edge→branch event and branch→edge send (lock-free counters in a

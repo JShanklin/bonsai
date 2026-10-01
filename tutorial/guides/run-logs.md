@@ -191,7 +191,15 @@ were taken, and also makes the run's folder and checks the last one. So:
   last few seconds, and can leave the last line half-written.
 - **A full disk or a read-only folder** never stops the tree: bonsai says
   so once on stderr (`bonsai: run logs: can't write events.log: …; stopped
-  writing it`) and stops writing that file.
+  writing it`) and stops writing that file; the others carry on.
+
+`bonsai top` shows how they're doing, at the top of every tab: `starting`
+until every file asked for has been opened (or failed to), `on` only while
+every one of them is being written, `partly` with each one that isn't and
+why (`not written: errors (can't open errors.log: Permission denied)`),
+`unavailable` when none is, and `off` with why (no `[record]`,
+`BONSAI_RECORD=off`, or nothing asked for). A file that fails later,
+mid-run, turns `on` into `partly` (or `unavailable`) when it happens.
 
 ## Older trees
 

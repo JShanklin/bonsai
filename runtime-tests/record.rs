@@ -711,3 +711,52 @@ fn a_tree_killed_while_making_its_run_leaves_nothing_in_the_way() {
     assert!(!old.exists());
     assert_eq!(runs(&dir).len(), 1);
 }
+
+/// The `record` row a running tree serves to `bonsai top`, once it says
+/// something other than `starting`.
+fn record_row(port: u16) -> String {
+    use std::io::{BufRead, BufReader};
+    let started = std::time::Instant::now();
+    loop {
+        assert!(started.elapsed() < Duration::from_secs(10), "no record row");
+        let Ok(stream) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else { break };
+            if line.starts_with("record\t") && !line.starts_with("record\tstarting") {
+                return line;
+            }
+        }
+    }
+}
+
+#[test]
+fn bonsai_top_hears_whether_the_run_is_being_recorded() {
+    use super::support::free_port;
+    let dir = scratch("top-row");
+    let port = free_port().to_string();
+    let top = format!("127.0.0.1:{port}");
+    let a = spawn(
+        SCENARIO,
+        &[("RT_DIR", dir.to_str().unwrap()), ("BONSAI_TOP", &top)],
+    );
+    let row = record_row(port.parse().unwrap());
+    a.signal(libc::SIGTERM);
+    let _ = a.wait(Duration::from_secs(10));
+    let folder = runs(&dir).pop().unwrap();
+    assert_eq!(row, format!("record\ton\t{}", folder.display()));
+
+    // Unavailable, and why.
+    let dir = scratch("top-row-locked");
+    std::fs::create_dir_all(dir.join(".bonsai-record.lock")).unwrap();
+    let b = spawn(
+        SCENARIO,
+        &[("RT_DIR", dir.to_str().unwrap()), ("BONSAI_TOP", &top)],
+    );
+    let row = record_row(port.parse().unwrap());
+    b.signal(libc::SIGTERM);
+    let _ = b.wait(Duration::from_secs(10));
+    assert!(row.starts_with("record\tunavailable\tcan't open "), "{row}");
+}

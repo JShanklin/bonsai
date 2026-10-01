@@ -190,8 +190,11 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   failed + discarded as **lost**. `mod top`:
   `run()` serves them on `BONSAI_TOP` (default `127.0.0.1:7777`, a bare port,
   or `off`; a bind failure is one WARN) as `stats::render` text every 500 ms:
-  `bonsai-top 1\t…` then `branch`/`edge`/`link`/`sys`/`log` rows
-  (tab-separated) and `end`. Links: the generated `Core::new` registers a
+  `bonsai-top 1\t…` then `branch`/`edge`/`link`/`sys`/`record`/`log` rows
+  (tab-separated) and `end`; `record` is `record::status()` (`off`,
+  `starting`, `on`, `unavailable`, then the folder or why: `set_status`
+  where `start`/`Writer::start`/`fail` decide; a short Mutex, never held
+  over I/O). Links: the generated `Core::new` registers a
   `LINKS` table (from, message or `""`, to…; `stats::links`, first call
   wins) and `deliver`/`handle` bump `stats::link(i)` per message link,
   edge→branch event and branch→edge send (lock-free counters in a
@@ -390,7 +393,13 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   segments into box-drawing junctions; next-column links run through the
   gap, longer ones over lanes above the boxes, back links along lanes
   below. A tree without `link`/`sys` rows (older runtime) shows nodes
-  without arrows and a hint to `bonsai sync`. `--once` prints tables (and
+  without arrows and a hint to `bonsai sync`. Status in words, pure and
+  from the counts only (`branch_status`, `edge_status`, `record_status` →
+  `Health` Ok/Quiet/Problem): a branch with no inputs says what feeds it,
+  if the links say (never a cause it can't see); an edge connecting,
+  retrying (its error), dropping or losing; the recorder's row, or "not
+  reported" from an older tree. Shown in the Branches/Edges status
+  columns, the graph's detail strip, the header and `--once`. `--once` prints tables (and
   the links) from snapshots 2 s apart. The format must match
   `templates/_tree/bonsai.rs`'s `stats::render` (both sides are unit-tested
   against the same text).

@@ -625,7 +625,7 @@ pub mod record {
     use std::io::{BufWriter, Write};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering::Relaxed;
-    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64};
     use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -758,6 +758,35 @@ pub mod record {
     static FAILED: AtomicU64 = AtomicU64::new(0);
     /// Set by `end`: why the tree stopped, and who to tell once END is out.
     static ENDING: Mutex<Option<(String, oneshot::Sender<()>)>> = Mutex::new(None);
+
+    // What the recorder is doing, for `bonsai top`: off, starting (the
+    // writer is making the run's folder), on, or unavailable; and the folder,
+    // or why not.
+    const OFF: u8 = 0;
+    const STARTING: u8 = 1;
+    const ON: u8 = 2;
+    const UNAVAILABLE: u8 = 3;
+    static STATE: AtomicU8 = AtomicU8::new(OFF);
+    static DETAIL: Mutex<String> = Mutex::new(String::new());
+
+    fn set_status(state: u8, detail: String) {
+        if let Ok(mut d) = DETAIL.lock() {
+            *d = detail;
+        }
+        STATE.store(state, Relaxed);
+    }
+
+    /// `off`, `starting`, `on` or `unavailable`, and the run's folder (on)
+    /// or why not.
+    pub fn status() -> (&'static str, String) {
+        let state = match STATE.load(Relaxed) {
+            STARTING => "starting",
+            ON => "on",
+            UNAVAILABLE => "unavailable",
+            _ => "off",
+        };
+        (state, DETAIL.lock().map(|d| d.clone()).unwrap_or_default())
+    }
     static STARTED: OnceLock<Instant> = OnceLock::new();
 
     #[cfg(test)]
@@ -809,16 +838,27 @@ pub mod record {
     /// files and writes every line to them. Nothing when `[record]` keeps
     /// nothing, or `BONSAI_RECORD=off`. Never touches the disk itself.
     pub fn start() {
-        let Some(config) = CONFIG.get() else { return };
+        let Some(config) = CONFIG.get() else {
+            set_status(OFF, "no [record] in bonsai.toml".into());
+            return;
+        };
         let dir = match std::env::var("BONSAI_RECORD") {
-            Ok(v) if v.trim() == "off" => return,
+            Ok(v) if v.trim() == "off" => {
+                set_status(OFF, "BONSAI_RECORD=off".into());
+                return;
+            }
             Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
             _ => PathBuf::from(config.dir),
         };
         let kinds: Vec<Kind> = KINDS.into_iter().filter(|k| k.on(config)).collect();
         if kinds.is_empty() {
+            set_status(OFF, "[record] keeps nothing".into());
             return;
         }
+        set_status(
+            STARTING,
+            format!("making a run folder in {}", dir.display()),
+        );
         let (tx, rx) = sync_channel(QUEUE);
         let at = Local::now();
         let _ = STARTED.set(Instant::now());
@@ -839,6 +879,7 @@ pub mod record {
             Ok(_) => ACCEPTING.store(true, Relaxed),
             Err(e) => {
                 let _ = writeln!(std::io::stderr(), "bonsai: no run logs: {e}");
+                set_status(UNAVAILABLE, format!("no writer thread: {e}"));
             }
         }
     }
@@ -953,6 +994,7 @@ pub mod record {
                 Ok(turn) => turn,
                 Err(why) => {
                     let _ = writeln!(std::io::stderr(), "bonsai: no run logs this time: {why}");
+                    set_status(UNAVAILABLE, why);
                     return;
                 }
             };
@@ -964,11 +1006,9 @@ pub mod record {
             let (folder, lock) = match new_run(dir, &folder_name(at)) {
                 Ok(made) => made,
                 Err(e) => {
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "bonsai: no run logs: can't make a run folder in {}: {e}",
-                        dir.display()
-                    );
+                    let why = format!("can't make a run folder in {}: {e}", dir.display());
+                    let _ = writeln!(std::io::stderr(), "bonsai: no run logs: {why}");
+                    set_status(UNAVAILABLE, why);
                     return;
                 }
             };
@@ -1002,6 +1042,7 @@ pub mod record {
                 );
             }
             self.folder = Some(folder.clone());
+            set_status(ON, folder.display().to_string());
             for &kind in kinds {
                 let path = folder.join(kind.file());
                 match OpenOptions::new().create(true).append(true).open(&path) {
@@ -1102,6 +1143,9 @@ pub mod record {
             FAILED.fetch_add(1, Relaxed);
             self.files[kind as usize] = None;
             OPEN[kind as usize].store(false, Relaxed);
+            if self.files.iter().all(Option::is_none) {
+                set_status(UNAVAILABLE, format!("can't write {}: {e}", kind.file()));
+            }
             let _ = writeln!(
                 std::io::stderr(),
                 "bonsai: run logs: can't write {}: {e}; stopped writing it",
@@ -1971,6 +2015,8 @@ pub mod stats {
         /// from, message (empty for an edge's link), to, deliveries
         pub links: Vec<(&'static str, &'static str, &'static [&'static str], u64)>,
         pub sys: Option<Sys>,
+        /// The recorder's state, and its folder or why not.
+        pub record: (&'static str, String),
     }
 
     /// A link in bonsai.toml: from, message (`""` when an edge is at one
@@ -2098,6 +2144,7 @@ pub mod stats {
                     .collect()
             }),
             sys: sys(),
+            record: super::record::status(),
         }
     }
 
@@ -2152,6 +2199,7 @@ pub mod stats {
                 sys.mem_available_kb
             );
         }
+        o += &format!("record\t{}\t{}\n", s.record.0, clean(&s.record.1));
         for line in logs {
             o += &format!("log\t{}\n", clean(line));
         }
@@ -2185,6 +2233,7 @@ pub mod stats {
                     mem_total_kb: 4000,
                     mem_available_kb: 3000,
                 }),
+                record: ("on", "logs/2026-10-01_10-00-00".into()),
             };
             assert_eq!(
                 render(&s, &["a line".into()]),
@@ -2193,6 +2242,7 @@ pub mod stats {
                  edge\tnet\tretrying\t1\t2\t0\t1\tbind x\t3\t1\t0\n\
                  link\tsensor\tReading\tnet,log\t3\n\
                  sys\t2048\t30\t1\t12\t4000\t3000\n\
+                 record\ton\tlogs/2026-10-01_10-00-00\n\
                  log\ta line\n\
                  end\n"
             );

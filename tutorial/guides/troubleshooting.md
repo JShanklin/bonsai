@@ -33,6 +33,8 @@ It exits 1 when something's an error (0 with only warnings), and
 | ``run `bonsai list` inside a bonsai tree (no bonsai.toml and Cargo.toml stamp here)`` | you're not in the tree's folder | `cd` into it |
 | ``waiting for `bonsai sync (pid 4242)` to finish changing this tree…`` | another bonsai command (a terminal, `bonsai dev --sync`, a script) is changing the tree; commands that change it take turns, holding `.bonsai.lock` | nothing: it goes on when that one is done |
 | ``… is changing this tree; nothing was changed. Try again when it's done (waited 10.0s…)`` | that other command took longer than `BONSAI_LOCK_WAIT` (10 s) | run it again once the other one is done, or set `BONSAI_LOCK_WAIT=60`. A killed command never keeps the lock |
+| ``bonsai dev: … still holds the tree after 10s; the build starts as soon as it lets go`` | the same, while `bonsai dev` has a build to do | nothing: `bonsai dev` keeps waiting, and builds when it's free |
+| ``bonsai dev: not building: can't open …/.bonsai.lock: …`` | the lock file can't be opened (permissions, a read-only folder) | fix that, then save a file |
 | ``no message `Readng` in src/messages.rs`` | a typo, or the message doesn't exist yet | `bonsai message add Readng …`, or fix the name |
 | ``no branch or edge `sensr` `` | a typo | `bonsai list` shows the names |
 | `Reading is still linked; unlink it first` | removing a message that's in use | `bonsai unlink` each link it lists |

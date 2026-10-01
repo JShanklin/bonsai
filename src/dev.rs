@@ -35,6 +35,10 @@ const POLL: Duration = Duration::from_millis(200);
 pub const SETTLE: Duration = Duration::from_millis(300);
 /// How long a program gets to stop before it's killed.
 pub const STOP_WAIT: Duration = Duration::from_secs(5);
+/// After another command was holding the tree, how soon the lock is tried
+/// again; doubling each time it's still held, up to `LOCK_RETRY_MAX`.
+pub const LOCK_RETRY: Duration = Duration::from_millis(50);
+pub const LOCK_RETRY_MAX: Duration = Duration::from_secs(1);
 /// How long a build being cancelled gets to stop before it's killed.
 pub const BUILD_STOP_WAIT: Duration = Duration::from_secs(2);
 
@@ -117,10 +121,16 @@ pub enum Note {
     Synced(String),
     /// The graph can't be built from; nothing was built.
     Refused(Vec<String>),
-    /// Another command is changing the tree; it waits for it.
+    /// Another command is changing the tree; the build waits for it.
     Waiting(String),
-    /// Another command held the tree past `lock::wait()`; not built.
-    Busy(String),
+    /// It still is, after `lock::wait()`: said once per wait.
+    StillWaiting {
+        who: String,
+        waited: Duration,
+    },
+    /// The tree's lock can't be taken at all (not another command holding
+    /// it): nothing is built until the next change.
+    LockFailed(String),
     /// Generated files are out of date and `--sync` wasn't asked for.
     Stale(Vec<String>),
     Building,
@@ -162,7 +172,13 @@ impl Note {
                 files.join(", ")
             ),
             Note::Waiting(who) => format!("waiting for {who} to finish changing the tree…"),
-            Note::Busy(why) => format!("not building: {why}; trying again on the next change"),
+            Note::StillWaiting { who, waited } => format!(
+                "{who} still holds the tree after {:.0}s; the build starts as soon as it lets go",
+                waited.as_secs_f64()
+            ),
+            Note::LockFailed(why) => {
+                format!("not building: {why}; waiting won't fix that: fix it, then save again")
+            }
             Note::Building => "building…".to_string(),
             Note::BuildFailed {
                 still_running: true,
@@ -1028,8 +1044,17 @@ fn probe() -> ! {
     std::process::exit(0);
 }
 
-/// Wait for the sources to change from `base` and then settle; the new
-/// snapshot, or None when told to stop. Meanwhile, a program that ends by
+/// What ended a wait.
+enum Wake {
+    Stop,
+    /// The sources changed from `base`, and settled: this is them now.
+    Changed(Snapshot),
+    /// `until` came, with no change.
+    Due,
+}
+
+/// Wait for the sources to change from `base` and then settle, for `stop`,
+/// or (with `until`) for that moment. Meanwhile, a program that ends by
 /// itself is reported.
 fn next_change(
     root: &Path,
@@ -1037,11 +1062,12 @@ fn next_change(
     running: &mut Option<Group>,
     adopt: bool,
     stop: &AtomicBool,
+    until: Option<Instant>,
     note: &mut dyn FnMut(Note),
-) -> Option<Snapshot> {
+) -> Wake {
     loop {
         if stop.load(Ordering::SeqCst) {
-            return None;
+            return Wake::Stop;
         }
         if adopt {
             reap_adopted();
@@ -1063,7 +1089,7 @@ fn next_change(
             let mut quiet_since = Instant::now();
             while quiet_since.elapsed() < SETTLE {
                 if stop.load(Ordering::SeqCst) {
-                    return None;
+                    return Wake::Stop;
                 }
                 std::thread::sleep(POLL.min(SETTLE / 3));
                 let again = snapshot(root);
@@ -1072,10 +1098,24 @@ fn next_change(
                     quiet_since = Instant::now();
                 }
             }
-            return Some(last);
+            return Wake::Changed(last);
         }
-        std::thread::sleep(POLL);
+        let now = Instant::now();
+        match until {
+            Some(at) if now >= at => return Wake::Due,
+            Some(at) => std::thread::sleep(POLL.min(at - now)),
+            None => std::thread::sleep(POLL),
+        }
     }
+}
+
+/// Another command holding the tree, as `run` waits it out.
+struct Contention {
+    since: Instant,
+    /// When to try again, and how long after that if it's still held.
+    retry_at: Instant,
+    backoff: Duration,
+    said_still: bool,
 }
 
 /// The loop: build and run, then rebuild and restart on every change, until
@@ -1084,42 +1124,77 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
     let mut running: Option<Group> = None;
     let mut base = snapshot(root);
     note(Note::Watching);
-    let mut first = true;
+    // A build is owed (the first, or for a change) until it has been tried
+    // with the tree's lock had; another command holding the tree only puts
+    // it off, and it's tried again by itself, never waiting for a save.
+    let mut pending = true;
+    let mut contention: Option<Contention> = None;
     loop {
-        if !first {
-            match next_change(root, &base, &mut running, opts.adopt, stop, note) {
-                None => break,
-                Some(now) => {
+        if !pending || contention.is_some() {
+            let until = contention.as_ref().map(|c| c.retry_at);
+            match next_change(root, &base, &mut running, opts.adopt, stop, until, note) {
+                Wake::Stop => break,
+                Wake::Changed(now) => {
                     note(Note::Changed(changed(&base, &now)));
                     base = now;
+                    pending = true;
                 }
+                Wake::Due => {}
             }
         }
-        first = false;
         // The graph first: errors, then generated files. With --sync, under
         // the tree's lock from planning to writing; without, read under a
-        // shared one, so no other command's change is seen half made.
-        let wait = crate::lock::wait();
+        // shared one, so no other command's change is seen half made. The
+        // lock is only tried, never waited for here: waiting is done above,
+        // where Ctrl-C, edits and the program are still seen to.
         let held = if opts.sync {
-            crate::lock::acquire_telling(root, "dev --sync", wait, &mut |who| {
-                note(Note::Waiting(who.to_string()))
-            })
-            .map(Some)
+            crate::lock::acquire(root, "dev --sync", Duration::ZERO).map(Some)
         } else {
             Ok(None)
         };
         let planned = match &held {
             Ok(Some(_)) => Ok(crate::sync::plan(root)),
-            Ok(None) => crate::lock::read_consistent(root, wait, || crate::sync::plan(root)),
+            Ok(None) => {
+                crate::lock::read_consistent(root, Duration::ZERO, || crate::sync::plan(root))
+            }
             Err(e) => Err(e.clone()),
         };
         let planned = match planned {
             Ok(planned) => planned,
-            Err(why) => {
-                note(Note::Busy(why));
+            Err(crate::lock::LockError::Busy { holder, .. }) => {
+                let now = Instant::now();
+                let c = contention.get_or_insert_with(|| {
+                    note(Note::Waiting(holder.clone()));
+                    Contention {
+                        since: now,
+                        retry_at: now,
+                        backoff: LOCK_RETRY,
+                        said_still: false,
+                    }
+                });
+                // Said once it has waited as long as other commands would.
+                let waited = crate::lock::wait();
+                if !c.said_still && now - c.since >= waited {
+                    c.said_still = true;
+                    note(Note::StillWaiting {
+                        who: holder,
+                        waited,
+                    });
+                }
+                c.retry_at = now + c.backoff;
+                c.backoff = (c.backoff * 2).min(LOCK_RETRY_MAX);
+                continue;
+            }
+            Err(crate::lock::LockError::Failed(why)) => {
+                contention = None;
+                pending = false;
+                note(Note::LockFailed(why));
                 continue;
             }
         };
+        // Tried now, whatever comes of it: the next build is for a change.
+        contention = None;
+        pending = false;
         match planned {
             Err(crate::sync::Refused::Config(e)) => {
                 note(Note::Refused(vec![e]));

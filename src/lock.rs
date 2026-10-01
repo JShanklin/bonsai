@@ -5,7 +5,9 @@
 //! it's done; `bonsai sync`, `bonsai doctor` and `bonsai dev` read under a
 //! shared one, so they never see a change half made. A command that finds the
 //! tree locked waits `WAIT` (`BONSAI_LOCK_WAIT` seconds), saying once who
-//! holds it, then gives up having changed nothing. The OS lets go of the lock
+//! holds it, then gives up having changed nothing (`LockError::Busy`);
+//! `bonsai dev` only tries, and keeps trying until it's free. A lock that
+//! can't be taken at all is `LockError::Failed`: waiting won't help. The OS lets go of the lock
 //! when its holder exits, however it exits, so a killed command never leaves
 //! the tree locked.
 
@@ -27,6 +29,25 @@ pub const WAIT: Duration = Duration::from_secs(10);
 #[must_use = "the lock is let go as soon as it's dropped"]
 pub struct TreeLock {
     _file: File,
+}
+
+/// Why the lock wasn't had.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LockError {
+    /// Another command holds the tree (`holder`: `\`bonsai link …\``, as it
+    /// wrote it) and didn't let go in time. It will: trying again works.
+    Busy { holder: String, message: String },
+    /// The lock can't be taken at all (its file can't be opened or locked:
+    /// permissions, a read-only folder). Waiting won't change that.
+    Failed(String),
+}
+
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LockError::Busy { message, .. } | LockError::Failed(message) => f.write_str(message),
+        }
+    }
 }
 
 /// How long to wait for the lock: `BONSAI_LOCK_WAIT` seconds, else `WAIT`.
@@ -67,22 +88,28 @@ fn take(
     how: i32,
     wait: Duration,
     waiting: &mut dyn FnMut(&str),
-) -> Result<(), String> {
+) -> Result<(), LockError> {
     let started = Instant::now();
     let mut told = false;
     loop {
         match flock(file, how) {
             Ok(()) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(format!("can't lock {}: {e}", path.display())),
+            Err(e) => {
+                return Err(LockError::Failed(format!(
+                    "can't lock {}: {e}",
+                    path.display()
+                )));
+            }
         }
         if started.elapsed() >= wait {
-            return Err(format!(
-                "{} is changing this tree; nothing was changed. Try again when it's done \
+            let holder = holder(path);
+            let message = format!(
+                "{holder} is changing this tree; nothing was changed. Try again when it's done \
                  (waited {:.1}s; BONSAI_LOCK_WAIT sets how long)",
-                holder(path),
                 wait.as_secs_f64()
-            ));
+            );
+            return Err(LockError::Busy { holder, message });
         }
         if !told {
             told = true;
@@ -94,7 +121,7 @@ fn take(
 
 /// Take the tree's lock to change it, for `what` (a command, as `bonsai
 /// <what>`), waiting up to `wait` for another command to finish.
-pub fn acquire(root: &Path, what: &str, wait: Duration) -> Result<TreeLock, String> {
+pub fn acquire(root: &Path, what: &str, wait: Duration) -> Result<TreeLock, LockError> {
     acquire_telling(root, what, wait, &mut |who| {
         eprintln!("waiting for {who} to finish changing this tree…");
     })
@@ -106,7 +133,7 @@ pub fn acquire_telling(
     what: &str,
     wait: Duration,
     waiting: &mut dyn FnMut(&str),
-) -> Result<TreeLock, String> {
+) -> Result<TreeLock, LockError> {
     let path = root.join(LOCK_FILE);
     let mut file = OpenOptions::new()
         .create(true)
@@ -114,7 +141,7 @@ pub fn acquire_telling(
         .read(true)
         .write(true)
         .open(&path)
-        .map_err(|e| format!("can't open {}: {e}", path.display()))?;
+        .map_err(|e| LockError::Failed(format!("can't open {}: {e}", path.display())))?;
     take(&file, &path, libc::LOCK_EX, wait, waiting)?;
     // Say who holds it, for whoever has to wait (best effort).
     let _ = file.set_len(0);
@@ -132,7 +159,7 @@ pub fn read_consistent<T>(
     root: &Path,
     wait: Duration,
     mut read: impl FnMut() -> T,
-) -> Result<T, String> {
+) -> Result<T, LockError> {
     let path = root.join(LOCK_FILE);
     for _ in 0..3 {
         match File::open(&path) {
@@ -147,10 +174,18 @@ pub fn read_consistent<T>(
                     return Ok(got);
                 }
             }
-            Err(e) => return Err(format!("can't open {}: {e}", path.display())),
+            Err(e) => {
+                return Err(LockError::Failed(format!(
+                    "can't open {}: {e}",
+                    path.display()
+                )));
+            }
         }
     }
-    Err("the tree kept changing while it was read".to_string())
+    Err(LockError::Busy {
+        holder: "another bonsai command".to_string(),
+        message: "the tree kept changing while it was read".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -173,7 +208,8 @@ mod tests {
         let err = acquire_telling(&root, "sync", Duration::from_millis(200), &mut |w| {
             told.push(w.to_string())
         })
-        .unwrap_err();
+        .unwrap_err()
+        .to_string();
         assert!(started.elapsed() >= Duration::from_millis(200));
         assert!(err.contains("`bonsai branch add a (pid "), "{err}");
         assert!(err.contains("nothing was changed"), "{err}");
@@ -197,6 +233,34 @@ mod tests {
         })
         .unwrap();
         assert_eq!(inner, (7, true));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_held_lock_is_busy_and_a_broken_one_failed() {
+        let root = dir("kinds");
+        let held = acquire(&root, "link a", Duration::ZERO).unwrap();
+        match acquire(&root, "sync", Duration::ZERO).unwrap_err() {
+            LockError::Busy { holder, .. } => assert!(holder.contains("link a"), "{holder}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            read_consistent(&root, Duration::ZERO, || ()),
+            Err(LockError::Busy { .. })
+        ));
+        drop(held);
+        // A lock file that can't be opened (a symlink to itself): no
+        // waiting fixes that, for writers or readers.
+        std::fs::remove_file(root.join(LOCK_FILE)).unwrap();
+        std::os::unix::fs::symlink(LOCK_FILE, root.join(LOCK_FILE)).unwrap();
+        assert!(matches!(
+            acquire(&root, "sync", Duration::ZERO),
+            Err(LockError::Failed(_))
+        ));
+        assert!(matches!(
+            read_consistent(&root, Duration::ZERO, || ()),
+            Err(LockError::Failed(_))
+        ));
         let _ = std::fs::remove_dir_all(&root);
     }
 

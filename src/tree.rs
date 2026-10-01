@@ -227,7 +227,11 @@ fn planned(root: &Path) -> crate::sync::Plan {
 pub fn sync(args: &[String]) -> io::Result<()> {
     match args {
         [] => {
-            let lock = require_tree("sync");
+            // Not `require_tree`: an older tree's `[[wire]]` tables are part
+            // of the plan, renamed only if the whole sync is accepted, and
+            // through the same journaled writes as the rest of it.
+            require_tree_unchanged("sync");
+            let lock = lock_tree("sync");
             sync_tree(&lock)
         }
         [a] if a == "--dry-run" => {

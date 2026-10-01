@@ -16,9 +16,12 @@
 //! What left the group goes too: a `setsid` child by its parentage, and a
 //! double-forked orphan because `bonsai dev` is the subreaper that adopts
 //! it (`Options::adopt`); each signalled by pidfd after its start time is
-//! checked. If `bonsai dev` is SIGKILLed, its guardian (a process of its
-//! own, `guardian`) stops all of that: what it saw at its last look, and
-//! whatever still carries this run's `MARK` in its environment.
+//! checked. Where it can (`isolation`), the program runs in a PID namespace
+//! of its own (`isolated`): whatever becomes of `bonsai dev`, the kernel
+//! ends everything inside when the namespace's init ends. If `bonsai dev`
+//! is SIGKILLed, its guardian (a process of its own, `guardian`) also stops
+//! what it saw at its last look, and whatever still carries this run's
+//! `MARK` in its environment. A build's leftovers (`build_mark`) are left.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -191,6 +194,9 @@ pub struct Options {
     /// `bonsai dev` is the subreaper of what it starts: orphans it adopts
     /// (a daemon's double fork) are the program's, and go with it.
     pub adopt: bool,
+    /// Run the program in a PID namespace of its own, under this `bonsai`'s
+    /// `__dev-run` (`isolated`).
+    pub isolate: Option<PathBuf>,
 }
 
 /// A process `bonsai dev` started as the leader of its own process group,
@@ -200,6 +206,9 @@ pub struct Options {
 /// the group (`setsid`, a daemon) is found by `running` instead.
 struct Group {
     child: Child,
+    /// The pid to show: the program's own, when it runs in a namespace
+    /// under `__dev-run`; else the leader's.
+    shown: u32,
 }
 
 impl Group {
@@ -225,7 +234,6 @@ impl Group {
                 });
             }
         }
-        cmd.env(MARK, mark());
         let child = cmd.spawn()?;
         if let Ok(mut s) = STARTED.lock() {
             s.push(child.id());
@@ -233,12 +241,13 @@ impl Group {
         if let Some(p) = proc_stat(child.id()) {
             watch(|w| w.push((p.pid, p.start)));
         }
-        Ok(Group { child })
+        let shown = child.id();
+        Ok(Group { child, shown })
     }
 
-    /// The leader's pid, which is also the group's id.
+    /// The pid to show for it.
     fn id(&self) -> u32 {
-        self.child.id()
+        self.shown
     }
 
     /// Whether the leader has exited (not reaped: its id stays ours).
@@ -323,8 +332,8 @@ impl Group {
         if let Ok(mut s) = STARTED.lock() {
             s.retain(|&p| p != self.child.id());
         }
-        let pid = self.child.id();
-        watch(|w| w.retain(|&(p, _)| p != pid));
+        let leader = self.child.id();
+        watch(|w| w.retain(|&(p, _)| p != leader));
         (killed, status)
     }
 }
@@ -433,22 +442,33 @@ static WATCHED: std::sync::Mutex<Vec<(u32, u64)>> = std::sync::Mutex::new(Vec::n
 /// to init when `bonsai dev` died) and names this run of `bonsai dev` only.
 const MARK: &str = "BONSAI_DEV_RUN";
 
-fn mark() -> String {
-    let me = std::process::id();
-    let start = proc_stat(me).map_or(0, |p| p.start);
-    format!("{me}:{start}")
+fn mark() -> &'static str {
+    static MARKED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MARKED.get_or_init(|| {
+        let me = std::process::id();
+        let start = proc_stat(me).map_or(0, |p| p.start);
+        format!("{me}:{start}")
+    })
+}
+
+/// A build's `MARK`: what it leaves running (a compiler cache's server) isn't
+/// the program's.
+fn build_mark() -> String {
+    format!("{}:build", mark())
+}
+
+/// Whether `pid`'s environment holds `MARK=mark`.
+fn has_mark(pid: u32, mark: &str) -> bool {
+    let want = format!("{MARK}={mark}");
+    std::fs::read(format!("/proc/{pid}/environ"))
+        .is_ok_and(|env| env.split(|&b| b == 0).any(|v| v == want.as_bytes()))
 }
 
 /// The processes in `table` whose environment holds `MARK=mark`.
 fn marked(table: &[Proc], mark: &str, me: u32) -> Vec<Proc> {
-    let want = format!("{MARK}={mark}");
     table
         .iter()
-        .filter(|p| p.pid != me && !p.zombie)
-        .filter(|p| {
-            std::fs::read(format!("/proc/{}/environ", p.pid))
-                .is_ok_and(|env| env.split(|&b| b == 0).any(|v| v == want.as_bytes()))
-        })
+        .filter(|p| p.pid != me && !p.zombie && has_mark(p.pid, mark))
         .copied()
         .collect()
 }
@@ -500,8 +520,9 @@ fn dismiss_guardian() {
 
 /// What the guardian would stop: what the watched leaders started (their
 /// groups, by start time no earlier than the leader's, and descendants),
-/// and the orphans `dev` adopted, with theirs.
-fn guarded(table: &[Proc], leaders: &[(u32, u64)], dev: u32, me: u32) -> Vec<Proc> {
+/// and the orphans `dev` adopted, with theirs (not a build's: those carry
+/// the build's mark).
+fn guarded(table: &[Proc], leaders: &[(u32, u64)], dev: u32, me: u32, mark: &str) -> Vec<Proc> {
     let mut out: Vec<Proc> = Vec::new();
     let mut add = |ps: Vec<Proc>| {
         for p in ps {
@@ -522,7 +543,7 @@ fn guarded(table: &[Proc], leaders: &[(u32, u64)], dev: u32, me: u32) -> Vec<Pro
     }
     let orphans: Vec<u32> = table
         .iter()
-        .filter(|p| p.ppid == dev && p.pid != me)
+        .filter(|p| p.ppid == dev && p.pid != me && !has_mark(p.pid, &format!("{mark}:build")))
         .map(|p| p.pid)
         .collect();
     add(descendants(table, &orphans));
@@ -573,14 +594,14 @@ pub fn guardian(dev: &str) -> ! {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        known = guarded(&procs(), &leaders, dev, me);
+        known = guarded(&procs(), &leaders, dev, me, &mark);
     }
     // `bonsai dev` is gone without a word: what it ran goes now. An orphan
     // it adopted since the last look has passed to init by now: its mark
     // still names it.
     let mut targets = known;
     let table = procs();
-    for p in guarded(&table, &leaders, dev, me)
+    for p in guarded(&table, &leaders, dev, me, &mark)
         .into_iter()
         .chain(marked(&table, &mark, me))
     {
@@ -608,12 +629,13 @@ pub fn guardian(dev: &str) -> ! {
 }
 
 /// Orphans `bonsai dev` adopted (as a subreaper: ones whose parent died, a
-/// daemon's double fork) and everything they started.
+/// daemon's double fork) and everything they started; not a daemon a build
+/// left (sccache's server: it carries `build_mark`).
 fn adopted(table: &[Proc]) -> Vec<Proc> {
     let me = std::process::id();
     let roots: Vec<u32> = table
         .iter()
-        .filter(|p| p.ppid == me && !started(p.pid))
+        .filter(|p| p.ppid == me && !started(p.pid) && !has_mark(p.pid, &build_mark()))
         .map(|p| p.pid)
         .collect();
     descendants(table, &roots)
@@ -666,6 +688,7 @@ fn build(root: &Path, cargo: &Path, stop: &AtomicBool) -> Built {
     let mut cmd = Command::new(cargo);
     cmd.args(build_args(root))
         .current_dir(root)
+        .env(MARK, build_mark())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -718,10 +741,291 @@ fn build(root: &Path, cargo: &Path, stop: &AtomicBool) -> Built {
 /// Start the program as its own process group (so Ctrl-C reaches `bonsai
 /// dev`, which stops it in order, and everything it starts can be stopped
 /// with it).
-fn start(program: &Path, root: &Path, args: &[String]) -> std::io::Result<Group> {
-    let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(root);
-    Group::spawn(&mut cmd)
+/// With `isolate` (this `bonsai`), it runs under `__dev-run`, in a PID
+/// namespace of its own (`isolated`).
+fn start(
+    program: &Path,
+    root: &Path,
+    args: &[String],
+    isolate: Option<&Path>,
+) -> std::io::Result<Group> {
+    let mut cmd = match isolate {
+        Some(bonsai) => {
+            let mut cmd = Command::new(bonsai);
+            cmd.arg("__dev-run")
+                .arg(std::process::id().to_string())
+                .arg(program);
+            cmd
+        }
+        None => Command::new(program),
+    };
+    cmd.args(args).current_dir(root).env(MARK, mark());
+    let mut group = Group::spawn(&mut cmd)?;
+    if isolate.is_some() {
+        // The program is the wrapper's grandchild (under the namespace's
+        // init): its pid is the one to show.
+        let until = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < until {
+            let table = procs();
+            let init = table.iter().find(|p| p.ppid == group.child.id());
+            if let Some(program) = init.and_then(|i| table.iter().find(|p| p.ppid == i.pid)) {
+                group.shown = program.pid;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    Ok(group)
+}
+
+// ---------------------------------------------------------------------------
+// The program in a PID namespace of its own
+// ---------------------------------------------------------------------------
+
+/// Set when the wrapper or the namespace's init is to end what's inside.
+static ENDING: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_ending(_: libc::c_int) {
+    ENDING.store(true, Ordering::SeqCst);
+}
+
+/// Into a new PID namespace (and, unless root, a user namespace mapping
+/// this user and group to themselves): the next child is its init.
+fn unshare_pid() -> std::io::Result<()> {
+    // SAFETY: geteuid/getegid have no preconditions.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    let flags = if uid == 0 {
+        libc::CLONE_NEWPID
+    } else {
+        libc::CLONE_NEWUSER | libc::CLONE_NEWPID
+    };
+    // SAFETY: unshare on this process, single-threaded so far.
+    if unsafe { libc::unshare(flags) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if uid != 0 {
+        std::fs::write("/proc/self/setgroups", "deny")?;
+        std::fs::write("/proc/self/uid_map", format!("{uid} {uid} 1"))?;
+        std::fs::write("/proc/self/gid_map", format!("{gid} {gid} 1"))?;
+    }
+    Ok(())
+}
+
+/// Signals back to their defaults, as the program expects them.
+fn default_signals() {
+    // SAFETY: setting dispositions and the mask of this process.
+    unsafe {
+        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGUSR1] {
+            libc::signal(sig, libc::SIG_DFL);
+        }
+        let mut none: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
+    }
+}
+
+/// End as `status` (a wait status) did: the same code, or the same signal.
+fn exit_like(status: i32) -> ! {
+    if libc::WIFSIGNALED(status) {
+        let sig = libc::WTERMSIG(status);
+        default_signals();
+        // SAFETY: re-raising the signal the program ended with.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+        std::process::exit(128 + sig);
+    }
+    std::process::exit(libc::WEXITSTATUS(status));
+}
+
+/// `bonsai __dev-run <dev's pid> <program> [args]`: run the program in a PID
+/// namespace of its own, so nothing it starts can outlive it, whatever
+/// becomes of `bonsai dev`. When the namespace's init ends, the kernel
+/// SIGKILLs everything inside: setsid, double forks and a cleared
+/// environment don't get out.
+///
+/// Three processes: this one (the wrapper, the group leader `bonsai dev`
+/// holds), the namespace's init, and the program. The wrapper ignores
+/// SIGTERM/SIGINT/SIGHUP (they're for the program) and exits as the program
+/// did, once init has. Init ignores them too (as a namespace's init does),
+/// reaps everything, and when the program ends, or the wrapper says to
+/// (SIGUSR1: `bonsai dev` died), sends everything inside SIGTERM, waits
+/// `STOP_WAIT` and exits. If the wrapper is SIGKILLed, init gets SIGKILL
+/// too (`PR_SET_PDEATHSIG`); if init is, everything inside goes with it.
+///
+/// `bonsai __dev-run --probe` only checks the namespace can be made.
+pub fn isolated(args: &[&str]) -> ! {
+    if args.first() == Some(&"--probe") {
+        probe();
+    }
+    let [dev, program, rest @ ..] = args else {
+        eprintln!("usage: bonsai __dev-run <pid> <program> [args]");
+        std::process::exit(2);
+    };
+    let dev: i32 = dev.parse().unwrap_or(0);
+    // SAFETY: dispositions of this process; the handler only stores to an
+    // atomic; prctl and getppid have no preconditions.
+    unsafe {
+        libc::signal(libc::SIGUSR1, on_ending as *const () as libc::sighandler_t);
+        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            libc::signal(sig, libc::SIG_IGN);
+        }
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGUSR1);
+        if libc::getppid() != dev {
+            std::process::exit(1); // `bonsai dev` is gone already
+        }
+    }
+    if let Err(e) = unshare_pid() {
+        eprintln!("bonsai dev: running the tree without a PID namespace: {e}");
+        default_signals();
+        // SAFETY: prctl on this process.
+        unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+        use std::os::unix::process::CommandExt;
+        let e = Command::new(program).args(rest).exec();
+        eprintln!("bonsai dev: couldn't start {program}: {e}");
+        std::process::exit(127);
+    }
+    // `alive`: the wrapper holds its write end, so init sees it go.
+    // `status`: init writes the program's wait status to the wrapper.
+    let (mut alive, mut status) = ([0; 2], [0; 2]);
+    // SAFETY: pipe2 into arrays of two descriptors.
+    unsafe {
+        if libc::pipe2(alive.as_mut_ptr(), libc::O_CLOEXEC) != 0
+            || libc::pipe2(status.as_mut_ptr(), libc::O_CLOEXEC) != 0
+        {
+            eprintln!("bonsai dev: {}", std::io::Error::last_os_error());
+            std::process::exit(127);
+        }
+    }
+    // SAFETY: this process is single-threaded: the child may do anything.
+    let init = unsafe { libc::fork() };
+    if init < 0 {
+        eprintln!("bonsai dev: {}", std::io::Error::last_os_error());
+        std::process::exit(127);
+    }
+    if init == 0 {
+        // SAFETY: closing the ends this side doesn't use.
+        unsafe {
+            libc::close(alive[1]);
+            libc::close(status[0]);
+        }
+        namespace_init(program, rest, alive[0], status[1]);
+    }
+    // SAFETY: closing the ends this side doesn't use.
+    unsafe {
+        libc::close(alive[0]);
+        libc::close(status[1]);
+    }
+    let mut init_status = 0;
+    loop {
+        if ENDING.swap(false, Ordering::SeqCst) {
+            // SAFETY: init is our child, not yet reaped.
+            unsafe { libc::kill(init, libc::SIGUSR1) };
+        }
+        // SAFETY: waitpid on our own child.
+        if unsafe { libc::waitpid(init, &mut init_status, libc::WNOHANG) } == init {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut buf = [0u8; 4];
+    // SAFETY: reading into a buffer of 4 bytes.
+    let n = unsafe { libc::read(status[0], buf.as_mut_ptr().cast(), 4) };
+    exit_like(if n == 4 {
+        i32::from_ne_bytes(buf)
+    } else {
+        init_status
+    });
+}
+
+/// The namespace's init (pid 1 inside): start the program, reap everything,
+/// and end it all when the program ends or the wrapper says.
+fn namespace_init(program: &str, args: &[&str], alive: i32, status: i32) -> ! {
+    // SAFETY: prctl and poll on this process's own descriptor.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+        // The wrapper already gone (before the prctl took): end now.
+        let mut pfd = libc::pollfd {
+            fd: alive,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if libc::poll(&mut pfd, 1, 0) > 0 {
+            libc::_exit(1);
+        }
+    }
+    // SAFETY: still single-threaded.
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        use std::os::unix::process::CommandExt;
+        default_signals();
+        let e = Command::new(program).args(args).exec();
+        eprintln!("bonsai dev: couldn't start {program}: {e}");
+        // SAFETY: leaving the forked child.
+        unsafe { libc::_exit(127) };
+    }
+    let mut program_status: Option<i32> = if child < 0 {
+        eprintln!("bonsai dev: {}", std::io::Error::last_os_error());
+        Some(127 << 8)
+    } else {
+        None
+    };
+    let mut deadline: Option<Instant> = None;
+    loop {
+        let gone = loop {
+            let mut st = 0;
+            // SAFETY: reaping our children (everything inside comes to us).
+            let r = unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) };
+            if r > 0 {
+                if r == child {
+                    program_status = Some(st);
+                }
+                continue;
+            }
+            break r < 0; // ECHILD: nothing left
+        };
+        if gone && program_status.is_some() {
+            break;
+        }
+        if deadline.is_none() && (program_status.is_some() || ENDING.load(Ordering::SeqCst)) {
+            // SAFETY: as pid 1, -1 is everything in this namespace but us.
+            unsafe { libc::kill(-1, libc::SIGTERM) };
+            deadline = Some(Instant::now() + STOP_WAIT);
+        }
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let code = program_status.unwrap_or(libc::SIGKILL).to_ne_bytes();
+    // SAFETY: writing 4 bytes to our pipe, then leaving: the kernel ends
+    // whatever's still inside.
+    unsafe {
+        libc::write(status, code.as_ptr().cast(), 4);
+        libc::_exit(0);
+    }
+}
+
+/// Exit 0 if a PID namespace can be made here, else 1 with why on stderr.
+fn probe() -> ! {
+    if let Err(e) = unshare_pid() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+    // SAFETY: single-threaded; the child only exits.
+    let child = unsafe { libc::fork() };
+    if child == 0 {
+        // SAFETY: getpid has no preconditions; leaving the forked child.
+        unsafe { libc::_exit(if libc::getpid() == 1 { 0 } else { 1 }) };
+    }
+    let mut st = 0;
+    // SAFETY: waitpid on our own child.
+    if child < 0 || unsafe { libc::waitpid(child, &mut st, 0) } != child || st != 0 {
+        eprintln!("the namespace's first process wasn't its init");
+        std::process::exit(1);
+    }
+    std::process::exit(0);
 }
 
 /// Wait for the sources to change from `base` and then settle; the new
@@ -874,7 +1178,7 @@ pub fn run(root: &Path, opts: &Options, stop: &AtomicBool, note: &mut dyn FnMut(
                 note(Note::Killed(pid));
             }
         }
-        match start(&program, root, &opts.args) {
+        match start(&program, root, &opts.args, opts.isolate.as_deref()) {
             Ok(child) => {
                 note(Note::Started(child.id()));
                 running = Some(child);
@@ -901,6 +1205,30 @@ extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, Ordering::SeqCst);
 }
 
+/// This `bonsai`, if the program can run in a PID namespace of its own
+/// (`__dev-run --probe` says so), unless `BONSAI_DEV_NO_NAMESPACE` is set.
+/// When it can't, says why, once.
+fn isolation() -> Option<PathBuf> {
+    if std::env::var_os("BONSAI_DEV_NO_NAMESPACE").is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    let bonsai = std::env::current_exe().ok()?;
+    let probe = Command::new(&bonsai)
+        .args(["__dev-run", "--probe"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .output();
+    let why = match probe {
+        Ok(out) if out.status.success() => return Some(bonsai),
+        Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        Err(e) => e.to_string(),
+    };
+    eprintln!(
+        "bonsai dev: no PID namespace here ({why}); a helper process stops what the tree started if bonsai dev is killed"
+    );
+    None
+}
+
 /// `bonsai dev [--sync] [-- <args for the tree>]`.
 pub fn dev(args: &[String]) -> ! {
     let mut opts = Options::default();
@@ -924,6 +1252,8 @@ pub fn dev(args: &[String]) -> ! {
     // parent died) come to `bonsai dev`, so they go with the program.
     // SAFETY: prctl on this process.
     opts.adopt = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) } == 0;
+    // The program in a PID namespace: nothing it starts outlives it.
+    opts.isolate = isolation();
     // If `bonsai dev` is killed outright, the guardian stops what it ran.
     if let Err(e) = start_guardian() {
         eprintln!(

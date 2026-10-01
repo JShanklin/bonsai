@@ -339,18 +339,32 @@ tree), `src/graph.rs` (pure: `bonsai.toml` in, generated code out),
   `adopted` (any child it didn't start itself, `STARTED`), reaped by
   `reap_adopted`; each signalled by `signal_exactly`: pidfd_open, start
   time rechecked from /proc, pidfd_send_signal) and starts the new one as a `Group` (its
-  own process group, `PR_SET_PDEATHSIG` on Linux, and `MARK`
-  (`BONSAI_DEV_RUN=<dev pid>:<start>`) in its environment). If `dev` is
-  SIGKILLed, the guardian (`bonsai __dev-guardian <dev pid>`, its own group,
-  started by `dev()`, told the leaders over a pipe by `watch`, dismissed with
-  `bye`) sees the pipe close and stops what `guarded` found at its last look
-  (every 100 ms) plus what's `marked` now: SIGTERM, SIGKILL after
-  `STOP_WAIT`, each by `signal_exactly`. A program that exits
+  own process group, `PR_SET_PDEATHSIG`, and `MARK`
+  (`BONSAI_DEV_RUN=<dev pid>:<start>`) in its environment; a build gets
+  `build_mark` (`…:build`), whose orphans (sccache's server) are never
+  adopted or stopped). Where `isolation` finds `bonsai __dev-run --probe`
+  succeeds (not with `BONSAI_DEV_NO_NAMESPACE`), `Options::isolate` runs
+  the program under `bonsai __dev-run <dev pid> <program>` (`isolated`): the
+  wrapper (the group leader; ignores TERM/INT/HUP; `PR_SET_PDEATHSIG`
+  SIGUSR1 → tells init) unshares a PID namespace (plus a user namespace
+  mapping itself unless root, `unshare_pid`) and forks its init
+  (`namespace_init`: pdeathsig SIGKILL, reaps all, starts the program;
+  when it ends or on SIGUSR1, `kill(-1, SIGTERM)`, `STOP_WAIT`, exit, so
+  the kernel kills the rest), then exits as the program did (`exit_like`,
+  the status over a pipe). `Note::Started` shows the program's own pid
+  (`Group::shown`); the runtime's `record::pid` reads /proc/self so run
+  logs do too. The guardian (`bonsai __dev-guardian <dev pid>`, own
+  group, told the leaders over a pipe by `watch`, dismissed with `bye`)
+  runs either way: if `dev` is SIGKILLed it stops what `guarded` found at
+  its last look (every 100 ms) plus what's `marked` now. A program that exits
   by itself has its group's leftovers stopped the same way before
   `Exited`. A failed build keeps the old one; a save
   during a build rebuilds before restarting. SIGINT/SIGTERM set `STOP`:
   the program gets SIGINT, then the loop ends. `run` reports `Note`s; the
   ignored `dev_loop_end_to_end` test drives it on `target/dev-loop/tree`.
+  `tests/dev_processes.rs` runs the real binary with a fake cargo and a
+  program whose children escape (setsid, double fork, `env -i`), with and
+  without a namespace, including SIGKILLing `dev` (and its helpers).
   The CLI depends on `libc` for this (signals, prctl, kill).
 - **Graph commands** (`src/tree.rs`): `branch add` writes the scaffold
   (`templates/_branch/branch.rs`, `{{branch_name}}`/`{{BranchName}}` by plain

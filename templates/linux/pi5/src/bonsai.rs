@@ -1058,7 +1058,7 @@ pub mod record {
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION"),
                 host.trim(),
-                std::process::id(),
+                pid(),
                 offset_text(at.offset)
             );
             if let Some(run) = unfinished {
@@ -1353,6 +1353,16 @@ pub mod record {
         }
     }
 
+    /// This process's id as the computer sees it: /proc names it even inside
+    /// a PID namespace (`bonsai dev` runs the tree in one), where
+    /// `std::process::id()` is the namespace's own (2).
+    fn pid() -> u32 {
+        std::fs::read_link("/proc/self")
+            .ok()
+            .and_then(|p| p.to_str()?.parse().ok())
+            .unwrap_or_else(std::process::id)
+    }
+
     /// Make this run's folder, locked before it has a run's name: it's made
     /// as `.new-<pid>-<n>`, its `.running` lock taken, and only then renamed
     /// to `2026-09-30_14-00-05` (or `…-2` when that's taken), never over
@@ -1363,7 +1373,7 @@ pub mod record {
         std::fs::create_dir_all(dir)?;
         let mut n = 0;
         let staging = loop {
-            let staging = dir.join(format!("{NEW}{}-{n}", std::process::id()));
+            let staging = dir.join(format!("{NEW}{}-{n}", pid()));
             match std::fs::create_dir(&staging) {
                 Ok(()) => break staging,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,

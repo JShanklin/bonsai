@@ -64,6 +64,7 @@ in the `mod tests` at the bottom of the branch's file. The watchdog's, for
 the `Reading` it receives:
 
 ```rust
+    // bonsai:test on_reading begin 1107f85f68192224
     #[test]
     fn on_reading() {
         let mut branch = Watchdog::setup();
@@ -77,7 +78,11 @@ the `Reading` it receives:
         // For example: assert!(matches!(out.sent(), [Msg::..]));
         assert!(out.sent().is_empty(), "it sends {:?}", out.sent());
     }
+    // bonsai:test on_reading end
 ```
+
+The two `// bonsai:test` lines mark it as bonsai's (the number is how it
+was written). Change what's between them as you like.
 
 It starts every field at zero and checks the branch sends nothing, which
 was true when bonsai wrote it. Run the tests on your computer (plain `cargo
@@ -148,8 +153,10 @@ for several ticks:
     }
 ```
 
-Keep the names: if you `unlink` an input later, bonsai takes its arm and
-its `on_…` test out together (and says so when you'd changed them). The
+If you `unlink` an input later, bonsai takes its `on_…` test out with the
+arm, but only a test still as it wrote it: one you've changed stays, and
+bonsai says what to update (`note: kept your test on_reading … update it or
+delete it`). Nothing else named `on_reading` is ever touched. The
 display's two tests still pass as written: it logs, and sends nothing.
 
 ```sh

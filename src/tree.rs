@@ -529,7 +529,7 @@ fn reconcile_arms(before: &Config, after: &Config) -> io::Result<()> {
         let new = graph::input_variants(after, &b.name);
         for v in old.iter().filter(|v| !new.contains(v)) {
             remove_arm(&b.name, v)?;
-            remove_test(&b.name, v, &input_test(before, &messages, &b.name, v))?;
+            remove_test(&b.name, v)?;
         }
         for v in new.iter().filter(|v| !old.contains(v)) {
             add_arm(&b.name, v)?;
@@ -689,94 +689,162 @@ fn message_value(messages: &str, name: &str) -> Option<String> {
     })
 }
 
-/// Add `test` above `branch`'s input-test marker, unless it has one by that
-/// name already. A branch without the marker (from before branches had
-/// tests) is left alone.
+/// How a generated test's block starts and ends in a branch's `mod tests`:
+/// `// bonsai:test on_tick begin <hash>` … `// bonsai:test on_tick end`. The
+/// hash is of the test as bonsai wrote it, so an edited one is known.
+const TEST_MARK: &str = "// bonsai:test ";
+
+/// FNV-1a of `text`'s lines, trimmed (indentation doesn't count).
+fn test_hash(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for line in text.lines().map(str::trim) {
+        for b in line.bytes().chain(std::iter::once(b'\n')) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{h:016x}")
+}
+
+/// The lines of `src`'s `#[cfg(test)] mod tests { .. }`: the index of its
+/// first and last line.
+fn tests_module(lines: &[&str]) -> Option<(usize, usize)> {
+    let start = lines.iter().enumerate().position(|(i, l)| {
+        l.trim() == "mod tests {" && i > 0 && lines[i - 1].trim() == "#[cfg(test)]"
+    })?;
+    let mut depth = 0;
+    for (i, l) in lines.iter().enumerate().skip(start) {
+        depth += crate::bracket_depth(l);
+        if depth <= 0 {
+            return Some((start, i));
+        }
+    }
+    None
+}
+
+/// `src` with the generated `test` (an `input_test`) added above the
+/// input-test marker in its `mod tests`, between ownership markers; None
+/// when there's nowhere to put it (no such module or marker: a branch from
+/// before branches had tests) or the module already has a test by its name.
+fn with_test(src: &str, test: &str) -> Option<String> {
+    let name = test.lines().find_map(|l| l.strip_prefix("fn "))?;
+    let name = name.split('(').next()?;
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    let (start, end) = tests_module(&lines)?;
+    let module = &lines[start..=end];
+    let taken = module.iter().any(|l| {
+        let l = l.trim();
+        l.starts_with(&format!("fn {name}(")) || l.starts_with(&format!("{TEST_MARK}{name} begin"))
+    });
+    if taken {
+        return None;
+    }
+    let at = start + module.iter().position(|l| l.trim() == INPUT_TEST)?;
+    let indent: String = lines[at].chars().take_while(|c| *c == ' ').collect();
+    let mut block = format!("{indent}{TEST_MARK}{name} begin {}\n", test_hash(test));
+    for l in test.lines() {
+        block += &if l.is_empty() {
+            "\n".to_string()
+        } else {
+            format!("{indent}{l}\n")
+        };
+    }
+    block += &format!("{indent}{TEST_MARK}{name} end\n\n");
+    Some(lines[..at].concat() + &block + &lines[at..].concat())
+}
+
+/// What became of a generated test whose input went.
+#[derive(Debug, PartialEq)]
+enum TestRemoval {
+    /// Taken out: `src` without it.
+    Removed(String),
+    /// Kept: it's been changed since bonsai wrote it.
+    KeptChanged,
+    /// Kept: a test by that name with no markers (from before bonsai marked
+    /// its tests, or written by hand) still uses the input.
+    KeptUnmarked,
+    /// Nothing to do.
+    None,
+}
+
+/// Take the generated test for `variant` out of `src`'s `mod tests`: only a
+/// marked block, and only as bonsai wrote it. Anything else by that name
+/// stays (a helper elsewhere, a test in another module, an edited test).
+fn without_test(src: &str, variant: &str) -> TestRemoval {
+    let name = format!("on_{}", snake(variant));
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    let Some((start, end)) = tests_module(&lines) else {
+        return TestRemoval::None;
+    };
+    let begin = format!("{TEST_MARK}{name} begin ");
+    let finish = format!("{TEST_MARK}{name} end");
+    let Some(b) = (start..=end).find(|&i| lines[i].trim().starts_with(&begin)) else {
+        // Unmarked: keep it, but say so if it uses the input that's gone.
+        let uses = lines[start..=end]
+            .iter()
+            .any(|l| l.trim().starts_with(&format!("fn {name}(")))
+            && lines[start..=end]
+                .iter()
+                .any(|l| l.contains(&format!("Input::{variant}")));
+        return if uses {
+            TestRemoval::KeptUnmarked
+        } else {
+            TestRemoval::None
+        };
+    };
+    let Some(e) = (b + 1..=end).find(|&i| lines[i].trim() == finish) else {
+        return TestRemoval::KeptChanged; // its end marker is gone: not as written
+    };
+    let hash = lines[b].trim()[begin.len()..].trim();
+    if test_hash(&lines[b + 1..e].concat()) != hash {
+        return TestRemoval::KeptChanged;
+    }
+    // The blank line `with_test` put after it goes too.
+    let mut last = e;
+    if last + 1 < lines.len() && lines[last + 1].trim().is_empty() {
+        last += 1;
+    }
+    TestRemoval::Removed(lines[..b].concat() + &lines[last + 1..].concat())
+}
+
+/// Add `test` to `branch`'s tests (see `with_test`).
 fn add_test(branch: &str, test: &str) -> io::Result<()> {
     let path = branch_file(branch);
     let Ok(src) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    let Some(name) = test.lines().find_map(|l| l.strip_prefix("fn ")) else {
-        return Ok(());
-    };
-    if src
-        .lines()
-        .any(|l| l.trim().strip_prefix("fn ") == Some(name))
-    {
-        return Ok(());
+    match with_test(&src, test) {
+        Some(new) => std::fs::write(&path, new),
+        None => Ok(()),
     }
-    let Some(at) = src
-        .split_inclusive('\n')
-        .position(|l| l.trim() == INPUT_TEST)
-    else {
-        return Ok(());
-    };
-    let lines: Vec<&str> = src.split_inclusive('\n').collect();
-    let indent: String = lines[at].chars().take_while(|c| *c == ' ').collect();
-    let mut block: String = test
-        .lines()
-        .map(|l| {
-            if l.is_empty() {
-                "\n".to_string()
-            } else {
-                format!("{indent}{l}\n")
-            }
-        })
-        .collect();
-    block.push('\n');
-    let new = lines[..at].concat() + &block + &lines[at..].concat();
-    std::fs::write(&path, new)
 }
 
-/// Take `branch`'s test for an input out (attributes and all), saying so
-/// when it isn't the one `bonsai` wrote (`generated`): your changes go with
-/// it.
-fn remove_test(branch: &str, variant: &str, generated: &str) -> io::Result<()> {
+/// Take `branch`'s generated test for `variant` out (see `without_test`),
+/// or say why it stays and what to do about it.
+fn remove_test(branch: &str, variant: &str) -> io::Result<()> {
     let path = branch_file(branch);
     let Ok(src) = std::fs::read_to_string(&path) else {
         return Ok(());
     };
-    let head = format!("fn on_{}() {{", snake(variant));
-    let lines: Vec<&str> = src.split_inclusive('\n').collect();
-    let Some(at) = lines.iter().position(|l| l.trim() == head) else {
-        return Ok(());
-    };
-    let mut start = at;
-    while start > 0 && lines[start - 1].trim_start().starts_with("#[") {
-        start -= 1;
+    let name = format!("on_{}", snake(variant));
+    match without_test(&src, variant) {
+        TestRemoval::Removed(new) => std::fs::write(&path, new),
+        TestRemoval::KeptChanged => {
+            println!(
+                "note: kept your test `{name}` in {}: you changed it, and it uses `Input::{variant}`, which is gone now; update it or delete it (its `// bonsai:test {name}` lines too)",
+                path.display()
+            );
+            Ok(())
+        }
+        TestRemoval::KeptUnmarked => {
+            println!(
+                "note: kept the test `{name}` in {}: it uses `Input::{variant}`, which is gone now; update it or delete it",
+                path.display()
+            );
+            Ok(())
+        }
+        TestRemoval::None => Ok(()),
     }
-    let mut end = at;
-    let mut depth = crate::bracket_depth(lines[at]);
-    while depth > 0 && end + 1 < lines.len() {
-        end += 1;
-        depth += crate::bracket_depth(lines[end]);
-    }
-    let removed = lines[start..=end].concat();
-    // The blank line `add_test` put after it goes too.
-    if end + 1 < lines.len() && lines[end + 1].trim().is_empty() {
-        end += 1;
-    }
-    let new = lines[..start].concat() + &lines[end + 1..].concat();
-    std::fs::write(&path, new)?;
-    // Its example comment follows the branch's links, so it isn't compared.
-    let code = |s: &str| {
-        s.lines()
-            .map(str::trim)
-            .filter(|l| !l.starts_with("//"))
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
-    let ours = code(&removed) == code(generated);
-    if !ours {
-        println!(
-            "note: removed the test `on_{}` from {}, with your changes to it ({} lines)",
-            snake(variant),
-            path.display(),
-            removed.lines().count()
-        );
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,6 +1581,69 @@ pub fn with_macro_use(main_src: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A branch file as `branch add` writes it, plus `extra` after it.
+    fn branch_src(extra: &str) -> String {
+        BRANCH_TEMPLATE
+            .replace("{{branch_name}}", "sensor")
+            .replace("{{BranchName}}", "Sensor")
+            + extra
+    }
+
+    fn tick_test() -> String {
+        let cfg = graph::parse("[branch.sensor]\nrate = 1\n").unwrap();
+        input_test(&cfg, "", "sensor", "Tick")
+    }
+
+    #[test]
+    fn a_generated_test_comes_and_goes_whole_between_its_markers() {
+        let fresh = branch_src("");
+        let with = with_test(&fresh, &tick_test()).unwrap();
+        assert!(with.contains("    // bonsai:test on_tick begin "), "{with}");
+        assert!(
+            with.contains("    }\n    // bonsai:test on_tick end\n\n    // bonsai:input-test\n"),
+            "{with}"
+        );
+        // Added once: again is a no-op.
+        assert_eq!(with_test(&with, &tick_test()), None);
+        assert_eq!(without_test(&with, "Tick"), TestRemoval::Removed(fresh));
+    }
+
+    #[test]
+    fn a_helper_or_another_modules_test_by_the_same_name_is_left_alone() {
+        let extra = "\nfn on_tick() {}\n\n#[cfg(test)]\nmod more {\n    #[test]\n    fn on_tick() {\n        let _ = super::Input::Tick;\n    }\n}\n";
+        let src = branch_src(extra);
+        let with = with_test(&src, &tick_test()).unwrap();
+        let TestRemoval::Removed(back) = without_test(&with, "Tick") else {
+            panic!("the generated test wasn't removed");
+        };
+        assert_eq!(back, src, "the helper or the other module's test changed");
+        // Without a generated one, nothing by that name outside `mod tests` is touched.
+        assert_eq!(without_test(&src, "Tick"), TestRemoval::None);
+    }
+
+    #[test]
+    fn an_edited_or_unmarked_test_is_kept() {
+        let with = with_test(&branch_src(""), &tick_test()).unwrap();
+        let edited = with.replace(
+            "assert!(out.sent().is_empty(), \"it sends {:?}\", out.sent());",
+            "assert_eq!(out.sent().len(), 1);",
+        );
+        assert_ne!(edited, with);
+        assert_eq!(without_test(&edited, "Tick"), TestRemoval::KeptChanged);
+        // Its end marker gone: not as written either.
+        let cut = with.replace("    // bonsai:test on_tick end\n", "");
+        assert_eq!(without_test(&cut, "Tick"), TestRemoval::KeptChanged);
+        // From before tests were marked: kept, and said, while it uses the input.
+        let unmarked: String = with
+            .lines()
+            .filter(|l| !l.trim().starts_with(TEST_MARK))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(without_test(&unmarked, "Tick"), TestRemoval::KeptUnmarked);
+        // And never added a second time beside it.
+        assert_eq!(with_test(&unmarked, &tick_test()), None);
+    }
 
     #[test]
     fn an_input_test_starts_from_each_fields_obvious_value() {

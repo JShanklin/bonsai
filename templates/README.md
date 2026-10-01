@@ -95,9 +95,11 @@ mistaken for it), keep them intact:
 - `// bonsai:message` in `src/messages.rs`: `bonsai message add` puts a struct
   above it.
 - `// bonsai:input-test` in each branch's `mod tests`: `bonsai link` and
-  `bonsai rate` add a test for each new input above it (`on_<input>`), and
-  `unlink`/`rate … off` take it out. Branches from before it have none, and
-  get no tests added.
+  `bonsai rate` add a test for each new input above it (`on_<input>`),
+  between `// bonsai:test on_<input> begin <hash>` and `… end` lines, and
+  `unlink`/`rate … off` take that block out only while its hash still
+  matches (an edited test stays, with a note). Branches from before the
+  marker have none, and get no tests added.
 
 ## Generated files
 

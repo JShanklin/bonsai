@@ -584,32 +584,6 @@ check, not a hardware test).
   `embedded_template_includes_all_files` test guards this — extend it when a
   template gains a new required file.
 
-## Virtual boards (`containers/`)
-
-Not part of the CLI: shell + Podman Quadlet files that run a virtual Pi as a
-rootful container (`sudo containers/install.sh <board> [remove]`). One shared
-`Containerfile`, `board.container` template, and two shared networks
-(`bonsai-host` bridge 10.89.0.0/24 for the host, `bonsai-lan` for the LAN:
-macvlan on Ethernet, ipvlan on Wi-Fi, since access points drop frames from other
-MACs; `install.sh` fills in `@DRIVER@`, falls back to macvlan when netavark is
-older than 1.5, and recreates the network, restarting its boards, when its
-driver/parent/subnet changed). On Wi-Fi, incoming multicast often never
-reaches an ipvlan board (the driver drops it), so `VIRTUAL_PI_RELAY="group:port
-…"` makes one `bonsai-relay@<board>-<n>` host service each (socat joins the
-group on the Wi-Fi interface and sends every datagram to the board's host
-link; settings in `/etc/bonsai/relay-*.env`, kept across installs when the
-variable is unset, removed by an empty value, an Ethernet install or `remove`); per-board CPU/memory/cores/addresses in `containers/boards/<board>.conf`,
-named after the Pi boards in `BOARDS`. `install.sh` also adds the qemu `C`
-binfmt flag (sudo inside), builds with `--network host`, and writes the ssh
-config + known_hosts entry. Boards boot systemd (`CMD /sbin/init`): the
-Containerfile copies `containers/rootfs/` over `/` and enables every regular
-unit file in `rootfs/etc/systemd/system/` (links are skipped: Debian's
-`sshd.service` alias), plus ssh, so user services are unit files dropped there;
-`example.service` + `/etc/example.conf` show the pattern. Drop-ins there clear
-`ImportCredential=` on systemd's tmpfiles/sysusers units, whose credential
-mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
-(Debian links those into `/usr`). See `containers/README.md`.
-
 ## Docs
 
 - `README.md` explains what bonsai is. How-to material lives in `tutorial/`:
@@ -619,8 +593,7 @@ mounts fail under qemu-user. rootfs must never hold a real `lib/` or `bin/`
   fields, a `limit` setting, a UDP `uplink` edge with a text protocol, tests,
   logs and `bonsai top`) and `guides/` (short self-contained recipes: edges
   over UDP/TCP/serial and custom edges, units, binary messages, testing, run
-  logs, deploy, build tools, a virtual Pi
-  (arm64 Podman container, qemu, macvlan/ipvlan), CI, troubleshooting).
+  logs, deploy, build tools, CI, troubleshooting).
 - Build knowledge up in order: no syntax appears in a chapter before
   `02-rust-essentials.md` (or an earlier chapter) has introduced it. Scaffold
   comments are one short line saying what to change and why; placeholders

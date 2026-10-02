@@ -1775,14 +1775,14 @@ mod retarget_tests {
     fn config_takes_the_new_target_and_keeps_env() {
         let tree = ZERO_W_CONFIG.replace(
             "BONSAI_PI = \"pi@raspberrypi.local\"",
-            "BONSAI_PI = \"virtual-zero-w\"\nMY_SETTING = \"1\"",
+            "BONSAI_PI = \"pi@zero-w.local\"\nMY_SETTING = \"1\"",
         );
         let moved = retargeted_config(&tree, PI5_CONFIG).unwrap();
         assert_eq!(
             parse_target(&moved).as_deref(),
             Some("aarch64-unknown-linux-gnu")
         );
-        assert!(moved.contains("BONSAI_PI = \"virtual-zero-w\""));
+        assert!(moved.contains("BONSAI_PI = \"pi@zero-w.local\""));
         assert!(moved.contains("MY_SETTING = \"1\""));
         assert!(!moved.contains("armv6l"));
         // An untouched tree lands exactly on the template.

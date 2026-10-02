@@ -39,7 +39,6 @@ to paste, and shows how to check it works.
 | [Run logs](guides/run-logs.md) | a folder per run: your `record!` events, panics, errors, START and END |
 | [Deploy](guides/deploy.md) | release builds, running on a Pi, as a service |
 | [Build tools](guides/build-tools.md) | sccache, mold, zigbuild and bacon: faster builds, and Pi builds with zig |
-| [Virtual Pi](guides/virtual-pi.md) | an emulated Pi with its own network address, deployed to like the real one |
 | [CI](guides/ci.md) | format, lint, test and build on every push |
 | [Troubleshooting](guides/troubleshooting.md) | common errors and warnings, and their fixes |
 

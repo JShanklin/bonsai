@@ -141,8 +141,6 @@ seen 2
   udp port 6969` on the Pi. If the packets never show up there, the network
   is dropping them: send unicast to the Pi's address instead, and bind
   `0.0.0.0` so it's heard on every interface.
-- **A virtual Pi** on Wi-Fi needs a relay for multicast; see the
-  [virtual Pi guide](virtual-pi.md).
 
 ## Test it without a network
 

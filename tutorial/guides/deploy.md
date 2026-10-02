@@ -36,9 +36,6 @@ zigbuild installs zig once and points the tree's linker at it, so
 `cargo build --release` and `cargo run --release` work unchanged, and build
 real ARMv6 code for the Zero W. See [Build tools](build-tools.md).
 
-**No Pi at hand?** A [virtual Pi](virtual-pi.md) runs the same ARM build on
-your computer, with its own address on your network.
-
 **Moving to another Pi** (a Zero W tree onto a Pi 5, say):
 
 ```sh

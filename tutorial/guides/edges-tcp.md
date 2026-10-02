@@ -70,7 +70,6 @@ Packet};`):
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {
     match input {
-        // `bonsai link <from> <Message> relay` adds an arm here
         Input::Hub(line) => {
             let text = String::from_utf8_lossy(&line.bytes);
             if let Some(from) = line.peer {

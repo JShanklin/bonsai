@@ -73,10 +73,9 @@ use std::net::SocketAddr;
 
 use crate::bonsai::Branch;
 use crate::links::tracker::{Input, Out};
-#[allow(unused_imports)] // the messages it sends, and units
+#[allow(unused_imports)]
 use crate::messages::*;
 
-/// What tracker keeps between inputs.
 pub struct Tracker {
     /// Packets heard from each sender.
     heard: HashMap<SocketAddr, u32>,
@@ -94,7 +93,6 @@ impl Branch for Tracker {
 
     fn process(&mut self, input: Input, out: &mut Out) {
         match input {
-            // `bonsai link <from> <Message> tracker` adds an arm here
             Input::Sa(packet) => {
                 if let Some(from) = packet.peer {
                     let count = self.heard.entry(from).or_insert(0);

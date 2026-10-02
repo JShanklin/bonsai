@@ -96,7 +96,6 @@ and fill in `process`:
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {
     match input {
-        // `bonsai link <from> <Message> watchdog` adds an arm here
         Input::Reading(reading) => {
             if reading.temp > self.limit {
                 out.send(Alarm { temp: reading.temp });

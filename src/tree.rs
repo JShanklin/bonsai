@@ -1151,7 +1151,7 @@ fn with_units_import(src: &str) -> Option<String> {
     let (head, rest) = src.split_at(docs);
     let blank = if head.is_empty() { "" } else { "\n" };
     Some(format!(
-        "{head}{blank}#[allow(unused_imports)] // units (`temp: Celsius`), here and in every branch\n{UNITS_IMPORT}\n{}",
+        "{head}{blank}#[allow(unused_imports)]\n{UNITS_IMPORT}\n{}",
         if rest.starts_with('\n') {
             rest.to_string()
         } else {
@@ -1786,7 +1786,7 @@ mod tests {
         let new = with_units_import(old).unwrap();
         assert_eq!(
             new,
-            "//! doc\n//! more\n\n#[allow(unused_imports)] // units (`temp: Celsius`), here and in every branch\n\
+            "//! doc\n//! more\n\n#[allow(unused_imports)]\n\
              pub use crate::bonsai::units::*;\n\n// bonsai:message\n"
         );
         assert_eq!(with_units_import(&new), None);

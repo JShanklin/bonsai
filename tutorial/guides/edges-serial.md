@@ -51,7 +51,6 @@ position ticks 0.5 times a second: `Input::Tick` in its process
 ```rust
 fn process(&mut self, input: Input, out: &mut Out) {
     match input {
-        // `bonsai link <from> <Message> position` adds an arm here
         Input::Gps(line) => {
             let text = String::from_utf8_lossy(&line.bytes);
             if text.starts_with("$GPGGA") {

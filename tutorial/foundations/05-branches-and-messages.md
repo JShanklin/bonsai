@@ -130,7 +130,6 @@ puts to work). The display's `process` now reads:
 fn process(&mut self, input: Input, out: &mut Out) {
     let _ = out; // delete once it sends
     match input {
-        // `bonsai link <from> <Message> display` adds an arm here
         Input::Reading(_reading) => {}
         Input::Alarm(_alarm) => {}
         // bonsai:input-arm
@@ -201,7 +200,6 @@ it gets 1.5 °C warmer, until it passes 35 °C and starts over. The `let _ =
 out;` line goes, since the sensor sends now:
 
 ```rust
-/// What sensor keeps between inputs.
 pub struct Sensor {
     temp: Celsius,
 }
@@ -210,19 +208,14 @@ impl Branch for Sensor {
     type Input = Input;
     type Out = Out;
 
-    /// Setup: the starting state. Runs again if `process` panics.
     fn setup() -> Self {
         Sensor {
             temp: Celsius(25.0),
         }
     }
 
-    /// Process: decide what to do with each input, and `out.send(..)` the
-    /// result. No I/O and no waiting, so the same inputs give the same outputs.
-    /// Log with info!/warn!/debug!: lines are tagged with this branch.
     fn process(&mut self, input: Input, out: &mut Out) {
         match input {
-            // `bonsai link <from> <Message> sensor` adds an arm here
             Input::Tick => {
                 // A pretend sensor: 1.5 °C warmer each time, then back to 25.
                 self.temp += Celsius(1.5);
@@ -260,7 +253,6 @@ impl Branch for Watchdog {
 
     fn process(&mut self, input: Input, out: &mut Out) {
         match input {
-            // `bonsai link <from> <Message> watchdog` adds an arm here
             Input::Reading(reading) => {
                 if reading.temp > self.limit {
                     out.send(Alarm { temp: reading.temp });
@@ -282,7 +274,6 @@ instead, with `info!` and `warn!`. Units print with their symbol:
 fn process(&mut self, input: Input, out: &mut Out) {
     let _ = out; // delete once it sends
     match input {
-        // `bonsai link <from> <Message> display` adds an arm here
         Input::Reading(reading) => {
             info!("{:.1}, {:.0} humidity", reading.temp, reading.humidity);
         }

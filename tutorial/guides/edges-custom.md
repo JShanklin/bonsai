@@ -96,7 +96,6 @@ pub struct Cputemp {
 }
 
 impl Cputemp {
-    /// Setup: open it. An `Err` is retried with backoff.
     pub async fn setup() -> io::Result<Self> {
         // Read it once now, so a missing file fails here, and is retried.
         read(PATH)?;
@@ -118,18 +117,15 @@ fn read(path: &str) -> io::Result<Celsius> {
 }
 
 impl Edge for Cputemp {
-    /// What it receives; the branches linked from it get it as input.
     type In = Celsius;
-    /// What branches send it with `out.to_cputemp(..)`: nothing.
     type Out = ();
 
-    /// The next thing it receives. Must be cancel-safe: keep partial data in self.
+    // Must be cancel-safe: keep partial data in self.
     async fn recv(&mut self) -> io::Result<Self::In> {
         self.every.tick().await;
         read(PATH)
     }
 
-    /// Execute: carry out one thing a branch sent. An `Err` restarts the edge.
     async fn execute(&mut self, _out: Self::Out) -> io::Result<()> {
         Ok(())
     }
